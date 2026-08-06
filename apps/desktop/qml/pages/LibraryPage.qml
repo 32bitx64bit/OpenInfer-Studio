@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
+import QtQuick.Window
 import ".."
 import "../components"
 import "../dialogs"
@@ -54,6 +55,15 @@ Item {
 
     signal openDetail(string modelId)
     signal browseModels()
+
+    function copyText(text) {
+        if (!text) return
+        copyArea.text = text
+        copyArea.selectAll()
+        copyArea.copy()
+        var win = page.Window.window
+        if (win && win.toast) win.toast("Copied API identifier", "success")
+    }
 
     function openLoad(modelId) {
         for (var i = 0; i < page.models.length; i++) {
@@ -314,6 +324,10 @@ Item {
                                         onTriggered: { page.selected = modelData; detailDrawer.open() }
                                     }
                                     MenuItem {
+                                        text: "Copy API identifier"
+                                        onTriggered: page.copyText(modelData.alias || modelData.id)
+                                    }
+                                    MenuItem {
                                         text: "Reveal files"
                                         onTriggered: Qt.openUrlExternally("file://" + modelData.primary_path.substring(0, modelData.primary_path.lastIndexOf("/")))
                                     }
@@ -442,6 +456,8 @@ Item {
         onConfirmed: page.api.del("/api/v1/models/" + page.selected.id + "?confirmed=1&delete_files=1",
             function() { page.reload() })
     }
+
+    TextEdit { id: copyArea; visible: false }
 
     Component.onCompleted: reload()
 }
