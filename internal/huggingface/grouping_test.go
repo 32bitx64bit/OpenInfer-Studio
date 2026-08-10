@@ -18,7 +18,7 @@ func TestQuantOf(t *testing.T) {
 		"Q2_K/amd.Instella-MoE-16B-A3B-Think.f16.gguf.Q2_K.gguf":     "Q2_K",
 		"Q8_0/amd.Instella-MoE-16B-A3B-Think.f16.gguf.Q8_0.gguf":     "Q8_0",
 		// Quant only in the parent folder.
-		"Q5_K_M/model.gguf": "Q5_K_M",
+		"Q5_K_M/model.gguf":   "Q5_K_M",
 		"IQ4_XS/weights.gguf": "IQ4_XS",
 	}
 	for in, want := range cases {

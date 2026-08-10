@@ -197,6 +197,68 @@ func looksLikeSpeculativeDraftRepo(lowerID string, tags []string) bool {
 	return false
 }
 
+// DetectEmbedding reports Hugging Face Discover signals for dedicated
+// embedding / reranker models. Returns "" | "embedding" | "reranker".
+// Local library scan remains authoritative after download.
+func DetectEmbedding(repoID, pipelineTag string, tags []string, filePaths []string) string {
+	lowerID := strings.ToLower(strings.TrimSpace(repoID))
+	lowerPipe := strings.ToLower(strings.TrimSpace(pipelineTag))
+	if looksLikeSpeculativeDraftRepo(lowerID, tags) {
+		return ""
+	}
+
+	rerank := false
+	embed := false
+
+	switch lowerPipe {
+	case "feature-extraction", "sentence-similarity":
+		embed = true
+	case "text-ranking", "text-classification":
+		// Only treat as reranker when name/tags also suggest it.
+	}
+
+	for _, t := range tags {
+		lt := strings.ToLower(strings.TrimSpace(t))
+		switch lt {
+		case "feature-extraction", "sentence-similarity", "embeddings", "embedding":
+			embed = true
+		case "reranker", "rerank", "text-ranking":
+			rerank = true
+		}
+	}
+
+	blob := lowerID
+	for _, p := range filePaths {
+		blob += " " + strings.ToLower(filepath.Base(p))
+	}
+	if strings.Contains(blob, "rerank") {
+		rerank = true
+	}
+	for _, h := range []string{
+		"embeddinggemma", "qwen3-embedding", "qwen2-embedding",
+		"nomic-embed", "snowflake-arctic-embed", "jina-embeddings",
+		"jina-embed", "mxbai-embed", "bge-", "e5-", "gte-",
+		"-embed-", "_embed_", "-embedding", "_embedding",
+	} {
+		if strings.Contains(blob, h) {
+			embed = true
+			break
+		}
+	}
+	// Conservative: bare "embed" token in repo name (not "embedding" already).
+	if !embed && (containsToken(lowerID, "embed") || containsToken(lowerID, "embedding")) {
+		embed = true
+	}
+
+	if rerank {
+		return "reranker"
+	}
+	if embed {
+		return "embedding"
+	}
+	return ""
+}
+
 // FileMTP classifies a single GGUF path for Discover grouping.
 // Returns "" | "mtp" | "mtp-draft".
 func FileMTP(path string) string {

@@ -63,6 +63,8 @@ var knownFlags = map[string]string{
 	"--spec-type":            "spec-type",
 	"--sleep-idle-seconds":   "sleep-idle-seconds",
 	"--embedding":            "embedding",
+	"--embeddings":           "embedding",
+	"--pooling":              "pooling",
 	"--reranking":            "reranking",
 	"--api-key":              "api-key",
 	"--host":                 "host",

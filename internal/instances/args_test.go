@@ -296,3 +296,43 @@ func TestBuildArgsExpertPerfFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildArgsEmbeddingAndPooling(t *testing.T) {
+	caps := append(testCaps(), "embedding", "pooling")
+	help := testHelp + "  --embedding\n  --pooling TYPE\n"
+	on := true
+	s := DefaultSettings()
+	s.Embedding = &on
+	s.Pooling = "cls"
+	br := BuildArgs(s, "/m.gguf", "", caps, help, "127.0.0.1", 1, "k")
+	joined := strings.Join(br.Args, " ")
+	if !strings.Contains(joined, "--embedding") {
+		t.Errorf("expected --embedding in %q", joined)
+	}
+	if !strings.Contains(joined, "--pooling cls") {
+		t.Errorf("expected --pooling cls in %q", joined)
+	}
+
+	// Capability gating: warn and skip when unsupported.
+	br2 := BuildArgs(s, "/m.gguf", "", testCaps(), testHelp, "127.0.0.1", 1, "k")
+	j2 := strings.Join(br2.Args, " ")
+	if strings.Contains(j2, "--embedding") || strings.Contains(j2, "--pooling") {
+		t.Errorf("unsupported flags must be omitted: %q", j2)
+	}
+	if len(br2.Warnings) == 0 {
+		t.Error("expected capability warnings")
+	}
+
+	off := false
+	s3 := DefaultSettings()
+	s3.Embedding = &off
+	s3.Pooling = "rank"
+	br3 := BuildArgs(s3, "/m.gguf", "", caps, help, "127.0.0.1", 1, "k")
+	j3 := strings.Join(br3.Args, " ")
+	if strings.Contains(j3, "--embedding") {
+		t.Errorf("embedding=false must not emit --embedding: %q", j3)
+	}
+	if !strings.Contains(j3, "--pooling rank") {
+		t.Errorf("expected --pooling rank in %q", j3)
+	}
+}

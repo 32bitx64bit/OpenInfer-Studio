@@ -265,6 +265,12 @@ func decodeSettings(w http.ResponseWriter, r *http.Request) (instances.LoadSetti
 		writeErr(w, 400, "invalid split_mode value", nil)
 		return s, false
 	}
+	switch strings.ToLower(strings.TrimSpace(s.Pooling)) {
+	case "", "none", "mean", "cls", "last", "rank":
+	default:
+		writeErr(w, 400, "invalid pooling value", nil)
+		return s, false
+	}
 	return s, true
 }
 
@@ -274,6 +280,7 @@ func (h *handlers) previewLoad(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.applyMultimodalDefaults(r.PathValue("id"), &s)
+	h.applyEmbedderDefaults(r.PathValue("id"), &s)
 	br, err := h.d.IM.Preview(r.PathValue("id"), s)
 	if err != nil {
 		writeErr(w, 400, "preview failed", err)
@@ -325,6 +332,7 @@ func (h *handlers) estimateLoad(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	h.applyEmbedderDefaults(r.PathValue("id"), &s)
 	m, err := h.d.Lib.Get(r.PathValue("id"))
 	if err != nil {
 		writeErr(w, 404, "model not found", err)
@@ -445,6 +453,7 @@ func (h *handlers) loadModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.applyMultimodalDefaults(r.PathValue("id"), &s)
+	h.applyEmbedderDefaults(r.PathValue("id"), &s)
 	inst, err := h.d.IM.Start(r.PathValue("id"), s)
 	if err != nil {
 		writeErr(w, 400, "load failed", err)
@@ -468,14 +477,44 @@ func (h *handlers) applyMultimodalDefaults(modelID string, s *instances.LoadSett
 		HasVision        bool `json:"has_vision"`
 		Multimodal       bool `json:"multimodal"`
 		SpeculativeDraft bool `json:"speculative_draft"`
+		IsEmbedding      bool `json:"is_embedding"`
 	}
 	_ = json.Unmarshal(m.Metadata, &meta)
-	if meta.SpeculativeDraft {
+	if meta.SpeculativeDraft || meta.IsEmbedding {
 		return
 	}
 	if m.ProjectorPath != "" || meta.HasAudio || meta.HasVision || meta.Multimodal {
 		t := true
 		s.Jinja = &t
+	}
+}
+
+// applyEmbedderDefaults turns on --embedding for detected embedders/rerankers
+// and prefills --pooling from GGUF metadata when the client left it unset.
+func (h *handlers) applyEmbedderDefaults(modelID string, s *instances.LoadSettings) {
+	m, err := h.d.Lib.Get(modelID)
+	if err != nil {
+		return
+	}
+	var meta struct {
+		IsEmbedding bool   `json:"is_embedding"`
+		IsReranker  bool   `json:"is_reranker"`
+		PoolingType string `json:"pooling_type"`
+	}
+	_ = json.Unmarshal(m.Metadata, &meta)
+	if !meta.IsEmbedding && !meta.IsReranker {
+		return
+	}
+	if s.Embedding == nil {
+		t := true
+		s.Embedding = &t
+	}
+	if strings.TrimSpace(s.Pooling) == "" {
+		if meta.IsReranker {
+			s.Pooling = "rank"
+		} else if p := strings.TrimSpace(meta.PoolingType); p != "" {
+			s.Pooling = p
+		}
 	}
 }
 
@@ -493,6 +532,8 @@ func (h *handlers) restartModel(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	h.applyMultimodalDefaults(r.PathValue("id"), &s)
+	h.applyEmbedderDefaults(r.PathValue("id"), &s)
 	inst, err := h.d.IM.Restart(r.PathValue("id"), s)
 	if err != nil {
 		writeErr(w, 400, "restart failed", err)

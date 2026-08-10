@@ -60,8 +60,12 @@ type Metadata struct {
 	SpeculativeDraft      bool           `json:"speculative_draft"` // sidecar draft, not a chat model
 	HasMTP                bool           `json:"has_mtp"`           // NextN / MTP heads present
 	NextnPredictLayers    uint32         `json:"nextn_predict_layers,omitempty"`
-	SpecType              SpecType       `json:"spec_type,omitempty"` // preferred --spec-type when used as draft
-	Raw                   map[string]any `json:"-"`                   // full kv for future use, not serialized to UI
+	SpecType              SpecType       `json:"spec_type,omitempty"`    // preferred --spec-type when used as draft
+	IsEmbedding           bool           `json:"is_embedding"`           // dedicated embedding / encoder model
+	IsReranker            bool           `json:"is_reranker"`            // embedding subtype for cross-encoder rank
+	PoolingType           PoolingType    `json:"pooling_type,omitempty"` // none|mean|cls|last|rank
+	EmbeddingLengthOut    uint32         `json:"embedding_length_out,omitempty"`
+	Raw                   map[string]any `json:"-"` // full kv for future use, not serialized to UI
 }
 
 // Errors that callers can classify.

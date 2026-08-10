@@ -81,6 +81,30 @@ func TestDetectMTP(t *testing.T) {
 	}
 }
 
+func TestDetectEmbedding(t *testing.T) {
+	cases := []struct {
+		id, pipe string
+		tags     []string
+		files    []string
+		want     string
+	}{
+		{"nomic-ai/nomic-embed-text-v1.5-GGUF", "feature-extraction",
+			[]string{"gguf", "feature-extraction"}, nil, "embedding"},
+		{"BAAI/bge-base-en-v1.5-gguf", "", []string{"gguf"}, nil, "embedding"},
+		{"someone/bge-reranker-v2-m3-GGUF", "", []string{"gguf", "reranker"}, nil, "reranker"},
+		{"google/embeddinggemma-300m-GGUF", "", []string{"gguf"},
+			[]string{"embeddinggemma-300m-Q8_0.gguf"}, "embedding"},
+		{"bartowski/Llama-3.2-3B-Instruct-GGUF", "", []string{"gguf"}, nil, ""},
+		{"williamliao/gemma-4-31B-it-EAGLE3-Speculator-GGUF", "",
+			[]string{"gguf", "speculative-decoding"}, []string{"eagle3.gguf"}, ""},
+	}
+	for _, tc := range cases {
+		if got := DetectEmbedding(tc.id, tc.pipe, tc.tags, tc.files); got != tc.want {
+			t.Errorf("DetectEmbedding(%q) = %q, want %q", tc.id, got, tc.want)
+		}
+	}
+}
+
 func TestModalityLabel(t *testing.T) {
 	if ModalityLabel([]string{"audio"}) != "audio" {
 		t.Fatal("audio")

@@ -53,6 +53,7 @@ Dialog {
         "rope_scaling": "", "alias": "", "raw_args": "",
         "jinja": false, "no_mmproj": false, "no_mmproj_offload": false,
         "draft_model": "", "draft_max": 0, "draft_min": 0, "spec_type": "",
+        "embedding": false, "pooling": "",
         "runtime_id": "",
         "save_on_success": true
     })
@@ -63,9 +64,14 @@ Dialog {
     property var draftCandidates: []
     property bool draftFiltered: true
     readonly property bool hasProjector: root.model && root.model.projector_path !== ""
+    readonly property bool isEmbedding: !!(root.model && root.model.metadata
+        && (root.model.metadata.is_embedding || root.model.metadata.is_reranker))
+    readonly property bool isReranker: !!(root.model && root.model.metadata
+        && root.model.metadata.is_reranker)
     readonly property bool speculativeEnabled: !!(root.settings.draft_model && root.settings.draft_model !== "")
             || !!(root.settings.spec_type && root.settings.spec_type !== "")
     readonly property bool hasMTP: {
+        if (root.isEmbedding) return false
         if (!root.model || !root.model.metadata) return false
         return !!root.model.metadata.has_mtp
     }
@@ -73,9 +79,15 @@ Dialog {
     function isMultimodal(m) {
         if (!m) return false
         var meta = m.metadata || {}
-        if (meta.speculative_draft) return false
+        if (meta.speculative_draft || meta.is_embedding || meta.is_reranker) return false
         if (m.projector_path && m.projector_path !== "") return true
         return !!(meta.multimodal || meta.has_audio || meta.has_vision)
+    }
+
+    function defaultPooling(meta) {
+        if (!meta) return ""
+        if (meta.is_reranker) return "rank"
+        return meta.pooling_type || ""
     }
 
     function openFor(m) {
@@ -84,8 +96,9 @@ Dialog {
         // Reassign the whole settings object so QML bindings refresh. Mutating
         // keys in place does not notify FormFields still bound to the previous model.
         var meta = m.metadata || {}
+        var embedder = !!(meta.is_embedding || meta.is_reranker)
         // Fused-trunk MTP: default on; presets (Last known good) can still override.
-        var defaultMTP = !!(meta.has_mtp && !meta.speculative_draft)
+        var defaultMTP = !!(meta.has_mtp && !meta.speculative_draft && !embedder)
         var next = {
             "context_length": 4096, "gpu_offload": "all", "gpu_layers": 0,
             "threads": 0, "flash_attention": "auto", "parallel": 0,
@@ -98,11 +111,14 @@ Dialog {
             "kv_offload": "", "op_offload": "", "kv_unified": "",
             "swa_full": false, "fit": "", "no_warmup": false,
             "rope_scaling": "", "alias": m.alias || "", "raw_args": "",
-            "jinja": root.isMultimodal(m), "no_mmproj": false, "no_mmproj_offload": false,
+            "jinja": embedder ? false : root.isMultimodal(m),
+            "no_mmproj": false, "no_mmproj_offload": false,
             "draft_model": "",
             "draft_max": defaultMTP ? 2 : 0,
             "draft_min": 0,
             "spec_type": defaultMTP ? "draft-mtp" : "",
+            "embedding": embedder,
+            "pooling": embedder ? root.defaultPooling(meta) : "",
             "runtime_id": m.pinned_runtime || "",
             "save_on_success": true
         }
@@ -140,6 +156,13 @@ Dialog {
             // Presets may omit jinja; keep multimodal default if still unset.
             if (root.settings.jinja === undefined || root.settings.jinja === null) {
                 root.setSetting("jinja", root.isMultimodal(m))
+            }
+            // Embedder defaults when presets omit embedding/pooling.
+            if (embedder) {
+                if (root.settings.embedding === undefined || root.settings.embedding === null)
+                    root.setSetting("embedding", true)
+                if (!root.settings.pooling)
+                    root.setSetting("pooling", root.defaultPooling(meta))
             }
             // Presets must not leave a stale alias from another model; always
             // prefer this model's library alias when the field is empty.
@@ -286,6 +309,22 @@ Dialog {
                         + "\nLoading will very likely fail. Re-download or pick another quantization."
                     color: AppTheme.danger
                     wrapMode: Text.WordWrap
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    visible: root.isEmbedding
+                    text: root.isReranker
+                          ? "This is a reranker model. It serves ranking via embeddings mode (pooling=rank), not Chat."
+                          : "This is an embedding model. It serves /v1/embeddings, not Chat."
+                    color: AppTheme.info
+                    wrapMode: Text.WordWrap
+                    padding: 8
+                    background: Rectangle {
+                        color: AppTheme.surface
+                        border.color: AppTheme.border
+                        radius: AppTheme.radius
+                    }
                 }
 
                 // Memory estimate
@@ -630,7 +669,48 @@ Dialog {
 
                 FormField {
                     Layout.fillWidth: true
-                    visible: root.hasMTP
+                    visible: root.isEmbedding
+                    label: "Embedding mode"
+                    hint: "Restricts llama-server to embeddings (Developer API /v1/embeddings). Leave on for dedicated embedders."
+                    argName: "--embedding"
+                    AppSwitch {
+                        checked: !!root.settings.embedding
+                        onToggled: root.setSetting("embedding", checked)
+                    }
+                }
+
+                FormField {
+                    Layout.fillWidth: true
+                    visible: root.isEmbedding
+                    label: "Pooling"
+                    hint: "Token aggregation for embeddings. Empty uses the model default. Rerankers typically use rank."
+                    argName: "--pooling"
+                    AppComboBox {
+                        model: [
+                            { "value": "", "label": "Model default" },
+                            { "value": "none", "label": "none" },
+                            { "value": "mean", "label": "mean" },
+                            { "value": "cls", "label": "cls" },
+                            { "value": "last", "label": "last" },
+                            { "value": "rank", "label": "rank" }
+                        ]
+                        textRole: "label"
+                        currentIndex: {
+                            var v = root.settings.pooling || ""
+                            var m = model
+                            for (var i = 0; i < m.length; i++)
+                                if (m[i].value === v) return i
+                            return 0
+                        }
+                        onActivated: function(i) {
+                            root.setSetting("pooling", model[i].value)
+                        }
+                    }
+                }
+
+                FormField {
+                    Layout.fillWidth: true
+                    visible: root.hasMTP && !root.isEmbedding
                     label: "Built-in MTP"
                     hint: "Enabled by default for this GGUF (NextN / Multi-Token Prediction heads). Uses --spec-type draft-mtp without a separate draft file. Turn off here if you prefer single-token decode."
                     argName: "--spec-type"
@@ -651,6 +731,7 @@ Dialog {
 
                 FormField {
                     Layout.fillWidth: true
+                    visible: !root.isEmbedding
                     label: "Speculative draft"
                     hint: root.draftFiltered
                           ? "Only detected speculative drafts (mtp- / gemma4-assistant / eagle3- / dflash- / dspark-). Turn off Settings → Filter draft model picker to choose any GGUF."
@@ -706,7 +787,7 @@ Dialog {
 
                 FormField {
                     Layout.fillWidth: true
-                    visible: root.speculativeEnabled
+                    visible: root.speculativeEnabled && !root.isEmbedding
                     label: "Draft tokens (max)"
                     hint: "Max tokens drafted per step. 0 = runtime default (typically 3–16)."
                     argName: "--spec-draft-n-max"
@@ -719,7 +800,7 @@ Dialog {
 
                 FormField {
                     Layout.fillWidth: true
-                    visible: root.speculativeEnabled
+                    visible: root.speculativeEnabled && !root.isEmbedding
                     label: "Spec type"
                     hint: "llama.cpp --spec-type. Auto-selected from mtp-/eagle3-/dflash-/dspark- sidecars and draft architecture."
                     argName: "--spec-type"
@@ -757,6 +838,7 @@ Dialog {
 
                 FormField {
                     Layout.fillWidth: true
+                    visible: !root.isEmbedding
                     label: "Multimodal projector"
                     hint: !root.hasProjector
                           ? "No projector paired with this model."
@@ -774,6 +856,7 @@ Dialog {
 
                 FormField {
                     Layout.fillWidth: true
+                    visible: !root.isEmbedding
                     label: "Jinja chat template"
                     hint: "Required by many multimodal (vision/audio) models. Enabled by default when a projector is paired."
                     argName: "--jinja"
@@ -785,7 +868,7 @@ Dialog {
 
                 FormField {
                     Layout.fillWidth: true
-                    visible: root.hasProjector
+                    visible: root.hasProjector && !root.isEmbedding
                     label: "Keep projector on CPU"
                     hint: "Disable GPU offload for the multimodal projector (saves VRAM)."
                     argName: "--no-mmproj-offload"
@@ -810,6 +893,7 @@ Dialog {
 
                     FormField {
                         Layout.fillWidth: true
+                        visible: !root.isEmbedding
                         label: "Skip multimodal projector"
                         hint: root.hasProjector
                               ? "Load text-only: omit the paired vision/audio projector (saves memory)."
@@ -1164,6 +1248,7 @@ Dialog {
                     }
                     FormField {
                         Layout.fillWidth: true
+                        visible: !root.isEmbedding
                         label: "Draft tokens (min)"
                         argName: "--spec-draft-n-min"
                         hint: "Minimum draft tokens per speculative step. 0 = runtime default."

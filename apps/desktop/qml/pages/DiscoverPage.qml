@@ -18,6 +18,7 @@ Item {
     property var detailProjectors: []
     property var detailModalities: []
     property string detailMTP: ""
+    property string detailEmbedding: ""
     property bool withVision: true
     property bool showFilePaths: false
     property bool detailLoading: false
@@ -37,6 +38,12 @@ Item {
     function mtpLabel(kind) {
         if (kind === "mtp-draft") return "MTP draft"
         if (kind === "mtp") return "MTP"
+        return ""
+    }
+
+    function embeddingLabel(kind) {
+        if (kind === "reranker") return "reranker"
+        if (kind === "embedding") return "embedding"
         return ""
     }
 
@@ -86,6 +93,7 @@ Item {
         page.detail = null
         page.detailModalities = []
         page.detailMTP = ""
+        page.detailEmbedding = ""
         page.withVision = true
         page.showFilePaths = false
         detailDialog.open()
@@ -97,6 +105,7 @@ Item {
                 page.detailProjectors = data.projectors || []
                 page.detailModalities = data.modalities || []
                 page.detailMTP = data.mtp || ""
+                page.detailEmbedding = data.embedding || ""
             } else {
                 page.searchError = (data && (data.detail || data.error)) || ("HTTP " + st)
                 detailDialog.close()
@@ -222,6 +231,12 @@ Item {
                                 Layout.minimumWidth: implicitWidth
                             }
                             Tag {
+                                visible: page.embeddingLabel(modelData.embedding) !== ""
+                                text: page.embeddingLabel(modelData.embedding)
+                                tone: AppTheme.info
+                                Layout.minimumWidth: implicitWidth
+                            }
+                            Tag {
                                 visible: page.experimentalAudio && page.modalityLabel(modelData.modalities) !== ""
                                 text: page.modalityLabel(modelData.modalities)
                                 tone: AppTheme.success
@@ -284,6 +299,12 @@ Item {
                         visible: page.mtpLabel(page.detailMTP) !== ""
                         text: page.mtpLabel(page.detailMTP)
                         tone: AppTheme.warning
+                        Layout.minimumWidth: implicitWidth
+                    }
+                    Tag {
+                        visible: page.embeddingLabel(page.detailEmbedding) !== ""
+                        text: page.embeddingLabel(page.detailEmbedding)
+                        tone: AppTheme.info
                         Layout.minimumWidth: implicitWidth
                     }
                     AppButton {

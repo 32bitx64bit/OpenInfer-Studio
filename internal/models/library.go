@@ -237,15 +237,16 @@ func (l *Library) Scan() (int, error) {
 		// Path/name heuristics catch draft sidecars (mtp-, eagle3-, …) and
 		// community draft names that still use a normal architecture string.
 		md.ApplySpeculativeFlags(primary)
+		md.ApplyEmbeddingFlags(primary)
 		var total int64
 		for _, f := range files {
 			total += f.size
 		}
 		var proj string
 		var projHasVision, projHasAudio bool
-		// Never pair an mmproj with a speculative draft model — drafts are not
-		// multimodal chat models even when co-located with a VL target's projector.
-		if !md.SpeculativeDraft {
+		// Never pair an mmproj with a speculative draft or embedding model —
+		// neither is a multimodal chat target.
+		if !md.SpeculativeDraft && !md.IsEmbedding {
 			if p, ok := projectors[filepath.Dir(primary)]; ok {
 				proj = p.path
 				total += p.size
@@ -283,7 +284,7 @@ func (l *Library) Scan() (int, error) {
 		hasVision := md.HasVision || projHasVision
 		hasAudio := md.HasAudio || projHasAudio
 		multimodal := md.Multimodal || hasVision || hasAudio || proj != ""
-		if md.SpeculativeDraft {
+		if md.SpeculativeDraft || md.IsEmbedding {
 			hasVision, hasAudio, multimodal = false, false, false
 			proj = ""
 		}
@@ -294,6 +295,10 @@ func (l *Library) Scan() (int, error) {
 			"has_mtp":              md.HasMTP,
 			"nextn_predict_layers": md.NextnPredictLayers,
 			"spec_type":            md.SpecType,
+			"is_embedding":         md.IsEmbedding,
+			"is_reranker":          md.IsReranker,
+			"pooling_type":         md.PoolingType,
+			"embedding_length_out": md.EmbeddingLengthOut,
 			"version":              md.Version,
 			"block_count":          md.BlockCount, "head_count": md.HeadCount,
 			"head_count_kv": md.HeadCountKV, "head_count_kv_layers": md.HeadCountKVLayers,

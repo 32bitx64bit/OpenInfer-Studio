@@ -30,6 +30,8 @@ Item {
             if (meta.spec_type) return String(meta.spec_type).replace("draft-", "") + " draft"
             return "draft"
         }
+        if (meta.is_reranker) return "reranker"
+        if (meta.is_embedding) return "embedding"
         if (!m.projector_path) return ""
         var hasA = !!meta.has_audio
         var hasV = !!meta.has_vision
@@ -130,6 +132,10 @@ Item {
             if (f === "mtp" && m.metadata && m.metadata.has_mtp) return true
             var mod = page.modalityTag(m).toLowerCase()
             if (mod !== "" && mod.indexOf(f) >= 0) return true
+            if (f === "embed" || f === "embedding") {
+                if (m.metadata && (m.metadata.is_embedding || m.metadata.is_reranker)) return true
+            }
+            if (f === "reranker" && m.metadata && m.metadata.is_reranker) return true
             return false
         })
     }

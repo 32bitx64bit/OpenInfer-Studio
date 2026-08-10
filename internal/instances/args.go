@@ -12,52 +12,57 @@ import (
 // LoadSettings is the user-facing model-load configuration.
 // Numeric zero values select automatic defaults unless noted.
 type LoadSettings struct {
-	ContextLength   int               `json:"context_length"`  // 0 = model default
-	GPUOffload      string            `json:"gpu_offload"`     // auto|all|none|custom
-	GPULayers       int               `json:"gpu_layers"`      // used when GPUOffload == custom
-	Threads         int               `json:"threads"`         // 0 = auto
-	FlashAttention  string            `json:"flash_attention"` // auto|on|off
-	Parallel        int               `json:"parallel"`        // 0 = default 1
-	BatchSize       int               `json:"batch_size"`
-	UBatchSize      int               `json:"ubatch_size"`
-	CacheTypeK      string            `json:"cache_type_k"` // "" = default
-	CacheTypeV      string            `json:"cache_type_v"`
-	NoMmap          bool              `json:"no_mmap"`
-	MLock           bool              `json:"mlock"`
-	NUMA            string            `json:"numa"`
-	MainGPU         int               `json:"main_gpu"` // -1 = unset
-	Device          string            `json:"device"`
-	SplitMode       string            `json:"split_mode"`
-	TensorSplit     string            `json:"tensor_split"`
-	ContBatching    *bool             `json:"cont_batching"`
-	CacheReuse      int               `json:"cache_reuse"`
-	ThreadsBatch    int               `json:"threads_batch"` // 0 = same as --threads
-	Prio            int               `json:"prio"`          // -2 = unset; -1..3 = llama --prio
-	Poll            int               `json:"poll"`          // -1 = unset; 0..100 = --poll
-	CPUMoe          bool              `json:"cpu_moe"`
-	NCPUMoe         int               `json:"n_cpu_moe"`  // 0 = unset
-	KVOffload       string            `json:"kv_offload"` // ""|on|off → --kv-offload / --no-kv-offload
-	OpOffload       string            `json:"op_offload"` // ""|on|off → --op-offload / --no-op-offload
-	KVUnified       string            `json:"kv_unified"` // ""|on|off → --kv-unified / --no-kv-unified
-	SWAFull         bool              `json:"swa_full"`
-	Fit             string            `json:"fit"` // ""|on|off → --fit
-	NoWarmup        bool              `json:"no_warmup"`
-	RopeScaling     string            `json:"rope_scaling"`
-	RopeFreqBase    float64           `json:"rope_freq_base"`
-	RopeFreqScale   float64           `json:"rope_freq_scale"`
-	SleepIdleSec    int               `json:"sleep_idle_seconds"`
-	Alias           string            `json:"alias"`
-	MediaPath       string            `json:"media_path"`
-	ChatTemplate    string            `json:"chat_template"`
-	Jinja           *bool             `json:"jinja"`
-	NoMmproj        bool              `json:"no_mmproj"` // skip paired multimodal projector
-	NoMmprojOffload bool              `json:"no_mmproj_offload"`
-	LoraPath        string            `json:"lora_path"`
-	LoraScale       float64           `json:"lora_scale"`
-	DraftModel      string            `json:"draft_model"` // path to draft GGUF
-	DraftMax        int               `json:"draft_max"`   // max draft tokens (0 = runtime default)
-	DraftMin        int               `json:"draft_min"`   // min draft tokens (0 = runtime default)
-	SpecType        string            `json:"spec_type"`   // e.g. draft-simple; empty = auto when draft set
+	ContextLength   int     `json:"context_length"`  // 0 = model default
+	GPUOffload      string  `json:"gpu_offload"`     // auto|all|none|custom
+	GPULayers       int     `json:"gpu_layers"`      // used when GPUOffload == custom
+	Threads         int     `json:"threads"`         // 0 = auto
+	FlashAttention  string  `json:"flash_attention"` // auto|on|off
+	Parallel        int     `json:"parallel"`        // 0 = default 1
+	BatchSize       int     `json:"batch_size"`
+	UBatchSize      int     `json:"ubatch_size"`
+	CacheTypeK      string  `json:"cache_type_k"` // "" = default
+	CacheTypeV      string  `json:"cache_type_v"`
+	NoMmap          bool    `json:"no_mmap"`
+	MLock           bool    `json:"mlock"`
+	NUMA            string  `json:"numa"`
+	MainGPU         int     `json:"main_gpu"` // -1 = unset
+	Device          string  `json:"device"`
+	SplitMode       string  `json:"split_mode"`
+	TensorSplit     string  `json:"tensor_split"`
+	ContBatching    *bool   `json:"cont_batching"`
+	CacheReuse      int     `json:"cache_reuse"`
+	ThreadsBatch    int     `json:"threads_batch"` // 0 = same as --threads
+	Prio            int     `json:"prio"`          // -2 = unset; -1..3 = llama --prio
+	Poll            int     `json:"poll"`          // -1 = unset; 0..100 = --poll
+	CPUMoe          bool    `json:"cpu_moe"`
+	NCPUMoe         int     `json:"n_cpu_moe"`  // 0 = unset
+	KVOffload       string  `json:"kv_offload"` // ""|on|off → --kv-offload / --no-kv-offload
+	OpOffload       string  `json:"op_offload"` // ""|on|off → --op-offload / --no-op-offload
+	KVUnified       string  `json:"kv_unified"` // ""|on|off → --kv-unified / --no-kv-unified
+	SWAFull         bool    `json:"swa_full"`
+	Fit             string  `json:"fit"` // ""|on|off → --fit
+	NoWarmup        bool    `json:"no_warmup"`
+	RopeScaling     string  `json:"rope_scaling"`
+	RopeFreqBase    float64 `json:"rope_freq_base"`
+	RopeFreqScale   float64 `json:"rope_freq_scale"`
+	SleepIdleSec    int     `json:"sleep_idle_seconds"`
+	Alias           string  `json:"alias"`
+	MediaPath       string  `json:"media_path"`
+	ChatTemplate    string  `json:"chat_template"`
+	Jinja           *bool   `json:"jinja"`
+	NoMmproj        bool    `json:"no_mmproj"` // skip paired multimodal projector
+	NoMmprojOffload bool    `json:"no_mmproj_offload"`
+	LoraPath        string  `json:"lora_path"`
+	LoraScale       float64 `json:"lora_scale"`
+	DraftModel      string  `json:"draft_model"` // path to draft GGUF
+	DraftMax        int     `json:"draft_max"`   // max draft tokens (0 = runtime default)
+	DraftMin        int     `json:"draft_min"`   // min draft tokens (0 = runtime default)
+	SpecType        string  `json:"spec_type"`   // e.g. draft-simple; empty = auto when draft set
+	// Embedding enables --embedding (dedicated embedder / reranker use case).
+	// Nil = unset (defaults applied for detected embedders); false disables.
+	Embedding *bool `json:"embedding"`
+	// Pooling is --pooling none|mean|cls|last|rank; empty = model / runtime default.
+	Pooling         string            `json:"pooling"`
 	ReasoningFormat string            `json:"reasoning_format"`
 	RawArgs         string            `json:"raw_args"`      // expert: space-separated, validated, never shell
 	EnvOverrides    map[string]string `json:"env_overrides"` // allowlisted keys only
@@ -395,6 +400,33 @@ func BuildArgs(s LoadSettings, modelPath, projectorPath string,
 	}
 	if s.DraftMin > 0 {
 		addFirst([]string{strconv.Itoa(s.DraftMin)}, "--draft-min", "--spec-draft-n-min")
+	}
+	if s.Embedding != nil && *s.Embedding {
+		added := false
+		for _, flag := range []string{"--embedding", "--embeddings"} {
+			if runtimes.SupportsFlag(caps, help, flag) {
+				add(flag)
+				added = true
+				res = append(res, Resolution{"Embedding mode", "explicit", "on"})
+				break
+			}
+		}
+		if !added {
+			warn = append(warn, "--embedding is not supported by this runtime; setting skipped")
+		}
+	}
+	if p := strings.ToLower(strings.TrimSpace(s.Pooling)); p != "" {
+		switch p {
+		case "none", "mean", "cls", "last", "rank":
+			if runtimes.SupportsFlag(caps, help, "--pooling") {
+				add("--pooling", p)
+				res = append(res, Resolution{"Pooling", "explicit", p})
+			} else {
+				warn = append(warn, "--pooling is not supported by this runtime; setting skipped")
+			}
+		default:
+			warn = append(warn, "invalid pooling value "+p+"; use none|mean|cls|last|rank")
+		}
 	}
 	if s.ReasoningFormat != "" {
 		add("--reasoning-format", s.ReasoningFormat)

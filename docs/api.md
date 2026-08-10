@@ -19,8 +19,8 @@ Errors: `{"error": "message", "detail": "debug detail"}`.
 
 | Method & path | Purpose |
 |---|---|
-| GET `/hf/search?q=&sort=&limit=` | GGUF repo search (sort: downloads, likes, trending, lastModified); results include `modalities` when detectable |
-| GET `/hf/repo/{author}/{name}` | repo detail + grouped file sets + `modalities` + model card |
+| GET `/hf/search?q=&sort=&limit=` | GGUF repo search (sort: downloads, likes, trending, lastModified); results include `modalities`, `mtp`, and `embedding` (`embedding`\|`reranker`) when detectable |
+| GET `/hf/repo/{author}/{name}` | repo detail + grouped file sets + `modalities` + `mtp` + `embedding` + model card |
 | GET/PUT/DELETE `/hf/token` | token status / store in OS keychain / remove |
 
 ## Downloads
@@ -55,7 +55,7 @@ Events: `download.progress` (bytes, speed, ETA), `download.state_changed`.
 | POST `/models/{id}/preview` | resolved command, resolutions, warnings — nothing started |
 | POST `/models/{id}/estimate` | projected memory: weights, draft, mmproj, KV, compute, media, overhead; independent `gpu_bytes`/`cpu_bytes` vs `gpu_budget_bytes`/`cpu_budget_bytes` (`fits_gpu`/`fits_cpu`/`fits`); `offload_fraction` for custom layer offload; `budget_kind` is `VRAM+RAM`, `VRAM`, `RAM`, or `unified RAM` |
 | GET `/models/{id}/draft-candidates[?filter=0\|1]` | draft picker list; filter on (default / `load.filter_incompatible_drafts`) returns only speculative sidecars (mtp-/gemma4-assistant/eagle3-/dflash-/dspark-); filter off returns all other library models |
-| POST `/models/{id}/load` | start (LoadSettings JSON; all fields optional). Speculative: `draft_model`, `draft_max`, `draft_min`, `spec_type`. Expert/perf: `threads_batch`, `cont_batching`, `cache_reuse`, `prio`, `poll`, `numa`, `fit`, `kv_offload`, `op_offload`, `kv_unified`, `swa_full`, `cpu_moe`, `n_cpu_moe`, `main_gpu`, `device`, `split_mode`, `tensor_split`, `no_warmup`, `raw_args` |
+| POST `/models/{id}/load` | start (LoadSettings JSON; all fields optional). Speculative: `draft_model`, `draft_max`, `draft_min`, `spec_type`. Embedders: `embedding` (bool; auto-true for detected embedders), `pooling` (`none\|mean\|cls\|last\|rank`; empty = model default; rerankers prefer `rank`). Emits `--embedding` / `--pooling` when the runtime advertises them. Expert/perf: `threads_batch`, `cont_batching`, `cache_reuse`, `prio`, `poll`, `numa`, `fit`, `kv_offload`, `op_offload`, `kv_unified`, `swa_full`, `cpu_moe`, `n_cpu_moe`, `main_gpu`, `device`, `split_mode`, `tensor_split`, `no_warmup`, `raw_args` |
 | POST `/models/{id}/unload[?force=1]` | graceful / forced stop |
 | POST `/models/{id}/restart` | reload with settings |
 | GET `/models/{id}/logs` | redacted log tail |
@@ -102,3 +102,9 @@ Setting keys of note: `experimental.audio_models` (`"0"`/`"1"`, default off) gat
 The public OpenAI-compatible server itself (separate port, separate key):
 `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/completions`,
 `POST /v1/embeddings`, `POST /v1/responses` (subject to runtime support).
+
+Dedicated GGUF embedders (and rerankers) are detected on library scan
+(`metadata.is_embedding` / `is_reranker`, optional `pooling_type`). Loading
+them auto-enables embedding mode so the instance serves
+`POST /v1/embeddings` rather than chat. They are omitted from the Chat model
+picker; load from Library and call the Developer API.

@@ -72,10 +72,18 @@ Item {
             || base.indexOf("dspark-") === 0
     }
 
-    // Chat targets only — MTP/EAGLE/DFlash/DSpark sidecars belong in the
-    // load-dialog draft picker, not as conversation models.
+    function isEmbeddingModel(m) {
+        if (!m) return false
+        var meta = m.metadata || {}
+        return !!(meta.is_embedding || meta.is_reranker)
+    }
+
+    // Chat targets only — MTP/EAGLE/DFlash/DSpark sidecars and embedders
+    // belong elsewhere (draft picker / Developer API), not as conversation models.
     function chatModels() {
-        return (page.library || []).filter(function(m) { return !page.isSpeculativeDraft(m) })
+        return (page.library || []).filter(function(m) {
+            return !page.isSpeculativeDraft(m) && !page.isEmbeddingModel(m)
+        })
     }
 
     function currentModel() {
@@ -587,7 +595,8 @@ Item {
                     icon: "◎"
                     title: page.messagesLoading ? "Opening conversation…" : page.currentConv ? "Start the conversation" : "Select or create a chat"
                     hint: page.currentConv ? "Your selected model will load when you send the first message."
-                        : "Create a chat with a local model, or browse models to get started."
+                        : page.chatModels().length ? "Create a chat with a local model, or browse models to get started."
+                        : "No chat models yet. Embedding models load from Library and serve /v1/embeddings via Developer API — or browse for a chat GGUF."
                     actionText: page.currentConv ? "" : (page.chatModels().length ? "New chat" : "Browse models")
                     onActionTriggered: {
                         if (page.chatModels().length) page.newConversation()
