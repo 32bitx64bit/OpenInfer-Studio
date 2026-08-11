@@ -110,6 +110,16 @@ func (m *Manager) List() ([]Runtime, error) {
 		}
 		r.Preferred = pref == 1
 		r.Healthy = healthy == 1
+		// Correct custom imports that were recorded as cpu before backend
+		// detection existed. Only upgrade from cpu when evidence finds a GPU
+		// backend — never downgrade a stored label without path hints.
+		if r.Source == "custom-import" && r.Backend == BackendCPU {
+			if detected := DetectBackend(r.VersionOutput, nil, r.InstallDir, filepath.Dir(r.ExecutablePath)); detected != BackendCPU {
+				if _, err := m.db.Exec(`UPDATE runtimes SET backend = ? WHERE id = ?`, detected, r.ID); err == nil {
+					r.Backend = detected
+				}
+			}
+		}
 		r.Capabilities, _ = m.capabilities(r.ID)
 		if r.Capabilities == nil {
 			r.Capabilities = []string{}
@@ -308,22 +318,38 @@ func (m *Manager) record(man Manifest, helpOut string, caps []string, dir string
 	return tx.Commit()
 }
 
-// ImportCustom registers a user-provided llama-server executable (the file
-// itself stays in place; OpenInfer only records and probes it).
-func (m *Manager) ImportCustom(exePath string) (string, error) {
-	st, err := os.Stat(exePath)
+func isArchivePath(path string) bool {
+	lower := strings.ToLower(path)
+	return strings.HasSuffix(lower, ".zip") ||
+		strings.HasSuffix(lower, ".tar.gz") ||
+		strings.HasSuffix(lower, ".tgz")
+}
+
+// ImportCustom registers a user-provided llama-server executable or a
+// prebuilt archive (.zip / .tar.gz / .tgz). Bare executables stay in place;
+// archives are extracted into the managed runtimes directory.
+func (m *Manager) ImportCustom(path string) (string, error) {
+	st, err := os.Stat(path)
 	if err != nil || st.IsDir() {
-		return "", fmt.Errorf("invalid executable path %q", exePath)
+		return "", fmt.Errorf("invalid path %q", path)
 	}
+	if isArchivePath(path) {
+		return m.importCustomArchive(path)
+	}
+	return m.importCustomExecutable(path)
+}
+
+func (m *Manager) importCustomExecutable(exePath string) (string, error) {
 	versionOut, helpOut, err := probeRuntime(exePath)
 	if err != nil {
 		return "", fmt.Errorf("custom runtime failed smoke test: %w", err)
 	}
 	caps := ParseCapabilities(helpOut)
+	backend := DetectBackend(versionOut, []string{exePath}, filepath.Dir(exePath))
 	id := "custom-" + uuid.NewString()[:8]
 	man := Manifest{
 		RuntimeID: id, Source: "custom-import", Platform: runtime.GOOS,
-		Architecture: runtime.GOARCH, Backend: BackendCPU, InstalledAt: now(),
+		Architecture: runtime.GOARCH, Backend: backend, InstalledAt: now(),
 		ExecutablePath: exePath, VersionOutput: versionOut,
 		Capabilities: map[string]any{"flags": caps},
 	}
@@ -336,6 +362,70 @@ func (m *Manager) ImportCustom(exePath string) (string, error) {
 	manBytes, _ := json.MarshalIndent(man, "", "  ")
 	_ = os.WriteFile(filepath.Join(recDir, "manifest.json"), manBytes, 0o644)
 	if err := m.record(man, helpOut, caps, recDir); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+func (m *Manager) importCustomArchive(archivePath string) (string, error) {
+	staging, err := os.MkdirTemp(filepath.Dir(m.dir), ".staging-import-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(staging)
+
+	extractDir := filepath.Join(staging, "extracted")
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		return "", err
+	}
+	if _, err := ExtractArchive(archivePath, extractDir); err != nil {
+		return "", fmt.Errorf("extracting archive: %w", err)
+	}
+
+	exe, err := findServerExecutable(extractDir)
+	if err != nil {
+		return "", err
+	}
+	if runtime.GOOS != "windows" {
+		_ = os.Chmod(exe, 0o755)
+	}
+
+	versionOut, helpOut, err := probeRuntime(exe)
+	if err != nil {
+		return "", fmt.Errorf("custom runtime failed smoke test: %w", err)
+	}
+	caps := ParseCapabilities(helpOut)
+
+	id := "custom-" + uuid.NewString()[:8]
+	finalDir := filepath.Join(m.dir, id)
+	relExe, err := filepath.Rel(extractDir, exe)
+	if err != nil {
+		return "", err
+	}
+	backend := DetectBackend(versionOut, []string{archivePath, filepath.Base(archivePath)}, extractDir)
+	man := Manifest{
+		RuntimeID: id, Source: "custom-import", Platform: runtime.GOOS,
+		Architecture: runtime.GOARCH, Backend: backend, InstalledAt: now(),
+		ExecutablePath: filepath.Join(finalDir, relExe), VersionOutput: versionOut,
+		Capabilities: map[string]any{"flags": caps},
+	}
+
+	if err := os.WriteFile(filepath.Join(extractDir, "help.txt"), []byte(helpOut), 0o644); err != nil {
+		return "", err
+	}
+	manBytes, _ := json.MarshalIndent(man, "", "  ")
+	if err := os.WriteFile(filepath.Join(extractDir, "manifest.json"), manBytes, 0o644); err != nil {
+		return "", err
+	}
+
+	if err := os.MkdirAll(m.dir, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.Rename(extractDir, finalDir); err != nil {
+		return "", fmt.Errorf("installing imported runtime: %w", err)
+	}
+	if err := m.record(man, helpOut, caps, finalDir); err != nil {
+		os.RemoveAll(finalDir)
 		return "", err
 	}
 	return id, nil
@@ -364,7 +454,8 @@ func (m *Manager) Remove(id string) error {
 			return err
 		}
 	} else {
-		os.RemoveAll(r.InstallDir) // our record dir only; user's files untouched
+		// Record dir (bare exe) or extracted tree (archive import); user's original path untouched.
+		os.RemoveAll(r.InstallDir)
 	}
 	_, err = m.db.Exec(`DELETE FROM runtimes WHERE id = ?`, id)
 	return err

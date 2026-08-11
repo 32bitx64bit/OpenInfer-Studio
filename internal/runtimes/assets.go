@@ -1,6 +1,8 @@
 package runtimes
 
 import (
+	"io/fs"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -61,6 +63,104 @@ func containsAny(tokens []string, candidates []string) bool {
 		}
 	}
 	return false
+}
+
+// DetectBackend infers the primary acceleration backend for a custom or
+// unknown build. Evidence is combined from llama-server --version output
+// (load_backend lines / libggml-* paths), colocated libraries under
+// searchRoots, and path name hints (archive or executable names).
+//
+// CPU is always present in modern builds; when a GPU backend is detected it
+// wins. Among GPU backends, priority matches backendTokens (CUDA > HIP >
+// Vulkan > Metal > SYCL).
+func DetectBackend(versionOut string, pathHints []string, searchRoots ...string) string {
+	found := map[string]bool{}
+	collectBackendsFromText(versionOut, found)
+	for _, root := range searchRoots {
+		if root == "" {
+			continue
+		}
+		collectBackendsFromLibs(root, found)
+	}
+	for _, hint := range pathHints {
+		if hint == "" {
+			continue
+		}
+		_, _, b := ClassifyAsset(hint)
+		if b != "" {
+			found[b] = true
+		}
+	}
+	for _, bt := range backendTokens {
+		if bt.Backend == BackendCPU {
+			continue
+		}
+		if found[bt.Backend] {
+			return bt.Backend
+		}
+	}
+	return BackendCPU
+}
+
+func collectBackendsFromText(text string, found map[string]bool) {
+	if text == "" {
+		return
+	}
+	lower := strings.ToLower(text)
+	for _, bt := range backendTokens {
+		if bt.Backend == BackendCPU {
+			continue
+		}
+		for _, tok := range bt.Tokens {
+			if strings.Contains(lower, "libggml-"+tok) ||
+				strings.Contains(lower, "ggml-"+tok) ||
+				strings.Contains(lower, "loaded "+tok+" backend") ||
+				strings.Contains(lower, "ggml_"+tok+":") {
+				found[bt.Backend] = true
+			}
+		}
+	}
+}
+
+// collectBackendsFromLibs scans a tree for ggml backend shared libraries
+// (libggml-vulkan.so, ggml-cuda.dll, …). Depth is capped so import stays cheap.
+func collectBackendsFromLibs(root string, found map[string]bool) {
+	const maxDepth = 4
+	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, p)
+		if relErr != nil {
+			return nil
+		}
+		depth := 0
+		if rel != "." {
+			depth = strings.Count(rel, string(filepath.Separator)) + 1
+		}
+		if d.IsDir() {
+			if depth > maxDepth {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := strings.ToLower(d.Name())
+		if !strings.Contains(name, "ggml") {
+			return nil
+		}
+		for _, bt := range backendTokens {
+			if bt.Backend == BackendCPU {
+				continue
+			}
+			for _, tok := range bt.Tokens {
+				if strings.Contains(name, "ggml-"+tok) {
+					found[bt.Backend] = true
+					break
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // ClassifyAsset extracts platform, architecture and backend from an asset

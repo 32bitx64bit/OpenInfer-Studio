@@ -73,7 +73,7 @@ Events: `instance.state_changed`, `instance.updated`, `instance.activity`,
 | GET `/runtimes` | installed builds + capabilities + pinning |
 | GET `/runtimes/releases[?backend=]` | official releases with scored asset matches |
 | POST `/runtimes/install` | `{tag, asset, backend}` — async, progress via events |
-| POST `/runtimes/import` | `{path}` custom llama-server |
+| POST `/runtimes/import` | `{path}` custom llama-server executable or archive (`.zip` / `.tar.gz` / `.tgz`) |
 | POST `/runtimes/{id}/preferred`, `/health` | |
 | GET `/runtimes/{id}/capabilities` | parsed caps + raw help + version output |
 | DELETE `/runtimes/{id}` | refused while pinned by models |

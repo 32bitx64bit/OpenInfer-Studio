@@ -200,7 +200,7 @@ Item {
                         width: parent.width
                         icon: "⚙"
                         title: "No runtimes installed"
-                        hint: "Install an official llama.cpp build below, or import a custom build."
+                        hint: "Install an official llama.cpp build below, or import a custom llama-server binary or archive (.zip / .tar.gz)."
                     }
 
                     Repeater {
@@ -429,7 +429,11 @@ Item {
 
     FileDialog {
         id: importRuntimeDialog
-        title: "Select a llama-server executable"
+        title: "Select llama-server or archive"
+        nameFilters: [
+            "llama-server or archive (llama-server* *.zip *.tar.gz *.tgz)",
+            "All files (*)"
+        ]
         onAccepted: page.api.post("/api/v1/runtimes/import",
             { "path": String(selectedFile).replace("file://", "") },
             function(st, data) {

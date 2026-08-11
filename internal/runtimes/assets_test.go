@@ -1,6 +1,10 @@
 package runtimes
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestClassifyAsset(t *testing.T) {
 	cases := []struct {
@@ -24,6 +28,43 @@ func TestClassifyAsset(t *testing.T) {
 			t.Errorf("ClassifyAsset(%q) = (%q,%q,%q), want (%q,%q,%q)",
 				c.name, p, a, b, c.platform, c.arch, c.backend)
 		}
+	}
+}
+
+func TestDetectBackend(t *testing.T) {
+	vulkanVersion := `load_backend: loaded Vulkan backend from /app/libggml-vulkan.so
+load_backend: loaded CPU backend from /app/libggml-cpu-haswell.so
+version: 9144 (4c1c3ac09)
+built with GNU 15.2.0 for Linux x86_64`
+	cudaVersion := `load_backend: loaded CUDA backend from /opt/libggml-cuda.so
+load_backend: loaded CPU backend from /opt/libggml-cpu-x64.so
+version: 1`
+
+	cases := []struct {
+		name    string
+		version string
+		hints   []string
+		want    string
+	}{
+		{"version vulkan", vulkanVersion, nil, BackendVulkan},
+		{"version cuda", cudaVersion, nil, BackendCUDA},
+		{"filename vulkan", "version: 1\n", []string{"llama-b1-bin-ubuntu-vulkan-x64.zip"}, BackendVulkan},
+		{"filename cpu", "version: 1\n", []string{"llama-b1-bin-ubuntu-x64.zip"}, BackendCPU},
+		{"cuda beats vulkan in version", "loaded CUDA backend\nloaded Vulkan backend\n", nil, BackendCUDA},
+		{"empty defaults cpu", "", nil, BackendCPU},
+	}
+	for _, c := range cases {
+		if got := DetectBackend(c.version, c.hints); got != c.want {
+			t.Errorf("%s: DetectBackend = %q, want %q", c.name, got, c.want)
+		}
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "libggml-hip.so"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := DetectBackend("version: 1", nil, dir); got != BackendHIP {
+		t.Errorf("lib scan: got %q, want hip", got)
 	}
 }
 
