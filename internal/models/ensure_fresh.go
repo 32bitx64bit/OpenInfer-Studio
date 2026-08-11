@@ -11,7 +11,7 @@ import (
 // MetadataSchemaVersion is bumped whenever Scan persists new architecture
 // fields that older library rows may lack (SWA patterns, hybrid interval, etc.).
 // EnsureFresh rescans when the stored schema version differs.
-const MetadataSchemaVersion = "6"
+const MetadataSchemaVersion = "7"
 
 // EnsureFresh runs Scan when the persisted metadata schema is outdated or
 // when on-disk GGUF files look newer/different than the library rows.

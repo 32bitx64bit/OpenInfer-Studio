@@ -338,7 +338,13 @@ Item {
                     page.reloadMessagesSoon()
                     return
                 }
-                if (payload.delta || payload.reasoning_delta) {
+                if (payload.replace || payload.snapshot !== undefined || payload.reasoning_snapshot !== undefined) {
+                    if (payload.snapshot !== undefined)
+                        page.streamContent = payload.snapshot
+                    if (payload.reasoning_snapshot !== undefined)
+                        page.streamReasoning = payload.reasoning_snapshot
+                    if (followTimer.running === false) followTimer.start()
+                } else if (payload.delta || payload.reasoning_delta) {
                     if (payload.delta) page.streamContent += payload.delta
                     if (payload.reasoning_delta) page.streamReasoning += payload.reasoning_delta
                     if (followTimer.running === false) followTimer.start()

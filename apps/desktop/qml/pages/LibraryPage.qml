@@ -19,10 +19,12 @@ Item {
     property bool scanning: false
     property string filter: ""
     property var selected: null
+    property string errorText: ""
 
     function modalityTag(m) {
         if (!m) return ""
         var meta = m.metadata || {}
+        if (meta.is_diffusion) return "diffusion"
         // MTP capability is a separate tag (mtpTag); keep this for vision/audio
         // and non-MTP speculative draft sidecars (eagle3 / dflash / …).
         if (meta.speculative_draft) {
@@ -182,6 +184,14 @@ Item {
                 }
             }
 
+            Label {
+                visible: page.errorText !== ""
+                Layout.fillWidth: true
+                text: page.errorText
+                color: AppTheme.danger
+                wrapMode: Text.WordWrap
+            }
+
             ListView {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
@@ -194,7 +204,7 @@ Item {
                     anchors.centerIn: parent
                     icon: "▤"
                     title: "No local models"
-                    hint: "Download a model from Discover, or import an existing GGUF file."
+                    hint: "Download a model from Discover, or import a GGUF — it is copied into your local library."
                     actionText: "Browse models"
                     onActionTriggered: page.browseModels()
                 }
@@ -431,10 +441,14 @@ Item {
         id: importDialog
         title: "Import a GGUF model file"
         nameFilters: ["GGUF models (*.gguf)"]
-        onAccepted: page.api.post("/api/v1/models/import", { "path": String(selectedFile).replace("file://", "") },
-            function(st, data) {
-                if (st === 201) page.reload()
-            })
+        onAccepted: {
+            page.errorText = ""
+            page.api.post("/api/v1/models/import", { "path": String(selectedFile).replace("file://", "") },
+                function(st, data) {
+                    if (st === 201) page.reload()
+                    else page.errorText = (data && (data.detail || data.error)) || "import failed"
+                })
+        }
     }
 
     LoadConfigDialog {

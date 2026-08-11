@@ -71,6 +71,8 @@ type liveInstance struct {
 	Instance
 	apiKey       string
 	handle       *processes.Handle
+	diffEngine   *DiffusionEngine
+	diffShim     *DiffusionShim
 	cancel       context.CancelFunc
 	done         chan struct{}
 	lastActivity *Activity
@@ -322,18 +324,50 @@ func (m *Manager) Start(modelID string, s LoadSettings) (*Instance, error) {
 	if _, err := os.Stat(rt.ExecutablePath); err != nil {
 		return nil, fmt.Errorf("runtime %s executable missing (%s); reinstall or pick another runtime", rt.ID, rt.ExecutablePath)
 	}
-	help, _ := m.runtimes.HelpOutput(rt.ID)
-	caps := rt.Capabilities
-	if help != "" {
-		caps = runtimes.ParseCapabilities(help)
-	}
 
 	port, err := allocatePort()
 	if err != nil {
 		return nil, err
 	}
 	apiKey := genAPIKey()
-	br := BuildArgs(s, mdl.PrimaryPath, mdl.ProjectorPath, caps, help, "127.0.0.1", port, apiKey)
+
+	var meta struct {
+		IsDiffusion  bool   `json:"is_diffusion"`
+		CanvasLength uint32 `json:"canvas_length"`
+	}
+	_ = json.Unmarshal(mdl.Metadata, &meta)
+	// Path/arch fallback when library metadata is stale (pre-schema-7).
+	if !meta.IsDiffusion {
+		if isDiff, canvas := detectDiffusionFallback(mdl); isDiff {
+			meta.IsDiffusion = true
+			meta.CanvasLength = canvas
+		}
+	}
+
+	var br BuildResult
+	if meta.IsDiffusion {
+		diffExe, err := ResolveDiffusionBinary(rt.ExecutablePath)
+		if err != nil {
+			return nil, err
+		}
+		ngl := resolveNGL(s)
+		br = BuildResult{
+			Args:    []string{mdl.PrimaryPath},
+			Command: fmt.Sprintf("%s %s  (NGL=%d MAXTOK=auto)", filepath.Base(diffExe), filepath.Base(mdl.PrimaryPath), ngl),
+			Resolutions: []Resolution{
+				{Setting: "Runner", Auto: "llama-server", Resolved: filepath.Base(diffExe)},
+				{Setting: "GPU offload", Auto: s.GPUOffload, Resolved: fmt.Sprintf("NGL=%d", ngl)},
+			},
+			Warnings: []string{"block-diffusion model: using llama-diffusion visual server (not autoregressive llama-server)"},
+		}
+	} else {
+		help, _ := m.runtimes.HelpOutput(rt.ID)
+		caps := rt.Capabilities
+		if help != "" {
+			caps = runtimes.ParseCapabilities(help)
+		}
+		br = BuildArgs(s, mdl.PrimaryPath, mdl.ProjectorPath, caps, help, "127.0.0.1", port, apiKey)
+	}
 
 	instID := uuid.NewString()
 	alias := s.Alias
@@ -361,7 +395,11 @@ func (m *Manager) Start(modelID string, s LoadSettings) (*Instance, error) {
 		VALUES (?,?,?,?,?,?,?,?,?)`,
 		instID, modelID, rt.ID, 0, port, StateStarting, mustJSON(br.Args), nowUTC(), nowUTC())
 
-	go m.supervise(li, rt, br, s)
+	if meta.IsDiffusion {
+		go m.superviseDiffusion(li, rt, s, mdl, meta.CanvasLength)
+	} else {
+		go m.supervise(li, rt, br, s)
+	}
 	cp := li.Instance
 	return &cp, nil
 }
@@ -501,6 +539,112 @@ func (m *Manager) probeReady(ctx context.Context, li *liveInstance, out chan<- e
 	}
 }
 
+// detectDiffusionFallback uses path/arch when metadata_json lacks is_diffusion.
+func detectDiffusionFallback(mdl *models.Model) (bool, uint32) {
+	arch := strings.ToLower(mdl.Architecture)
+	var raw map[string]any
+	_ = json.Unmarshal(mdl.Metadata, &raw)
+	return importDetectDiffusion(arch, mdl.Alias, mdl.PrimaryPath, raw)
+}
+
+// superviseDiffusion launches llama-diffusion-gemma-visual-server behind an
+// OpenAI-compatible HTTP shim so chat/readiness keep working.
+func (m *Manager) superviseDiffusion(li *liveInstance, rt *runtimes.Runtime, s LoadSettings, mdl *models.Model, canvas uint32) {
+	logFile, err := os.OpenFile(li.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		m.failInstance(li, -1, fmt.Errorf("opening instance log: %w", err))
+		return
+	}
+	defer logFile.Close()
+
+	actx, acancel := context.WithCancel(context.Background())
+	defer acancel()
+	go m.streamLogs(actx, li)
+
+	diffExe, err := ResolveDiffusionBinary(rt.ExecutablePath)
+	if err != nil {
+		m.failInstance(li, -1, err)
+		return
+	}
+
+	fmt.Fprintf(logFile, "%s starting %s ===\n", launchMarker(li.ID), li.StartedAt.Format(time.RFC3339))
+	fmt.Fprintf(logFile, "runtime: %s (%s %s)\ndiffusion-server: %s\nmodel: %s\n",
+		rt.ID, rt.Backend, rt.VersionOutput, diffExe, mdl.PrimaryPath)
+
+	env := defaultEnv(m.tempDir, m.cacheDir)
+	userEnv, rejected := FilterEnv(s.EnvOverrides)
+	for k, v := range userEnv {
+		env[k] = v
+	}
+	for _, k := range rejected {
+		fmt.Fprintf(logFile, "note: env override %s rejected by allowlist\n", k)
+	}
+	for _, kv := range runtimes.LibPathEnv(rt.ExecutablePath) {
+		k, v, _ := strings.Cut(kv, "=")
+		env[k] = v
+	}
+
+	ngl := resolveNGL(s)
+	maxTok := s.ContextLength // may be 0 → auto
+	if canvas == 0 {
+		canvas = 256
+	}
+
+	m.setState(li, StateLoading)
+	m.emit(li)
+
+	engine, err := StartDiffusionEngine(DiffusionLaunch{
+		Exe:       diffExe,
+		ModelPath: mdl.PrimaryPath,
+		WorkDir:   filepath.Dir(diffExe),
+		Env:       env,
+		NGL:       ngl,
+		MaxTok:    maxTok,
+		Canvas:    canvas,
+		Log:       logFile,
+		TempDir:   m.tempDir,
+	})
+	if err != nil {
+		m.failInstance(li, -1, fmt.Errorf("starting diffusion visual server: %w", err))
+		return
+	}
+	li.diffEngine = engine
+	li.handle = engine.handle
+	li.PID = engine.PID()
+	_, _ = m.db.Exec(`UPDATE instances SET pid = ? WHERE id = ?`, li.PID, li.ID)
+
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", li.Port))
+	if err != nil {
+		_ = engine.Close()
+		m.failInstance(li, -1, fmt.Errorf("binding diffusion shim: %w", err))
+		return
+	}
+	shim := StartDiffusionShim(ln, engine, li.apiKey, li.ModelAlias)
+	li.diffShim = shim
+
+	m.setState(li, StateReady)
+	m.library.RecordLoad(li.ModelID, li.RuntimeID, "ok")
+	if s.SaveOnSuccess {
+		if cfg, err := json.Marshal(s); err == nil {
+			if err := m.library.SaveLastGood(li.ModelID, cfg); err != nil {
+				m.log.Warn("saving last-known-good preset failed", "err", err)
+			}
+		}
+	}
+	m.emit(li)
+
+	exitCh := make(chan int, 1)
+	go func() {
+		code, _ := engine.Wait()
+		exitCh <- code
+	}()
+
+	code := <-exitCh
+	_ = shim.Close()
+	m.handleExit(li, code)
+	close(li.done)
+}
+
 // launchMarker starts each launch's section in the append-only log file.
 func launchMarker(id string) string { return "=== openinfer instance " + id }
 
@@ -573,6 +717,26 @@ func (m *Manager) Stop(modelID string, force bool) error {
 	m.emit(li)
 	if li.cancel != nil {
 		li.cancel()
+	}
+	if li.diffShim != nil {
+		_ = li.diffShim.Close()
+	}
+	if li.diffEngine != nil {
+		if force {
+			li.diffEngine.forceKill()
+			return nil
+		}
+		go func() {
+			_ = li.diffEngine.Close()
+		}()
+		go func() {
+			select {
+			case <-li.done:
+			case <-time.After(20 * time.Second):
+				li.diffEngine.forceKill()
+			}
+		}()
+		return nil
 	}
 	if li.handle != nil {
 		if force {

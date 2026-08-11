@@ -265,5 +265,7 @@ func (c *Client) Repo(ctx context.Context, repo string) (*RepoInfo, error) {
 
 // DownloadURL builds the resolve URL for a repository file.
 func (c *Client) DownloadURL(repo, path string) string {
-	return fmt.Sprintf("%s/%s/resolve/main/%s", c.base, repo, path)
+	// ?download=true nudges the Hub toward a direct CDN response suitable
+	// for multi-connection Range downloads.
+	return fmt.Sprintf("%s/%s/resolve/main/%s?download=true", c.base, repo, path)
 }

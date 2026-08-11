@@ -356,13 +356,16 @@ func (s *Service) latestLeaf(convID string) (string, error) {
 
 // TokenEvent is streamed to the UI.
 type TokenEvent struct {
-	ConvID    string `json:"conv_id"`
-	MessageID string `json:"message_id"`
-	Delta     string `json:"delta,omitempty"`
-	Reasoning string `json:"reasoning_delta,omitempty"`
-	Done      bool   `json:"done"`
-	Error     string `json:"error,omitempty"`
-	Stats     any    `json:"stats,omitempty"`
+	ConvID            string `json:"conv_id"`
+	MessageID         string `json:"message_id"`
+	Delta             string `json:"delta,omitempty"`
+	Reasoning         string `json:"reasoning_delta,omitempty"`
+	Snapshot          string `json:"snapshot,omitempty"`           // full content replace (diffusion live canvas)
+	ReasoningSnapshot string `json:"reasoning_snapshot,omitempty"` // full reasoning replace
+	Replace           bool   `json:"replace,omitempty"`            // when true, Snapshot/ReasoningSnapshot replace
+	Done              bool   `json:"done"`
+	Error             string `json:"error,omitempty"`
+	Stats             any    `json:"stats,omitempty"`
 }
 
 // Generate streams an assistant reply for the chain ending at parentID
@@ -531,7 +534,10 @@ func (s *Service) stream(ctx context.Context, conv Conversation, ep Endpoint,
 			break
 		}
 		var chunk struct {
-			Choices []struct {
+			Type      string `json:"type"`
+			Text      string `json:"text"`
+			Reasoning string `json:"reasoning"`
+			Choices   []struct {
 				Delta struct {
 					Content          string `json:"content"`
 					ReasoningContent string `json:"reasoning_content"`
@@ -552,6 +558,25 @@ func (s *Service) stream(ctx context.Context, conv Conversation, ep Endpoint,
 		}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 			continue // tolerate non-JSON SSE lines
+		}
+		// Diffusion live canvas / commit snapshots replace the bubble in place.
+		if (chunk.Type == "diffusion_frame" || chunk.Type == "diffusion_snapshot") && chunk.Text != "" {
+			if !firstToken {
+				stats.TimeToFirstToken = time.Since(start).Seconds()
+				firstToken = true
+			}
+			content.Reset()
+			content.WriteString(chunk.Text)
+			reasoning.Reset()
+			reasoning.WriteString(chunk.Reasoning)
+			s.events.Publish("chat.token", TokenEvent{
+				ConvID:            conv.ID,
+				MessageID:         assistantID,
+				Snapshot:          chunk.Text,
+				ReasoningSnapshot: chunk.Reasoning,
+				Replace:           true,
+			})
+			continue
 		}
 		for _, ch := range chunk.Choices {
 			if ch.Delta.Content != "" {

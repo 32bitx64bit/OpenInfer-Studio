@@ -41,7 +41,7 @@ Events: `download.progress` (bytes, speed, ETA), `download.state_changed`.
 |---|---|
 | GET `/models` | all models (favorites first) |
 | POST `/models/scan` | rescan registered directories |
-| POST `/models/import` | `{"path": "/…/file.gguf"}` sideload |
+| POST `/models/import` | `{"path": "/…/file.gguf"}` copy into managed `models/local--…/files/` (plus same-dir shards/mmproj), then scan |
 | GET `/models/{id}` | model + presets + live instance |
 | PATCH `/models/{id}` | alias, favorite, notes, pinned_runtime, pinned_backend |
 | DELETE `/models/{id}` | two-phase: first call returns `paths`; re-call with `?confirmed=1&delete_files=1` |
@@ -55,7 +55,7 @@ Events: `download.progress` (bytes, speed, ETA), `download.state_changed`.
 | POST `/models/{id}/preview` | resolved command, resolutions, warnings — nothing started |
 | POST `/models/{id}/estimate` | projected memory: weights, draft, mmproj, KV, compute, media, overhead; independent `gpu_bytes`/`cpu_bytes` vs `gpu_budget_bytes`/`cpu_budget_bytes` (`fits_gpu`/`fits_cpu`/`fits`); `offload_fraction` for custom layer offload; `budget_kind` is `VRAM+RAM`, `VRAM`, `RAM`, or `unified RAM` |
 | GET `/models/{id}/draft-candidates[?filter=0\|1]` | draft picker list; filter on (default / `load.filter_incompatible_drafts`) returns only speculative sidecars (mtp-/gemma4-assistant/eagle3-/dflash-/dspark-); filter off returns all other library models |
-| POST `/models/{id}/load` | start (LoadSettings JSON; all fields optional). Speculative: `draft_model`, `draft_max`, `draft_min`, `spec_type`. Embedders: `embedding` (bool; auto-true for detected embedders), `pooling` (`none\|mean\|cls\|last\|rank`; empty = model default; rerankers prefer `rank`). Emits `--embedding` / `--pooling` when the runtime advertises them. Expert/perf: `threads_batch`, `cont_batching`, `cache_reuse`, `prio`, `poll`, `numa`, `fit`, `kv_offload`, `op_offload`, `kv_unified`, `swa_full`, `cpu_moe`, `n_cpu_moe`, `main_gpu`, `device`, `split_mode`, `tensor_split`, `no_warmup`, `raw_args` |
+| POST `/models/{id}/load` | start (LoadSettings JSON; all fields optional). Speculative: `draft_model`, `draft_max`, `draft_min`, `spec_type`. Embedders: `embedding` (bool; auto-true for detected embedders), `pooling` (`none\|mean\|cls\|last\|rank`; empty = model default; rerankers prefer `rank`). Emits `--embedding` / `--pooling` when the runtime advertises them. Block-diffusion models (`is_diffusion`, e.g. DiffusionGemma) launch `llama-diffusion-gemma-visual-server` beside the runtime with an OpenAI-compatible shim instead of `llama-server`. Expert/perf: `threads_batch`, `cont_batching`, `cache_reuse`, `prio`, `poll`, `numa`, `fit`, `kv_offload`, `op_offload`, `kv_unified`, `swa_full`, `cpu_moe`, `n_cpu_moe`, `main_gpu`, `device`, `split_mode`, `tensor_split`, `no_warmup`, `raw_args` |
 | POST `/models/{id}/unload[?force=1]` | graceful / forced stop |
 | POST `/models/{id}/restart` | reload with settings |
 | GET `/models/{id}/logs` | redacted log tail |

@@ -97,6 +97,12 @@ func main() {
 			dl.SetConcurrency(v)
 		}
 	}
+	if n := settings.Get("downloads.connections", ""); n != "" {
+		var v int
+		if _, err := fmt.Sscanf(n, "%d", &v); err == nil {
+			dl.SetConnections(v)
+		}
+	}
 	if err := dl.RecoverAfterRestart(); err != nil {
 		log.Warn("download recovery failed", "err", err)
 	}

@@ -65,7 +65,9 @@ type Metadata struct {
 	IsReranker            bool           `json:"is_reranker"`            // embedding subtype for cross-encoder rank
 	PoolingType           PoolingType    `json:"pooling_type,omitempty"` // none|mean|cls|last|rank
 	EmbeddingLengthOut    uint32         `json:"embedding_length_out,omitempty"`
-	Raw                   map[string]any `json:"-"` // full kv for future use, not serialized to UI
+	IsDiffusion           bool           `json:"is_diffusion"`            // block-diffusion LM (not autoregressive)
+	CanvasLength          uint32         `json:"canvas_length,omitempty"` // diffusion canvas size (tokens)
+	Raw                   map[string]any `json:"-"`                       // full kv for future use, not serialized to UI
 }
 
 // Errors that callers can classify.

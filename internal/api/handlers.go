@@ -99,6 +99,10 @@ func (h *handlers) applySetting(key, value string) {
 		if n, err := strconv.Atoi(value); err == nil {
 			h.d.DL.SetConcurrency(n)
 		}
+	case "downloads.connections":
+		if n, err := strconv.Atoi(value); err == nil {
+			h.d.DL.SetConnections(n)
+		}
 	case "instances.max_loaded":
 		if n, err := strconv.Atoi(value); err == nil {
 			h.d.IM.SetMaxLoaded(n)

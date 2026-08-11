@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -60,7 +61,8 @@ type Manager struct {
 	diskFree DiskSpaceFunc
 
 	mu      sync.Mutex
-	limit   int
+	limit   int // simultaneous download jobs
+	parts   int // parallel Range connections per large file
 	running int
 	cancels map[string]context.CancelFunc
 	authHdr func() string // optional Authorization header provider (HF token)
@@ -69,8 +71,27 @@ type Manager struct {
 func NewManager(db *sql.DB, partialDir string, events EventSink, log *slog.Logger, disk DiskSpaceFunc) *Manager {
 	return &Manager{
 		db: db, partial: partialDir, events: events, log: log, diskFree: disk,
-		http:  &http.Client{Timeout: 0}, // no global timeout; per-request contexts govern
-		limit: 2, cancels: map[string]context.CancelFunc{},
+		http: &http.Client{
+			Timeout: 0, // no global timeout; per-request contexts govern
+			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
+				DialContext: (&net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				ForceAttemptHTTP2:     true,
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   32,
+				MaxConnsPerHost:       32,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   15 * time.Second,
+				ResponseHeaderTimeout: 60 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+			},
+		},
+		limit:   2,
+		parts:   8,
+		cancels: map[string]context.CancelFunc{},
 	}
 }
 
@@ -86,6 +107,26 @@ func (m *Manager) SetConcurrency(n int) {
 	m.limit = n
 	m.mu.Unlock()
 	go m.pump()
+}
+
+// SetConnections changes how many parallel Range connections are used for
+// each large file (Hugging Face CDN often caps a single stream).
+func (m *Manager) SetConnections(n int) {
+	if n < 1 {
+		n = 1
+	}
+	if n > 16 {
+		n = 16
+	}
+	m.mu.Lock()
+	m.parts = n
+	m.mu.Unlock()
+}
+
+func (m *Manager) connections() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.parts
 }
 
 // SetAuthHeader injects a provider for an Authorization header on requests.
@@ -417,6 +458,7 @@ func (m *Manager) fileRow(id, dest string) (*fileRow, error) {
 }
 
 // downloadFile fetches one file with range resumption and verification.
+// Large files use parallel Range connections when the server supports them.
 func (m *Manager) downloadFile(ctx context.Context, id, dest string) error {
 	fr, err := m.fileRow(id, dest)
 	if err != nil {
@@ -427,7 +469,6 @@ func (m *Manager) downloadFile(ctx context.Context, id, dest string) error {
 	if st, err := os.Stat(fr.partial); err == nil {
 		offset = st.Size()
 		if fr.size > 0 && offset > fr.size {
-			// Corrupt partial — restart safely.
 			os.Remove(fr.partial)
 			offset = 0
 		}
@@ -436,9 +477,24 @@ func (m *Manager) downloadFile(ctx context.Context, id, dest string) error {
 		return m.finalize(id, fr)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fr.url, nil)
+	if m.shouldMultipart(fr, offset) {
+		if err := m.downloadMultipart(ctx, id, fr); err != nil {
+			if errors.Is(err, errNoRanges) {
+				m.log.Info("server rejected multipart ranges; falling back to single stream", "url", fr.url)
+				cleanupPartFiles(fr.partial)
+				return m.downloadSingle(ctx, id, fr, 0)
+			}
+			return err
+		}
+		return nil
+	}
+	return m.downloadSingle(ctx, id, fr, offset)
+}
+
+func (m *Manager) newRequest(ctx context.Context, url string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if m.authHdr != nil {
 		if h := m.authHdr(); h != "" {
@@ -446,6 +502,14 @@ func (m *Manager) downloadFile(ctx context.Context, id, dest string) error {
 		}
 	}
 	req.Header.Set("User-Agent", "openinfer-studio/0.1")
+	return req, nil
+}
+
+func (m *Manager) downloadSingle(ctx context.Context, id string, fr *fileRow, offset int64) error {
+	req, err := m.newRequest(ctx, fr.url)
+	if err != nil {
+		return err
+	}
 	if offset > 0 && fr.resumable != 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
 	}
@@ -461,19 +525,17 @@ func (m *Manager) downloadFile(ctx context.Context, id, dest string) error {
 	case resp.StatusCode == http.StatusPartialContent && offset > 0:
 		appendMode = true
 		if fr.resumable == -1 {
-			_, _ = m.db.Exec(`UPDATE download_files SET resumable = 1 WHERE download_id = ? AND dest_path = ?`, id, dest)
+			_, _ = m.db.Exec(`UPDATE download_files SET resumable = 1 WHERE download_id = ? AND dest_path = ?`, id, fr.dest)
 		}
 	case resp.StatusCode == http.StatusOK:
 		if offset > 0 {
-			// Server ignored Range: restart the file (state clearly recorded).
 			m.log.Info("server does not support ranges; restarting file", "url", fr.url)
-			_, _ = m.db.Exec(`UPDATE download_files SET resumable = 0, done_bytes = 0 WHERE download_id = ? AND dest_path = ?`, id, dest)
+			_, _ = m.db.Exec(`UPDATE download_files SET resumable = 0, done_bytes = 0 WHERE download_id = ? AND dest_path = ?`, id, fr.dest)
 			offset = 0
 		}
 	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
-		// Partial is as large as (or larger than) the remote: restart.
 		os.Remove(fr.partial)
-		return m.downloadFile(ctx, id, dest)
+		return m.downloadSingle(ctx, id, fr, 0)
 	default:
 		return fmt.Errorf("HTTP %d for %s", resp.StatusCode, fr.url)
 	}
@@ -491,7 +553,6 @@ func (m *Manager) downloadFile(ctx context.Context, id, dest string) error {
 	if err != nil {
 		return err
 	}
-	// Defensive: ensure append resumes at the expected offset.
 	if appendMode {
 		if st, err := out.Stat(); err == nil && st.Size() != offset {
 			out.Close()
@@ -505,7 +566,7 @@ func (m *Manager) downloadFile(ctx context.Context, id, dest string) error {
 			if n, err := strconv.ParseInt(cl, 10, 64); err == nil {
 				total = n + offset
 				_, _ = m.db.Exec(`UPDATE download_files SET total_bytes = ? WHERE download_id = ? AND dest_path = ?`,
-					total, id, dest)
+					total, id, fr.dest)
 			}
 		}
 	}
@@ -529,7 +590,7 @@ func (m *Manager) downloadFile(ctx context.Context, id, dest string) error {
 				speed = 0.7*speed + 0.3*inst
 				lastEmit = time.Now()
 				lastBytes = written
-				m.persistProgress(id, dest, written)
+				m.persistProgress(id, fr.dest, written)
 				m.emitProgress(id, written, total, speed)
 			}
 		}
@@ -538,12 +599,12 @@ func (m *Manager) downloadFile(ctx context.Context, id, dest string) error {
 		}
 		if rerr != nil {
 			out.Close()
-			m.persistProgress(id, dest, written)
+			m.persistProgress(id, fr.dest, written)
 			return fmt.Errorf("interrupted: %w", rerr)
 		}
 	}
 	out.Close()
-	m.persistProgress(id, dest, written)
+	m.persistProgress(id, fr.dest, written)
 	if st, err := os.Stat(fr.partial); err == nil && st.Size() != written {
 		return fmt.Errorf("partial size mismatch: counter %d, on disk %d", written, st.Size())
 	}

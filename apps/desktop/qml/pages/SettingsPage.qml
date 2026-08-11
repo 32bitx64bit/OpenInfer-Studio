@@ -210,6 +210,15 @@ Item {
                         }
                     }
                     FormField {
+                        label: "Connections per file"
+                        hint: "Parallel Range streams for large files (speeds up Hugging Face). 1 = single stream."
+                        AppSpinBox {
+                            from: 1; to: 16
+                            value: parseInt(page.settings["downloads.connections"] || "8")
+                            onValueModified: page.setSetting("downloads.connections", value)
+                        }
+                    }
+                    FormField {
                         label: "Max loaded models"
                         hint: "Simultaneously loaded models (1–32)."
                         AppSpinBox {

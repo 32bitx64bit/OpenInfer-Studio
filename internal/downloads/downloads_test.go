@@ -55,16 +55,21 @@ func (s *rangeServer) handler(w http.ResponseWriter, r *http.Request) {
 	atomic.AddInt64(s.requests, 1)
 	body := s.body
 	offset := int64(0)
+	end := int64(len(body) - 1)
 	if rh := r.Header.Get("Range"); rh != "" && !s.noRange {
-		fmt.Sscanf(rh, "bytes=%d-", &offset)
-		if offset >= int64(len(body)) {
+		// Support both bytes=N- and bytes=N-M.
+		if _, err := fmt.Sscanf(rh, "bytes=%d-%d", &offset, &end); err != nil {
+			end = int64(len(body) - 1)
+			fmt.Sscanf(rh, "bytes=%d-", &offset)
+		}
+		if offset >= int64(len(body)) || end >= int64(len(body)) || end < offset {
 			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 			return
 		}
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, len(body)-1, len(body)))
-		w.Header().Set("Content-Length", strconv.Itoa(len(body)-int(offset)))
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, end, len(body)))
+		w.Header().Set("Content-Length", strconv.FormatInt(end-offset+1, 10))
 		w.WriteHeader(http.StatusPartialContent)
-		w.Write(body[offset:])
+		w.Write(body[offset : end+1])
 		return
 	}
 	// Full request (or server that ignores Range).
@@ -254,5 +259,52 @@ func TestDownloadDiskPreflight(t *testing.T) {
 	state, err := m.WaitComplete(context.Background(), id)
 	if state != "failed" || err == nil || !strings.Contains(err.Error(), "disk") {
 		t.Fatalf("disk preflight not enforced: state=%s err=%v", state, err)
+	}
+}
+
+func TestSplitRanges(t *testing.T) {
+	parts := splitRanges(32<<20, 4, "/tmp/x.part")
+	if len(parts) != 4 {
+		t.Fatalf("parts=%d", len(parts))
+	}
+	if parts[0].start != 0 || parts[len(parts)-1].end != (32<<20)-1 {
+		t.Fatalf("bad coverage: %+v", parts)
+	}
+	for i := 1; i < len(parts); i++ {
+		if parts[i].start != parts[i-1].end+1 {
+			t.Fatalf("gap/overlap at %d: %+v", i, parts)
+		}
+	}
+}
+
+func TestDownloadMultipart(t *testing.T) {
+	m, _, dir := testManager(t)
+	m.SetConnections(4)
+	body := []byte(strings.Repeat("abcdefgh", (8<<20)/8)) // exactly 8 MiB
+	sum := sha256.Sum256(body)
+	rs := &rangeServer{body: body, requests: new(int64)}
+	srv := httptest.NewServer(http.HandlerFunc(rs.handler))
+	defer srv.Close()
+
+	dest := filepath.Join(dir, "multi.gguf")
+	id, err := m.Enqueue("model", "multipart", dir,
+		[]FileSpec{{URL: srv.URL + "/multi.gguf", DestPath: dest, Size: int64(len(body)),
+			SHA256: hex.EncodeToString(sum[:])}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := m.WaitComplete(context.Background(), id)
+	if err != nil || state != "complete" {
+		t.Fatalf("state=%s err=%v", state, err)
+	}
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(body) || string(got) != string(body) {
+		t.Fatalf("multipart content mismatch: got %d want %d", len(got), len(body))
+	}
+	if n := atomic.LoadInt64(rs.requests); n < 4 {
+		t.Fatalf("expected >=4 range requests, got %d", n)
 	}
 }

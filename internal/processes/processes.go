@@ -5,6 +5,7 @@ package processes
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 )
@@ -52,20 +53,28 @@ func buildEnv(overrides map[string]string) []string {
 	return out
 }
 
-// Start launches the process with platform-specific supervision (process
-// groups + parent-death signal on Linux/macOS, Job Object on Windows).
-func Start(spec Spec, stdout, stderr *os.File) (*Handle, error) {
+func prepareCmd(spec Spec) (*exec.Cmd, error) {
 	if spec.Exe == "" {
 		return nil, fmt.Errorf("empty executable path")
 	}
 	cmd := exec.Command(spec.Exe, spec.Args...)
 	cmd.Dir = spec.Dir
 	cmd.Env = buildEnv(spec.Env)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
 	if err := platformSetup(cmd); err != nil {
 		return nil, err
 	}
+	return cmd, nil
+}
+
+// Start launches the process with platform-specific supervision (process
+// groups + parent-death signal on Linux/macOS, Job Object on Windows).
+func Start(spec Spec, stdout, stderr *os.File) (*Handle, error) {
+	cmd, err := prepareCmd(spec)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting %s: %w", spec.Exe, err)
 	}
@@ -77,6 +86,41 @@ func Start(spec Spec, stdout, stderr *os.File) (*Handle, error) {
 		return nil, err
 	}
 	return h, nil
+}
+
+// StartPiped launches the process with stdin/stdout pipes for protocol
+// drivers (e.g. DiffusionGemma visual server). stderr is written to errOut
+// when non-nil.
+func StartPiped(spec Spec, errOut io.Writer) (h *Handle, stdin io.WriteCloser, stdout io.ReadCloser, err error) {
+	cmd, err := prepareCmd(spec)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	stdin, err = cmd.StdinPipe()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	stdout, err = cmd.StdoutPipe()
+	if err != nil {
+		stdin.Close()
+		return nil, nil, nil, err
+	}
+	if errOut != nil {
+		cmd.Stderr = errOut
+	}
+	if err := cmd.Start(); err != nil {
+		stdin.Close()
+		stdout.Close()
+		return nil, nil, nil, fmt.Errorf("starting %s: %w", spec.Exe, err)
+	}
+	h = &Handle{Cmd: cmd}
+	if err := platformAfterStart(cmd); err != nil {
+		h.KillTree()
+		stdin.Close()
+		stdout.Close()
+		return nil, nil, nil, err
+	}
+	return h, stdin, stdout, nil
 }
 
 // Signal requests graceful shutdown (SIGTERM on unix, CTRL_BREAK/Terminate on

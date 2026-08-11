@@ -93,6 +93,7 @@ var envAllowlist = map[string]bool{
 	"GGML_SCHED_DEBUG": true, "LLAMA_ARG_THREADS": true,
 	"CUDA_VISIBLE_DEVICES": true, "ROCR_VISIBLE_DEVICES": true,
 	"GGML_LOG_LEVEL": true,
+	"NGL":            true, "MAXTOK": true,
 }
 
 // Resolution records how an Auto value resolved, for transparent display.

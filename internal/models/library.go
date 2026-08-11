@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -238,6 +239,7 @@ func (l *Library) Scan() (int, error) {
 		// community draft names that still use a normal architecture string.
 		md.ApplySpeculativeFlags(primary)
 		md.ApplyEmbeddingFlags(primary)
+		md.ApplyDiffusionFlags(primary)
 		var total int64
 		for _, f := range files {
 			total += f.size
@@ -288,6 +290,10 @@ func (l *Library) Scan() (int, error) {
 			hasVision, hasAudio, multimodal = false, false, false
 			proj = ""
 		}
+		if md.IsDiffusion {
+			hasVision, hasAudio, multimodal = false, false, false
+			proj = ""
+		}
 		metaJSON, _ := json.Marshal(map[string]any{
 			"name": md.Name, "tokenizer": md.Tokenizer,
 			"multimodal": multimodal, "has_vision": hasVision, "has_audio": hasAudio,
@@ -299,6 +305,8 @@ func (l *Library) Scan() (int, error) {
 			"is_reranker":          md.IsReranker,
 			"pooling_type":         md.PoolingType,
 			"embedding_length_out": md.EmbeddingLengthOut,
+			"is_diffusion":         md.IsDiffusion,
+			"canvas_length":        md.CanvasLength,
 			"version":              md.Version,
 			"block_count":          md.BlockCount, "head_count": md.HeadCount,
 			"head_count_kv": md.HeadCountKV, "head_count_kv_layers": md.HeadCountKVLayers,
@@ -507,36 +515,265 @@ func (l *Library) Delete(id string, deleteFiles bool) ([]string, error) {
 			}
 			removed = append(removed, f)
 		}
+		// Best-effort: prune empty group/repo dirs left by an import/download.
+		pruneEmptyParents(m.PrimaryPath, managedClean)
 	}
 	_, err = l.db.Exec(`DELETE FROM models WHERE id = ?`, id)
 	return removed, err
 }
 
-// ImportFile registers an existing GGUF file without moving it.
+func pruneEmptyParents(filePath, stopAt string) {
+	dir := filepath.Dir(filePath)
+	stopAt = filepath.Clean(stopAt)
+	for {
+		clean := filepath.Clean(dir)
+		if clean == stopAt || !strings.HasPrefix(clean, stopAt+string(os.PathSeparator)) {
+			return
+		}
+		entries, err := os.ReadDir(clean)
+		if err != nil || len(entries) > 0 {
+			return
+		}
+		if err := os.Remove(clean); err != nil {
+			return
+		}
+		dir = filepath.Dir(clean)
+	}
+}
+
+// ImportFile copies a GGUF from disk into the managed models directory (same
+// ownership model as Hugging Face downloads), then rescans the library.
+// Sibling split shards and an mmproj in the same source directory are copied
+// alongside the selected file. The original path is left untouched.
+//
+// Layout: <managed>/local--<SafeName>/files/<basename.gguf>
+//
+// Files already inside the managed tree are registered in place (no copy).
 func (l *Library) ImportFile(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", err
 	}
+	st, err := os.Stat(abs)
+	if err != nil || st.IsDir() {
+		return "", fmt.Errorf("invalid model path %q", abs)
+	}
+	if !strings.HasSuffix(strings.ToLower(abs), ".gguf") {
+		return "", fmt.Errorf("not a GGUF file: %s", abs)
+	}
 	if _, err := gguf.ParseFile(abs); err != nil {
 		return "", fmt.Errorf("not a readable GGUF model: %w", err)
 	}
-	dir := filepath.Dir(abs)
-	// Register the containing directory (idempotent) and rescan.
-	dirs, _ := l.Directories()
-	known := false
-	for _, d := range dirs {
-		if d["path"].(string) == dir {
-			known = true
-		}
-	}
-	if !known {
-		if _, err := l.AddDirectory(dir); err != nil && !strings.Contains(err.Error(), "UNIQUE") {
+
+	managedClean := filepath.Clean(l.managed)
+	if strings.HasPrefix(filepath.Clean(abs), managedClean+string(os.PathSeparator)) {
+		if _, err := l.Scan(); err != nil {
 			return "", err
 		}
+		return stableID(abs), nil
 	}
+
+	sources, err := importBundle(abs)
+	if err != nil {
+		return "", err
+	}
+
+	repoName := safeImportName(filepath.Base(abs))
+	destDir := filepath.Join(l.managed, "local--"+repoName, "files")
+	if conflict, err := destConflict(destDir, sources); err != nil {
+		return "", err
+	} else if conflict {
+		repoName = repoName + "-" + uuid.NewString()[:8]
+		destDir = filepath.Join(l.managed, "local--"+repoName, "files")
+	}
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return "", err
+	}
+
+	var primaryDest string
+	for _, src := range sources {
+		dest := filepath.Join(destDir, filepath.Base(src))
+		if err := copyFile(src, dest); err != nil {
+			return "", fmt.Errorf("copying %s: %w", filepath.Base(src), err)
+		}
+		if filepath.Clean(src) == filepath.Clean(abs) {
+			primaryDest = dest
+		}
+	}
+	if primaryDest == "" {
+		primaryDest = filepath.Join(destDir, filepath.Base(abs))
+	}
+
+	id := stableID(primaryDest)
 	if _, err := l.Scan(); err != nil {
 		return "", err
 	}
-	return stableID(abs), nil
+	// Scan may pick a different primary among split shards; resolve by path.
+	if _, err := l.Get(id); err != nil {
+		if resolved := l.idForPath(primaryDest); resolved != "" {
+			id = resolved
+		} else {
+			return "", fmt.Errorf("imported file was not registered by library scan")
+		}
+	}
+	// Stamp source after scan so ON CONFLICT does not wipe it.
+	_, _ = l.db.Exec(`UPDATE models SET source_repo = ? WHERE id = ?`, "local/"+repoName, id)
+	if l.events != nil {
+		l.events.Publish("library.model_imported", map[string]any{
+			"id": id, "path": primaryDest, "source": abs,
+		})
+	}
+	return id, nil
+}
+
+func (l *Library) idForPath(path string) string {
+	want := filepath.Clean(path)
+	all, err := l.List()
+	if err != nil {
+		return ""
+	}
+	for _, m := range all {
+		if filepath.Clean(m.PrimaryPath) == want || filepath.Clean(m.ProjectorPath) == want {
+			return m.ID
+		}
+		for _, f := range m.Files {
+			if filepath.Clean(f) == want {
+				return m.ID
+			}
+		}
+	}
+	return ""
+}
+
+// importBundle returns the selected GGUF plus same-directory split shards and
+// an mmproj sibling when present.
+func importBundle(primary string) ([]string, error) {
+	dir := filepath.Dir(primary)
+	base := filepath.Base(primary)
+	lower := strings.ToLower(base)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return []string{primary}, nil
+	}
+
+	stem := primary
+	if splitSuffix.MatchString(stem) {
+		stem = splitSuffix.ReplaceAllString(stem, "")
+	} else {
+		stem = strings.TrimSuffix(stem, filepath.Ext(stem))
+	}
+	stemBase := filepath.Base(stem)
+
+	out := []string{primary}
+	seen := map[string]bool{filepath.Clean(primary): true}
+	var mmproj string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		nlower := strings.ToLower(name)
+		if !strings.HasSuffix(nlower, ".gguf") {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		if seen[filepath.Clean(full)] {
+			continue
+		}
+		if strings.Contains(nlower, "mmproj") || strings.Contains(nlower, "mm-proj") {
+			if !strings.Contains(lower, "mmproj") && !strings.Contains(lower, "mm-proj") {
+				mmproj = full
+			}
+			continue
+		}
+		candStem := full
+		if splitSuffix.MatchString(candStem) {
+			candStem = splitSuffix.ReplaceAllString(candStem, "")
+		} else {
+			candStem = strings.TrimSuffix(candStem, filepath.Ext(candStem))
+		}
+		if filepath.Base(candStem) == stemBase {
+			out = append(out, full)
+			seen[filepath.Clean(full)] = true
+		}
+	}
+	if mmproj != "" {
+		out = append(out, mmproj)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func safeImportName(filename string) string {
+	base := strings.TrimSuffix(filename, filepath.Ext(filename))
+	base = aliasSplitRe.ReplaceAllString(base, "")
+	base = strings.TrimSpace(base)
+	if base == "" {
+		base = "model"
+	}
+	repl := strings.NewReplacer("/", "-", "\\", "-", "..", "", " ", "-", "\t", "-")
+	base = repl.Replace(base)
+	base = regexp.MustCompile(`[^A-Za-z0-9._-]+`).ReplaceAllString(base, "-")
+	base = regexp.MustCompile(`-{2,}`).ReplaceAllString(base, "-")
+	base = strings.Trim(base, ".-_")
+	if base == "" {
+		base = "model"
+	}
+	if len(base) > 80 {
+		base = base[:80]
+	}
+	return base
+}
+
+func destConflict(destDir string, sources []string) (bool, error) {
+	for _, src := range sources {
+		dest := filepath.Join(destDir, filepath.Base(src))
+		st, err := os.Stat(dest)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		sst, err := os.Stat(src)
+		if err != nil {
+			return false, err
+		}
+		if st.Size() != sst.Size() {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func copyFile(src, dst string) error {
+	if filepath.Clean(src) == filepath.Clean(dst) {
+		return nil
+	}
+	if st, err := os.Stat(dst); err == nil {
+		sst, serr := os.Stat(src)
+		if serr == nil && st.Size() == sst.Size() {
+			return nil // identical-sized file already present
+		}
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp := dst + ".copying"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
