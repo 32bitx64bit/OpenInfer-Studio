@@ -28,6 +28,7 @@ Item {
     property var lastStats: null
     property string errorText: ""
     property var expandedReasoning: ({})   // messageId → bool
+    property bool _pinningChat: false
     property string pendingAudioPath: ""
     property string pendingAudioName: ""
     property bool conversationsLoading: false
@@ -147,7 +148,8 @@ Item {
             if (st !== 200) return
             page.messages = (data && data.messages) || []
             page.chain = page.buildChain(page.latestLeaf())
-            chatList.positionViewAtEnd()
+            chatList.stickToEnd = true
+            page.pinChatToEnd()
         })
     }
 
@@ -323,7 +325,8 @@ Item {
         var ch = page.chain.slice()
         ch.push(msg)
         page.chain = ch
-        chatList.positionViewAtEnd()
+        chatList.stickToEnd = true
+        page.pinChatToEnd()
     }
 
     function regenerate(assistantMsg) {
@@ -357,10 +360,9 @@ Item {
                 }
                 if (payload.done) {
                     page.generating = false
-                    page.streamingId = ""
-                    page.streamContent = ""
-                    page.streamReasoning = ""
                     page.lastStats = payload.stats || null
+                    chatList.stickToEnd = true
+                    page.pinChatToEnd()
                     page.reloadMessagesSoon()
                 }
             }
@@ -385,7 +387,11 @@ Item {
                 if (st !== 200) return
                 page.messages = (data && data.messages) || []
                 page.chain = page.buildChain(page.latestLeaf())
-                chatList.positionViewAtEnd()
+                page.streamingId = ""
+                page.streamContent = ""
+                page.streamReasoning = ""
+                chatList.stickToEnd = true
+                page.pinChatToEnd()
             })
         }
     }
@@ -405,11 +411,24 @@ Item {
         }
     }
 
-    // Follow-scroll while streaming (throttled).
+    // Pin to the last pixel of the last bubble. positionViewAtEnd() aligns
+    // the last *item* into view, which for a tall reasoning+answer message
+    // shows the top of that bubble (the jump after reasoning finishes).
+    function pinChatToEnd() {
+        if (page._pinningChat) return
+        page._pinningChat = true
+        Qt.callLater(function() {
+            page._pinningChat = false
+            if (!chatList || chatList.count < 1) return
+            if (!(chatList.stickToEnd || page.generating)) return
+            chatList.positionViewAtIndex(chatList.count - 1, ListView.End)
+        })
+    }
+
     Timer {
         id: followTimer
         interval: 120
-        onTriggered: chatList.positionViewAtEnd()
+        onTriggered: page.pinChatToEnd()
     }
 
     RowLayout {
@@ -600,6 +619,11 @@ Item {
                 topMargin: 12
                 bottomMargin: 12
                 model: page.chain
+                property bool stickToEnd: true
+                onContentHeightChanged: if (stickToEnd || page.generating) page.pinChatToEnd()
+                onCountChanged: if (stickToEnd || page.generating) page.pinChatToEnd()
+                onHeightChanged: if (stickToEnd || page.generating) page.pinChatToEnd()
+                onMovementEnded: stickToEnd = atYEnd
 
                 EmptyState {
                     visible: page.chain.length === 0
@@ -759,6 +783,20 @@ Item {
                                         wrapMode: Text.WordWrap
                                         color: AppTheme.textDim
                                         font.pixelSize: AppTheme.fontSmall
+                                    }
+                                    Label {
+                                        visible: page.reasoningExpanded(modelData.id)
+                                        text: "▴ Collapse reasoning"
+                                        color: AppTheme.textFaint
+                                        font.pixelSize: AppTheme.fontSmall
+                                        HoverHandler { cursorShape: Qt.PointingHandCursor }
+                                        TapHandler {
+                                            onTapped: {
+                                                page.toggleReasoning(modelData.id)
+                                                chatList.stickToEnd = true
+                                                page.pinChatToEnd()
+                                            }
+                                        }
                                     }
                                 }
 
