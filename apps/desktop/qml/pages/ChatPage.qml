@@ -421,7 +421,14 @@ Item {
             page._pinningChat = false
             if (!chatList || chatList.count < 1) return
             if (!(chatList.stickToEnd || page.generating)) return
-            chatList.positionViewAtIndex(chatList.count - 1, ListView.End)
+            var maxY = chatList.lastMessageMaxY()
+            if (maxY === undefined) {
+                chatList.positionViewAtIndex(chatList.count - 1, ListView.End)
+                maxY = chatList.lastMessageMaxY()
+            }
+            if (maxY !== undefined)
+                chatList.contentY = maxY
+            chatList.clampToLastMessage()
         })
     }
 
@@ -618,12 +625,53 @@ Item {
                 spacing: 10
                 topMargin: 12
                 bottomMargin: 12
+                boundsBehavior: Flickable.StopAtBounds
+                boundsMovement: Flickable.StopAtBounds
                 model: page.chain
                 property bool stickToEnd: true
-                onContentHeightChanged: if (stickToEnd || page.generating) page.pinChatToEnd()
+                property bool _clamping: false
+
+                // ListView estimates contentHeight from average delegate
+                // height, so Flickable's own end is past the last bubble.
+                // Clamp to the last instantiated item's bottom instead.
+                function lastMessageMaxY() {
+                    if (count < 1)
+                        return originY
+                    var last = itemAtIndex(count - 1)
+                    if (!last || last.height <= 0)
+                        return undefined
+                    return Math.max(originY, last.y + last.height + bottomMargin - height)
+                }
+
+                function clampToLastMessage() {
+                    if (_clamping)
+                        return
+                    var maxY = lastMessageMaxY()
+                    if (maxY === undefined)
+                        return
+                    if (contentY > maxY) {
+                        _clamping = true
+                        cancelFlick()
+                        contentY = maxY
+                        _clamping = false
+                    }
+                }
+
+                function atLastMessage() {
+                    var maxY = lastMessageMaxY()
+                    if (maxY === undefined)
+                        return atYEnd
+                    return contentY >= maxY - 1
+                }
+
+                onContentYChanged: clampToLastMessage()
+                onContentHeightChanged: {
+                    clampToLastMessage()
+                    if (stickToEnd || page.generating) page.pinChatToEnd()
+                }
                 onCountChanged: if (stickToEnd || page.generating) page.pinChatToEnd()
                 onHeightChanged: if (stickToEnd || page.generating) page.pinChatToEnd()
-                onMovementEnded: stickToEnd = atYEnd
+                onMovementEnded: stickToEnd = atLastMessage()
 
                 EmptyState {
                     visible: page.chain.length === 0
