@@ -485,7 +485,7 @@ Dialog {
                                 if (root.estimate.fits_cpu === false) bits.push("system RAM")
                                 if (bits.length === 0) bits.push("available memory")
                                 return "Likely exceeds " + bits.join(" and ")
-                                    + " — reduce context, KV type, or GPU layers."
+                                    + " — reduce context, KV type, or GPU layers, or Load anyway if you know this machine can handle it."
                             }
                             color: AppTheme.warning
                             font.pixelSize: AppTheme.fontSmall
@@ -1363,11 +1363,12 @@ Dialog {
                     Item { Layout.fillWidth: true }
                     AppButton { text: "Cancel"; onClicked: root.close() }
                     AppButton {
-                        text: "Load model"
-                        primary: true
-                        enabled: root.estimate ? root.estimate.fits : true
-                        ToolTip.visible: hovered && root.estimate && !root.estimate.fits
-                        ToolTip.text: "Estimated to exceed available memory"
+                        readonly property bool overBudget: !!(root.estimate && !root.estimate.fits)
+                        text: overBudget ? "Load anyway" : "Load model"
+                        primary: !overBudget
+                        danger: overBudget
+                        ToolTip.visible: hovered && overBudget
+                        ToolTip.text: "Estimate exceeds detected memory. Load anyway if you know this machine can handle it."
                         onClicked: {
                             root.loadError = ""
                             root.api.post("/api/v1/models/" + root.modelId + "/load", root.settings,
