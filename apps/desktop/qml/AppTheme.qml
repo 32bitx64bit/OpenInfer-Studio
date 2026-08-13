@@ -73,6 +73,22 @@ QtObject {
         return v ? v.toFixed(1) + " tok/s" : "—"
     }
 
+    // F32 / F16 / BF16, or unknown (empty). Q8, K-quants, IQ, Unsloth UD, etc. are not.
+    function isFullPrecisionQuant(q) {
+        var u = String(q || "").toUpperCase()
+        if (u.indexOf("UD-") === 0)
+            u = u.substring(3)
+        return u === "" || u === "F32" || u === "F16" || u === "BF16"
+    }
+
+    function isUnslothDynamicQuant(q) {
+        return String(q || "").toUpperCase().indexOf("UD-") === 0
+    }
+
+    function quantTagTone(q) {
+        return isUnslothDynamicQuant(q) ? warning : info
+    }
+
     // Apply Fusion palette so stock controls inherit the app theme.
     function applyPalette(target) {
         if (!target || !target.palette)

@@ -86,6 +86,9 @@ func fileSpecType(path string) string {
 // basename has no token, fall back to a parent directory that is itself
 // a known quant label (e.g. Q4_K_M/model.gguf).
 func quantOf(path string) string {
+	if q := gguf.UnslothDynamicQuant(path, ""); q != "" {
+		return q
+	}
 	base := path
 	dir := ""
 	if i := strings.LastIndex(base, "/"); i >= 0 {
@@ -101,6 +104,11 @@ func quantOf(path string) string {
 			folder = folder[i+1:]
 		}
 		folder = strings.ToUpper(folder)
+		if rest, ok := strings.CutPrefix(folder, "UD-"); ok {
+			if _, known := quantRanks[rest]; known {
+				return folder
+			}
+		}
 		if _, ok := quantRanks[folder]; ok {
 			return folder
 		}
@@ -552,7 +560,8 @@ var quantRanks = map[string]int{
 // quantRank returns the sort rank of a group; unknown quants rank by a
 // size-derived estimate between Q8_0 and F16.
 func quantRank(g FileGroup) int {
-	if r, ok := quantRanks[g.Quant]; ok {
+	q := strings.TrimPrefix(g.Quant, "UD-")
+	if r, ok := quantRanks[q]; ok {
 		return r
 	}
 	return 45

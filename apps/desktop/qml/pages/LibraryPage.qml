@@ -138,6 +138,7 @@ Item {
                 if (m.metadata && (m.metadata.is_embedding || m.metadata.is_reranker)) return true
             }
             if (f === "reranker" && m.metadata && m.metadata.is_reranker) return true
+            if (f === "ud" && AppTheme.isUnslothDynamicQuant(m.quantization)) return true
             return false
         })
     }
@@ -246,7 +247,11 @@ Item {
                                         ? modelData.metadata.tensor_errors.join("\n") : ""
                                     HoverHandler { id: corruptHover }
                                 }
-                                Tag { visible: modelData.quantization !== ""; text: modelData.quantization; tone: AppTheme.info }
+                                Tag {
+                                    visible: modelData.quantization !== ""
+                                    text: modelData.quantization
+                                    tone: AppTheme.quantTagTone(modelData.quantization)
+                                }
                                 Tag { visible: modelData.architecture !== ""; text: modelData.architecture; tone: AppTheme.accent }
                                 Tag {
                                     visible: page.mtpTag(modelData) !== ""

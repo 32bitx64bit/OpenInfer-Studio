@@ -24,6 +24,7 @@ Item {
     property bool withVision: true
     property bool withDraft: true
     property bool showFilePaths: false
+    property bool hideQ8AndBelow: false
     property bool detailLoading: false
     property bool hasToken: false
     signal downloadQueued(string label)
@@ -101,6 +102,13 @@ Item {
             return ""
         }
         return group.vision ? "vision" : ""
+    }
+
+    function filteredDetailGroups() {
+        if (!page.hideQ8AndBelow) return page.detailGroups
+        return page.detailGroups.filter(function(g) {
+            return AppTheme.isFullPrecisionQuant(g.quant)
+        })
     }
 
     function reload() {
@@ -481,22 +489,34 @@ Item {
                     }
                 }
 
-                AppCheckBox {
+                RowLayout {
                     visible: page.detailGroups.length > 0
-                    text: "Show individual file paths"
-                    checked: page.showFilePaths
-                    onToggled: page.showFilePaths = checked
+                    Layout.fillWidth: true
+                    spacing: AppTheme.gap
+                    AppCheckBox {
+                        text: "Show individual file paths"
+                        checked: page.showFilePaths
+                        onToggled: page.showFilePaths = checked
+                    }
+                    AppCheckBox {
+                        text: "Hide Q8 and below"
+                        checked: page.hideQ8AndBelow
+                        ToolTip.visible: hovered
+                        ToolTip.text: "Show only F32, F16, and BF16. Q8, K-quants, IQ, and Unsloth UD files are hidden."
+                        onToggled: page.hideQ8AndBelow = checked
+                    }
+                    Item { Layout.fillWidth: true }
                 }
 
                 AppGroupBox {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    title: "Available files (" + page.detailGroups.length + " groups)"
+                    title: "Available files (" + page.filteredDetailGroups().length + " groups)"
                     ListView {
                         anchors.fill: parent
                         clip: true
                         spacing: 8
-                        model: page.detailGroups
+                        model: page.filteredDetailGroups()
                         delegate: Card {
                             width: ListView.view.width - 4
                             implicitHeight: gcol.implicitHeight + 20
@@ -508,6 +528,12 @@ Item {
                                 RowLayout {
                                     Layout.fillWidth: true
                                     Label { text: modelData.label; color: AppTheme.text; font.weight: Font.DemiBold }
+                                    Tag {
+                                        visible: AppTheme.isUnslothDynamicQuant(modelData.quant)
+                                        text: "UD"
+                                        tone: AppTheme.warning
+                                        Layout.minimumWidth: implicitWidth
+                                    }
                                     Tag { visible: modelData.split; text: modelData.parts + " parts"; tone: AppTheme.info; Layout.minimumWidth: implicitWidth }
                                     Tag {
                                         visible: page.mtpLabel(modelData.mtp) !== ""

@@ -14,6 +14,10 @@ func TestQuantOf(t *testing.T) {
 		"model-F16.gguf":                               "F16",
 		"model.gguf":                                   "",
 		"model-Q4_K_M-00001-of-00002.gguf":             "Q4_K_M",
+		"Qwen3-8B-UD-Q4_K_XL.gguf":                     "UD-Q4_K_XL",
+		"Llama-3.1-8B-Instruct-UD-IQ3_XXS.gguf":        "UD-IQ3_XXS",
+		"Qwen3-8B-UD-Q8_K_XL.gguf":                     "UD-Q8_K_XL",
+		"UD-Q5_K_XL/weights.gguf":                      "UD-Q5_K_XL",
 		// Requantized uploads keep a leftover .f16.gguf fragment before the real quant.
 		"Q4_K_M/amd.Instella-MoE-16B-A3B-Think.f16.gguf.Q4_K_M.gguf": "Q4_K_M",
 		"Q2_K/amd.Instella-MoE-16B-A3B-Think.f16.gguf.Q2_K.gguf":     "Q2_K",
@@ -25,6 +29,32 @@ func TestQuantOf(t *testing.T) {
 	for in, want := range cases {
 		if got := quantOf(in); got != want {
 			t.Errorf("quantOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestGroupFilesUnslothDynamic(t *testing.T) {
+	files := []FileEntry{
+		{Path: "Qwen3-8B-UD-Q4_K_XL.gguf", Size: 100},
+		{Path: "Qwen3-8B-UD-Q8_K_XL.gguf", Size: 200},
+		{Path: "Qwen3-8B-F16.gguf", Size: 300},
+	}
+	groups, _, _ := GroupFiles(files)
+	if len(groups) != 3 {
+		t.Fatalf("want 3 groups, got %d: %v", len(groups), labels(groups))
+	}
+	byQuant := map[string]FileGroup{}
+	for _, g := range groups {
+		byQuant[g.Quant] = g
+	}
+	for _, q := range []string{"UD-Q4_K_XL", "UD-Q8_K_XL", "F16"} {
+		g, ok := byQuant[q]
+		if !ok {
+			t.Errorf("missing group %q in %v", q, labels(groups))
+			continue
+		}
+		if g.Label != q {
+			t.Errorf("quant %q label = %q", q, g.Label)
 		}
 	}
 }
