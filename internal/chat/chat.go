@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openinfer/openinfer-studio/internal/reasoning"
 )
 
 type EventSink interface {
@@ -518,9 +519,10 @@ func (s *Service) stream(ctx context.Context, conv Conversation, ep Endpoint,
 	}
 
 	var content strings.Builder
-	var reasoning strings.Builder
+	var reasoningBuf strings.Builder
 	stats := &Stats{}
 	firstToken := false
+	var tagSplit reasoning.Splitter
 
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 64<<10), 4<<20)
@@ -567,8 +569,8 @@ func (s *Service) stream(ctx context.Context, conv Conversation, ep Endpoint,
 			}
 			content.Reset()
 			content.WriteString(chunk.Text)
-			reasoning.Reset()
-			reasoning.WriteString(chunk.Reasoning)
+			reasoningBuf.Reset()
+			reasoningBuf.WriteString(chunk.Reasoning)
 			s.events.Publish("chat.token", TokenEvent{
 				ConvID:            conv.ID,
 				MessageID:         assistantID,
@@ -579,17 +581,29 @@ func (s *Service) stream(ctx context.Context, conv Conversation, ep Endpoint,
 			continue
 		}
 		for _, ch := range chunk.Choices {
+			if ch.Delta.ReasoningContent != "" {
+				if !firstToken {
+					stats.TimeToFirstToken = time.Since(start).Seconds()
+					firstToken = true
+				}
+				reasoningBuf.WriteString(ch.Delta.ReasoningContent)
+				s.events.Publish("chat.token", TokenEvent{ConvID: conv.ID, MessageID: assistantID, Reasoning: ch.Delta.ReasoningContent})
+			}
 			if ch.Delta.Content != "" {
 				if !firstToken {
 					stats.TimeToFirstToken = time.Since(start).Seconds()
 					firstToken = true
 				}
-				content.WriteString(ch.Delta.Content)
-				s.events.Publish("chat.token", TokenEvent{ConvID: conv.ID, MessageID: assistantID, Delta: ch.Delta.Content})
-			}
-			if ch.Delta.ReasoningContent != "" {
-				reasoning.WriteString(ch.Delta.ReasoningContent)
-				s.events.Publish("chat.token", TokenEvent{ConvID: conv.ID, MessageID: assistantID, Reasoning: ch.Delta.ReasoningContent})
+				// Pull <think>/channel thought markup out of content into reasoning.
+				rDelta, cDelta := tagSplit.Push(ch.Delta.Content)
+				if rDelta != "" {
+					reasoningBuf.WriteString(rDelta)
+					s.events.Publish("chat.token", TokenEvent{ConvID: conv.ID, MessageID: assistantID, Reasoning: rDelta})
+				}
+				if cDelta != "" {
+					content.WriteString(cDelta)
+					s.events.Publish("chat.token", TokenEvent{ConvID: conv.ID, MessageID: assistantID, Delta: cDelta})
+				}
 			}
 		}
 		if chunk.Usage != nil {
@@ -608,10 +622,20 @@ func (s *Service) stream(ctx context.Context, conv Conversation, ep Endpoint,
 			}
 		}
 	}
+	if rDelta, cDelta := tagSplit.Flush(); rDelta != "" || cDelta != "" {
+		if rDelta != "" {
+			reasoningBuf.WriteString(rDelta)
+			s.events.Publish("chat.token", TokenEvent{ConvID: conv.ID, MessageID: assistantID, Reasoning: rDelta})
+		}
+		if cDelta != "" {
+			content.WriteString(cDelta)
+			s.events.Publish("chat.token", TokenEvent{ConvID: conv.ID, MessageID: assistantID, Delta: cDelta})
+		}
+	}
 	if err := sc.Err(); err != nil && !errors.Is(err, context.Canceled) {
 		// Persist partial content on stream errors.
 		_, _ = s.db.Exec(`UPDATE conversation_messages SET content=?, reasoning=? WHERE id=?`,
-			content.String(), reasoning.String(), assistantID)
+			content.String(), reasoningBuf.String(), assistantID)
 		return stats, fmt.Errorf("stream interrupted: %w", err)
 	}
 
@@ -620,7 +644,7 @@ func (s *Service) stream(ctx context.Context, conv Conversation, ep Endpoint,
 		stats.TokensPerSecond = float64(stats.CompletionTokens) / stats.TotalSeconds
 	}
 	_, err = s.db.Exec(`UPDATE conversation_messages SET content=?, reasoning=? WHERE id=?`,
-		content.String(), reasoning.String(), assistantID)
+		content.String(), reasoningBuf.String(), assistantID)
 	return stats, err
 }
 
@@ -659,10 +683,19 @@ func (s *Service) nonStreamingResponse(resp *http.Response, convID, assistantID 
 	if full.Error != nil {
 		return nil, fmt.Errorf("server error: %s", full.Error.Message)
 	}
-	var content, reasoning string
+	var content, reasoningText string
 	if len(full.Choices) > 0 {
 		content = full.Choices[0].Message.Content
-		reasoning = full.Choices[0].Message.ReasoningContent
+		reasoningText = full.Choices[0].Message.ReasoningContent
+	}
+	// Upstream may dump thought markup into content; peel it into reasoning_content.
+	if taggedR, taggedC := reasoning.Split(content); taggedR != "" || taggedC != content {
+		if reasoningText != "" && taggedR != "" {
+			reasoningText = reasoningText + "\n" + taggedR
+		} else if taggedR != "" {
+			reasoningText = taggedR
+		}
+		content = taggedC
 	}
 	stats := &Stats{TotalSeconds: time.Since(start).Seconds()}
 	if full.Usage != nil {
@@ -679,12 +712,12 @@ func (s *Service) nonStreamingResponse(resp *http.Response, convID, assistantID 
 	}
 
 	_, err = s.db.Exec(`UPDATE conversation_messages SET content=?, reasoning=? WHERE id=?`,
-		content, reasoning, assistantID)
+		content, reasoningText, assistantID)
 	if err != nil {
 		return stats, err
 	}
 	// One consolidated event so the UI updates identically to streaming.
-	s.events.Publish("chat.token", TokenEvent{ConvID: convID, MessageID: assistantID, Delta: content, Reasoning: reasoning})
+	s.events.Publish("chat.token", TokenEvent{ConvID: convID, MessageID: assistantID, Delta: content, Reasoning: reasoningText})
 	return stats, nil
 }
 

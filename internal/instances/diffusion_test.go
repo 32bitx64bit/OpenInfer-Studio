@@ -26,45 +26,6 @@ func TestDiffusionBlocks(t *testing.T) {
 	}
 }
 
-func TestSplitThoughtChannels(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		r, c string
-	}{
-		{
-			name: "empty thought then answer",
-			in:   "<|channel>thought\n<channel|>Hello!",
-			r:    "",
-			c:    "Hello!",
-		},
-		{
-			name: "thought with body",
-			in:   "<|channel>thought\nplan\n<channel|>Answer",
-			r:    "plan",
-			c:    "Answer",
-		},
-		{
-			name: "no markers",
-			in:   "just text",
-			r:    "",
-			c:    "just text",
-		},
-		{
-			name: "unterminated thought",
-			in:   "<|channel>thought\nstill thinking",
-			r:    "still thinking",
-			c:    "",
-		},
-	}
-	for _, c := range cases {
-		r, content := splitThoughtChannels(c.in)
-		if r != c.r || content != c.c {
-			t.Errorf("%s: got (%q,%q) want (%q,%q)", c.name, r, content, c.r, c.c)
-		}
-	}
-}
-
 func TestFormatDiffusionErrToolong(t *testing.T) {
 	got := formatDiffusionErr("ERR toolong 5000 4096")
 	if !strings.Contains(got, "5000") || !strings.Contains(got, "4096") {

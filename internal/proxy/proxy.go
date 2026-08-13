@@ -4,6 +4,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/openinfer/openinfer-studio/internal/reasoning"
 )
 
 // EndpointProvider resolves model names (ID or alias) to ready instances.
@@ -421,6 +424,16 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, path string) {
 	w.WriteHeader(resp.StatusCode)
 
 	flusher, _ := w.(http.Flusher)
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	if path == "/v1/chat/completions" && strings.Contains(ct, "text/event-stream") {
+		rewriteChatSSE(w, resp.Body, flusher)
+		return
+	}
+	if path == "/v1/chat/completions" && strings.Contains(ct, "json") {
+		rewriteChatJSON(w, resp.Body)
+		return
+	}
+
 	buf := make([]byte, 4096)
 	for {
 		n, err := resp.Body.Read(buf)
@@ -436,6 +449,156 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, path string) {
 			return
 		}
 	}
+}
+
+// rewriteChatSSE peels thought markup out of streamed content deltas into
+// OpenAI reasoning_content so external clients do not see raw <think> tags.
+func rewriteChatSSE(w http.ResponseWriter, body io.Reader, flusher http.Flusher) {
+	var split reasoning.Splitter
+	sc := bufio.NewScanner(body)
+	sc.Buffer(make([]byte, 64<<10), 4<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		if !strings.HasPrefix(line, "data:") {
+			fmt.Fprintf(w, "%s\n", line)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			if rDelta, cDelta := split.Flush(); rDelta != "" || cDelta != "" {
+				writeReasoningChunk(w, flusher, rDelta, cDelta)
+			}
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		}
+		var chunk map[string]any
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			fmt.Fprintf(w, "data: %s\n\n", payload)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			continue
+		}
+		choices, _ := chunk["choices"].([]any)
+		rewrote := false
+		for _, chAny := range choices {
+			ch, ok := chAny.(map[string]any)
+			if !ok {
+				continue
+			}
+			delta, _ := ch["delta"].(map[string]any)
+			if delta == nil {
+				continue
+			}
+			content, _ := delta["content"].(string)
+			if content == "" {
+				continue
+			}
+			rDelta, cDelta := split.Push(content)
+			rewrote = true
+			if rDelta == "" && cDelta == content {
+				continue
+			}
+			if cDelta == "" {
+				delete(delta, "content")
+			} else {
+				delta["content"] = cDelta
+			}
+			if rDelta != "" {
+				if existing, _ := delta["reasoning_content"].(string); existing != "" {
+					delta["reasoning_content"] = existing + rDelta
+				} else {
+					delta["reasoning_content"] = rDelta
+				}
+			}
+			if len(delta) == 0 {
+				delta["content"] = ""
+			}
+		}
+		if !rewrote {
+			fmt.Fprintf(w, "data: %s\n\n", payload)
+		} else {
+			b, err := json.Marshal(chunk)
+			if err != nil {
+				fmt.Fprintf(w, "data: %s\n\n", payload)
+			} else {
+				fmt.Fprintf(w, "data: %s\n\n", b)
+			}
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+}
+
+func writeReasoningChunk(w http.ResponseWriter, flusher http.Flusher, reasoningDelta, contentDelta string) {
+	delta := map[string]any{}
+	if contentDelta != "" {
+		delta["content"] = contentDelta
+	}
+	if reasoningDelta != "" {
+		delta["reasoning_content"] = reasoningDelta
+	}
+	if len(delta) == 0 {
+		return
+	}
+	chunk := map[string]any{
+		"choices": []map[string]any{{
+			"index": 0, "delta": delta, "finish_reason": nil,
+		}},
+	}
+	b, _ := json.Marshal(chunk)
+	fmt.Fprintf(w, "data: %s\n\n", b)
+	if flusher != nil {
+		flusher.Flush()
+	}
+}
+
+func rewriteChatJSON(w http.ResponseWriter, body io.Reader) {
+	raw, err := io.ReadAll(io.LimitReader(body, 32<<20))
+	if err != nil {
+		return
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		_, _ = w.Write(raw)
+		return
+	}
+	choices, _ := obj["choices"].([]any)
+	for _, chAny := range choices {
+		ch, ok := chAny.(map[string]any)
+		if !ok {
+			continue
+		}
+		msg, _ := ch["message"].(map[string]any)
+		if msg == nil {
+			continue
+		}
+		content, _ := msg["content"].(string)
+		existing, _ := msg["reasoning_content"].(string)
+		taggedR, taggedC := reasoning.Split(content)
+		if taggedR == "" && taggedC == content {
+			continue
+		}
+		msg["content"] = taggedC
+		if existing != "" && taggedR != "" {
+			msg["reasoning_content"] = existing + "\n" + taggedR
+		} else if taggedR != "" {
+			msg["reasoning_content"] = taggedR
+		}
+	}
+	b, err := json.Marshal(obj)
+	if err != nil {
+		_, _ = w.Write(raw)
+		return
+	}
+	_, _ = w.Write(b)
 }
 
 func writeOAIError(w http.ResponseWriter, status int, msg string) {

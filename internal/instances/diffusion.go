@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/openinfer/openinfer-studio/internal/processes"
+	"github.com/openinfer/openinfer-studio/internal/reasoning"
 	"github.com/openinfer/openinfer-studio/internal/runtimes"
 )
 
@@ -475,7 +476,7 @@ func (s *DiffusionShim) handleChat(w http.ResponseWriter, r *http.Request) {
 		// Prior turns may still contain raw thought-channel markers; strip them
 		// so the visual server does not see Studio's display scaffolding.
 		if strings.EqualFold(m.Role, "assistant") {
-			_, content = splitThoughtChannels(content)
+			_, content = reasoning.Split(content)
 		}
 		msgs = append(msgs, DiffusionMessage{
 			Role:    m.Role,
@@ -541,46 +542,11 @@ func diffusionBlocks(maxTokens int, canvas uint32) int {
 	return n
 }
 
-// Thought-channel markers used by DiffusionGemma (and DeepSeek-style fallbacks).
-var thoughtMarkers = [][2]string{
-	{"<|channel>thought", "<channel|>"},
-	{"<think>", "</think>"},
-}
-
-func splitThoughtChannels(full string) (reasoning, content string) {
-	var rParts, cParts []string
-	rest := full
-	for {
-		best := -1
-		bestStart, bestEnd := "", ""
-		for _, pair := range thoughtMarkers {
-			i := strings.Index(rest, pair[0])
-			if i >= 0 && (best < 0 || i < best) {
-				best = i
-				bestStart, bestEnd = pair[0], pair[1]
-			}
-		}
-		if best < 0 {
-			cParts = append(cParts, rest)
-			break
-		}
-		cParts = append(cParts, rest[:best])
-		body := rest[best+len(bestStart):]
-		if j := strings.Index(body, bestEnd); j >= 0 {
-			rParts = append(rParts, body[:j])
-			rest = body[j+len(bestEnd):]
-			continue
-		}
-		// Unterminated thought (length-truncated generation).
-		rParts = append(rParts, body)
-		break
-	}
-	return strings.Trim(strings.Join(rParts, ""), "\n"), strings.Join(cParts, "")
-}
+// Thought-channel markers are handled by internal/reasoning (OpenAI reasoning_content).
 
 func markerHoldback(full string) int {
 	longest := 0
-	for _, pair := range thoughtMarkers {
+	for _, pair := range reasoning.Markers {
 		for _, marker := range pair {
 			upper := min(len(marker)-1, len(full))
 			for k := upper; k > 0; k-- {
@@ -720,7 +686,7 @@ func consumeDiffusionRound(events <-chan DiffusionEvent) diffusionRound {
 			r.err = ev.Error
 		}
 	}
-	_, r.content = splitThoughtChannels(r.rawCommit)
+	_, r.content = reasoning.Split(r.rawCommit)
 	return r
 }
 
@@ -982,7 +948,7 @@ func (s *DiffusionShim) streamChatContinue(w http.ResponseWriter, ctx context.Co
 			case "stats":
 				roundStats = ev.Stats
 			case "frame":
-				_, frameBody := splitThoughtChannels(ev.Frame)
+				_, frameBody := reasoning.Split(ev.Frame)
 				if frameBody == "" {
 					frameBody = strings.TrimSpace(ev.Frame)
 				}
@@ -996,7 +962,7 @@ func (s *DiffusionShim) streamChatContinue(w http.ResponseWriter, ctx context.Co
 				if cut > 0 {
 					safe = ev.Commit[:len(ev.Commit)-cut]
 				}
-				rr, rc := splitThoughtChannels(safe)
+				rr, rc := reasoning.Split(safe)
 				committedRound = rc
 				if rr != "" {
 					emitReasoning(rr)
@@ -1012,7 +978,7 @@ func (s *DiffusionShim) streamChatContinue(w http.ResponseWriter, ctx context.Co
 			case "done":
 				if lastCommit != "" {
 					emitContent(tracker.flushCanvas())
-					rr, rc := splitThoughtChannels(lastCommit)
+					rr, rc := reasoning.Split(lastCommit)
 					committedRound = rc
 					if rr != "" {
 						emitReasoning(rr)
@@ -1033,7 +999,7 @@ func (s *DiffusionShim) streamChatContinue(w http.ResponseWriter, ctx context.Co
 			return
 		}
 
-		_, roundContent := splitThoughtChannels(lastCommit)
+		_, roundContent := reasoning.Split(lastCommit)
 		roundBlocks := statsInt(roundStats, "blocks")
 		roundPred := statsInt(roundStats, "predicted_n")
 		aggStats = mergeStats(aggStats, roundStats)
@@ -1098,7 +1064,7 @@ func (s *DiffusionShim) nonStreamChatContinue(w http.ResponseWriter, ctx context
 			http.Error(w, fmt.Sprintf(`{"error":{"message":%q}}`, r.err), http.StatusInternalServerError)
 			return
 		}
-		rr, rc := splitThoughtChannels(r.rawCommit)
+		rr, rc := reasoning.Split(r.rawCommit)
 		roundBlocks := statsInt(r.stats, "blocks")
 		roundPred := statsInt(r.stats, "predicted_n")
 		aggStats = mergeStats(aggStats, r.stats)
