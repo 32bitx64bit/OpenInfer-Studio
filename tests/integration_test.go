@@ -393,7 +393,7 @@ func TestHuggingFaceAgainstFakeAPI(t *testing.T) {
 	if !strings.Contains(repo.Card, "Test Model") {
 		t.Errorf("card missing: %q", repo.Card)
 	}
-	groups, _ := huggingface.GroupFiles(repo.Files)
+	groups, _, _ := huggingface.GroupFiles(repo.Files)
 	if len(groups) != 2 {
 		t.Errorf("groups = %+v", groups)
 	}

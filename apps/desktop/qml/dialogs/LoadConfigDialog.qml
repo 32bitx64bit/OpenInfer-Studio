@@ -757,7 +757,10 @@ Dialog {
                             if (!st && item.metadata && item.metadata.has_mtp) st = "draft-mtp"
                             if (!st && (item.architecture === "gemma4-assistant" || item.architecture === "gemma4_assistant")) st = "draft-mtp"
                             if (!st && item.architecture === "eagle3") st = "draft-eagle3"
-                            if (!st && (item.architecture === "dflash" || item.architecture === "dflash-draft")) st = "draft-dflash"
+                            if (!st && (item.architecture === "dflash" || item.architecture === "dflash-draft"
+                                    || item.architecture === "muse-glimmer-assistant"
+                                    || item.architecture === "muse_glimmer_assistant"
+                                    || item.architecture === "museglimmer-assistant")) st = "draft-dflash"
                             if (!st && item.architecture === "dspark") st = "draft-dspark"
                             if (!st) {
                                 var base = (path.split("/").pop() || "").toLowerCase()
@@ -765,6 +768,8 @@ Dialog {
                                 else if (base.indexOf("eagle3-") === 0) st = "draft-eagle3"
                                 else if (base.indexOf("dflash-") === 0) st = "draft-dflash"
                                 else if (base.indexOf("dspark-") === 0) st = "draft-dspark"
+                                else if (base.indexOf("assistant") >= 0 && base.indexOf("glimmer") >= 0) st = "draft-dflash"
+                                else if (base.indexOf("assistant") >= 0 && (base.indexOf("gemma-4") >= 0 || base.indexOf("gemma4") >= 0)) st = "draft-mtp"
                                 else st = "draft-simple"
                             }
                             root.setSetting("spec_type", st)

@@ -61,15 +61,21 @@ Item {
         var arch = String(m.architecture || "").toLowerCase()
         if (arch === "gemma4-assistant" || arch === "gemma4_assistant"
                 || arch === "eagle3" || arch === "dflash" || arch === "dflash-draft"
-                || arch === "dspark")
+                || arch === "dspark"
+                || arch === "muse-glimmer-assistant" || arch === "muse_glimmer_assistant"
+                || arch === "museglimmer-assistant")
             return true
         // Path fallback if library metadata hasn't been rescanned yet.
         var path = String(m.primary_path || m.alias || "").toLowerCase()
         var base = path.split("/").pop() || path
-        return base.indexOf("mtp-") === 0
+        if (base.indexOf("mtp-") === 0
             || base.indexOf("eagle3-") === 0
             || base.indexOf("dflash-") === 0
-            || base.indexOf("dspark-") === 0
+            || base.indexOf("dspark-") === 0)
+            return true
+        if (base.indexOf("assistant") >= 0 && (base.indexOf("glimmer") >= 0 || base.indexOf("gemma-4") >= 0 || base.indexOf("gemma4") >= 0))
+            return true
+        return false
     }
 
     function isEmbeddingModel(m) {

@@ -41,6 +41,23 @@ func TestDetectModalities(t *testing.T) {
 		{"z-lab/Qwen3-4B-DFlash-GGUF", "", []string{"gguf", "speculative-decoding"}, nil, nil},
 		{"org/Qwen2.5-VL-3B-Instruct-eagle3-GGUF", "", []string{"gguf"}, nil, nil},
 		{"someone/mtp-Qwen3.6-27B-GGUF", "", []string{"gguf"}, nil, nil},
+		// Mixed VL + DFlash sidecar: vision stays, even with dflash tags.
+		{"meta-models/Muse-Glimmer-30B-GGUF", "image-text-to-text",
+			[]string{"gguf", "image-text-to-text", "dflash", "speculative-decoding"},
+			[]string{
+				"Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf",
+				"mmproj-Muse-Glimmer-30B-Q4_K_M.gguf",
+				"dflash-Muse-Glimmer-30B-Q4_K_M.gguf",
+			},
+			[]string{"vision"}},
+		{"Blackfrost-AI/Muse-Glimmer-30B-Abliterated-GGUF", "image-text-to-text",
+			[]string{"gguf", "multimodal", "dflash"},
+			[]string{
+				"Muse-Glimmer-30B-Abliterated-Q4_K_M.gguf",
+				"dflash-Muse-Glimmer-30B-Abliterated-F16.gguf",
+				"mmproj-Muse-Glimmer-30B-Abliterated-F16.gguf",
+			},
+			[]string{"vision"}},
 	}
 	for _, tc := range cases {
 		got := DetectModalities(tc.id, tc.pipe, tc.tags, tc.files)
@@ -117,5 +134,30 @@ func TestModalityLabel(t *testing.T) {
 	}
 	if ModalityLabel(nil) != "" {
 		t.Fatal("empty")
+	}
+}
+
+func TestDetectDraftSidecar(t *testing.T) {
+	cases := []struct {
+		id    string
+		tags  []string
+		files []string
+		want  string
+	}{
+		{"meta-models/Muse-Glimmer-30B-GGUF", nil,
+			[]string{
+				"Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf",
+				"mmproj-Muse-Glimmer-30B-Q4_K_M.gguf",
+				"dflash-Muse-Glimmer-30B-Q4_K_M.gguf",
+			}, "dflash"},
+		{"z-lab/Qwen3-4B-DFlash-GGUF", []string{"speculative-decoding"}, nil, "dflash"},
+		{"bartowski/Llama-3.2-3B-Instruct-GGUF", nil, nil, ""},
+		{"org/repo", nil, []string{"eagle3.gguf"}, "eagle3"},
+		{"org/repo", nil, []string{"mtp-Qwen3.6-27B-Q4_K_M.gguf"}, "mtp-draft"},
+	}
+	for _, tc := range cases {
+		if got := DetectDraftSidecar(tc.id, tc.tags, tc.files); got != tc.want {
+			t.Errorf("DetectDraftSidecar(%q) = %q, want %q", tc.id, got, tc.want)
+		}
 	}
 }

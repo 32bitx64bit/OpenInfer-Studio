@@ -119,6 +119,7 @@ type SearchResult struct {
 	PipelineTag string    `json:"pipeline_tag,omitempty"`
 	Modalities  []string  `json:"modalities,omitempty"` // audio | vision
 	MTP         string    `json:"mtp,omitempty"`        // "" | "mtp" | "mtp-draft"
+	Draft       string    `json:"draft,omitempty"`      // "" | dflash | eagle3 | dspark | mtp-draft | draft
 	Embedding   string    `json:"embedding,omitempty"`  // "" | "embedding" | "reranker"
 }
 
@@ -179,6 +180,7 @@ func (c *Client) Search(ctx context.Context, query, sort string, limit int) ([]S
 			Private: m.Private, Gated: m.Gated, PipelineTag: m.PipelineTag,
 			Modalities: DetectModalities(m.ID, m.PipelineTag, m.Tags, files),
 			MTP:        DetectMTP(m.ID, m.Tags, files),
+			Draft:      DetectDraftSidecar(m.ID, m.Tags, files),
 			Embedding:  DetectEmbedding(m.ID, m.PipelineTag, m.Tags, files),
 		})
 	}

@@ -16,10 +16,13 @@ Item {
     property var detail: null
     property var detailGroups: []
     property var detailProjectors: []
+    property var detailDrafts: []
     property var detailModalities: []
     property string detailMTP: ""
+    property string detailDraft: ""
     property string detailEmbedding: ""
     property bool withVision: true
+    property bool withDraft: true
     property bool showFilePaths: false
     property bool detailLoading: false
     property bool hasToken: false
@@ -47,6 +50,23 @@ Item {
         return ""
     }
 
+    function draftLabel(kind) {
+        var st = String(kind || "")
+        if (st.indexOf("draft-") === 0)
+            st = st.substring(6)
+        if (st === "dflash") return "DFlash"
+        if (st === "eagle3") return "EAGLE3"
+        if (st === "dspark") return "DSpark"
+        if (st === "mtp" || st === "mtp-draft") return "MTP draft"
+        if (st === "simple" || st === "draft") return "draft"
+        return st
+    }
+
+    function groupDraftTag(group) {
+        if (!group || !group.draft) return ""
+        return page.draftLabel(group.spec_type || "draft")
+    }
+
     function projectorToggleLabel() {
         var bytes = AppTheme.bytes(page.projectorBytes())
         if (page.experimentalAudio) {
@@ -57,7 +77,23 @@ Item {
         return "Download with vision (mmproj · " + bytes + ")"
     }
 
+    function drafterToggleLabel() {
+        var bytes = AppTheme.bytes(page.draftBytesAll())
+        var kinds = []
+        var seen = {}
+        for (var i = 0; i < page.detailDrafts.length; i++) {
+            var lab = page.draftLabel(page.detailDrafts[i].spec_type || page.detailDraft || "draft")
+            if (lab && !seen[lab]) {
+                seen[lab] = true
+                kinds.push(lab)
+            }
+        }
+        var name = kinds.length ? kinds.join(" / ") : (page.draftLabel(page.detailDraft) || "drafter")
+        return "Download with speculative drafter (" + name + " · " + bytes + ")"
+    }
+
     function groupModalityTag(group) {
+        if (group && group.draft) return ""
         if (page.experimentalAudio) {
             var label = page.modalityLabel(page.detailModalities)
             if (label !== "") return label
@@ -93,8 +129,11 @@ Item {
         page.detail = null
         page.detailModalities = []
         page.detailMTP = ""
+        page.detailDraft = ""
         page.detailEmbedding = ""
+        page.detailDrafts = []
         page.withVision = true
+        page.withDraft = true
         page.showFilePaths = false
         detailDialog.open()
         api.get("/api/v1/hf/repo/" + repoId, function(st, data) {
@@ -103,9 +142,12 @@ Item {
                 page.detail = data.repo
                 page.detailGroups = data.groups || []
                 page.detailProjectors = data.projectors || []
+                page.detailDrafts = data.drafts || []
                 page.detailModalities = data.modalities || []
                 page.detailMTP = data.mtp || ""
+                page.detailDraft = data.draft || ""
                 page.detailEmbedding = data.embedding || ""
+                page.withDraft = (page.detailDrafts || []).length > 0
             } else {
                 page.searchError = (data && (data.detail || data.error)) || ("HTTP " + st)
                 detailDialog.close()
@@ -119,12 +161,35 @@ Item {
         return t
     }
 
+    function draftBytesAll() {
+        var t = 0
+        for (var i = 0; i < page.detailDrafts.length; i++) t += page.detailDrafts[i].size
+        return t
+    }
+
+    function matchingDrafts(group) {
+        var list = page.detailDrafts || []
+        if (!group || list.length === 0) return []
+        var q = group.quant || ""
+        var same = []
+        for (var i = 0; i < list.length; i++) {
+            if (q && list[i].quant === q) same.push(list[i])
+        }
+        return same.length ? same : list
+    }
+
     function downloadGroup(group) {
         var files = group.files.map(function(f) { return { "path": f.path, "size": f.size } })
+        var isDraft = !!group.draft
         var hasProjector = group.files.some(function(f) { return f.kind === "projector" })
-        if (page.withVision && !hasProjector) {
+        if (page.withVision && !isDraft && !hasProjector) {
             for (var i = 0; i < page.detailProjectors.length; i++)
                 files.push({ "path": page.detailProjectors[i].path, "size": page.detailProjectors[i].size })
+        }
+        if (page.withDraft && !isDraft) {
+            var ds = page.matchingDrafts(group)
+            for (var j = 0; j < ds.length; j++)
+                files.push({ "path": ds[j].path, "size": ds[j].size })
         }
         api.post("/api/v1/downloads", {
             "kind": "model",
@@ -231,6 +296,12 @@ Item {
                                 Layout.minimumWidth: implicitWidth
                             }
                             Tag {
+                                visible: page.draftLabel(modelData.draft) !== ""
+                                text: page.draftLabel(modelData.draft)
+                                tone: AppTheme.warning
+                                Layout.minimumWidth: implicitWidth
+                            }
+                            Tag {
                                 visible: page.embeddingLabel(modelData.embedding) !== ""
                                 text: page.embeddingLabel(modelData.embedding)
                                 tone: AppTheme.info
@@ -298,6 +369,12 @@ Item {
                     Tag {
                         visible: page.mtpLabel(page.detailMTP) !== ""
                         text: page.mtpLabel(page.detailMTP)
+                        tone: AppTheme.warning
+                        Layout.minimumWidth: implicitWidth
+                    }
+                    Tag {
+                        visible: page.draftLabel(page.detailDraft) !== ""
+                        text: page.draftLabel(page.detailDraft)
                         tone: AppTheme.warning
                         Layout.minimumWidth: implicitWidth
                     }
@@ -377,6 +454,33 @@ Item {
                     Item { Layout.fillWidth: true }
                 }
 
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: page.detailDrafts.length > 0
+                    spacing: 8
+                    AppSwitch {
+                        id: draftToggle
+                        checked: page.withDraft
+                        onToggled: page.withDraft = checked
+                    }
+                    Label {
+                        text: page.drafterToggleLabel()
+                        color: AppTheme.text
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                        ToolTip.visible: draftHover.hovered
+                        ToolTip.text: {
+                            var paths = page.detailDrafts.map(function(p) { return p.path }).join("\n")
+                            return "Optional companion for speculative decoding. Same output, extra VRAM.\n" + paths
+                        }
+                        HoverHandler { id: draftHover }
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: draftToggle.toggle()
+                        }
+                    }
+                }
+
                 AppCheckBox {
                     visible: page.detailGroups.length > 0
                     text: "Show individual file paths"
@@ -412,6 +516,12 @@ Item {
                                         Layout.minimumWidth: implicitWidth
                                     }
                                     Tag {
+                                        visible: page.groupDraftTag(modelData) !== ""
+                                        text: page.groupDraftTag(modelData)
+                                        tone: AppTheme.warning
+                                        Layout.minimumWidth: implicitWidth
+                                    }
+                                    Tag {
                                         visible: page.groupModalityTag(modelData) !== ""
                                         text: page.groupModalityTag(modelData)
                                         tone: AppTheme.success
@@ -421,12 +531,21 @@ Item {
                                     Label {
                                         text: {
                                             var t = modelData.total_bytes
+                                            var isDraft = !!modelData.draft
                                             var hasProj = modelData.files.some(function(f) { return f.kind === "projector" })
-                                            if (page.withVision && page.detailProjectors.length > 0 && !hasProj) {
-                                                var suffix = page.experimentalAudio ? " (incl. mmproj)" : " (incl. vision)"
-                                                return AppTheme.bytes(t + page.projectorBytes()) + suffix
+                                            var parts = []
+                                            if (page.withVision && !isDraft && page.detailProjectors.length > 0 && !hasProj) {
+                                                t += page.projectorBytes()
+                                                parts.push(page.experimentalAudio ? "mmproj" : "vision")
                                             }
-                                            return AppTheme.bytes(t)
+                                            if (page.withDraft && !isDraft && page.detailDrafts.length > 0) {
+                                                var ds = page.matchingDrafts(modelData)
+                                                for (var i = 0; i < ds.length; i++) t += ds[i].size
+                                                parts.push(page.draftLabel(page.detailDraft || (ds[0] && ds[0].spec_type) || "draft"))
+                                            }
+                                            var s = AppTheme.bytes(t)
+                                            if (parts.length) s += " (incl. " + parts.join(" + ") + ")"
+                                            return s
                                         }
                                         color: AppTheme.textDim
                                         font.pixelSize: AppTheme.fontSmall

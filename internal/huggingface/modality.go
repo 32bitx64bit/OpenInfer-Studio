@@ -3,6 +3,8 @@ package huggingface
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/openinfer/openinfer-studio/internal/gguf"
 )
 
 // DetectModalities infers audio / vision capabilities from Hugging Face
@@ -16,7 +18,7 @@ import (
 // those need an mmproj (or an audio pipeline/tag) before audio is advertised.
 func DetectModalities(repoID, pipelineTag string, tags []string, filePaths []string) []string {
 	lowerID := strings.ToLower(repoID)
-	if looksLikeSpeculativeDraftRepo(lowerID, tags) {
+	if isDraftOnlyPackage(lowerID, filePaths) {
 		return nil
 	}
 	lowerPipe := strings.ToLower(pipelineTag)
@@ -33,6 +35,10 @@ func DetectModalities(repoID, pipelineTag string, tags []string, filePaths []str
 		if strings.Contains(base, "mmproj") || strings.Contains(base, "mm-proj") ||
 			strings.Contains(base, "projector") {
 			hasMmproj = true
+			continue
+		}
+		if ok, _ := gguf.LooksLikeSpeculativeDraftName(base); ok {
+			continue
 		}
 		if fileSuggestsAudio(base) {
 			audioFileHint = true
@@ -171,26 +177,48 @@ func isASCIIAlnum(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z')
 }
 
-func looksLikeSpeculativeDraftRepo(lowerID string, tags []string) bool {
-	// Official llama.cpp sidecar prefixes in repo ids / file names.
-	// Note: do not use a bare "mtp-" Contains check — fused trunks like
-	// "...-MTP-GGUF" contain the substring "mtp-" inside "mtp-gguf".
-	for _, h := range []string{
-		"/mtp-", "eagle3-", "dflash-", "dspark-",
-		"eagle3", "eagle-3", "dflash", "dspark", "speculator",
-		"draft-eagle", "draft-dflash", "draft-mtp", "spec-draft",
-	} {
-		if strings.Contains(lowerID, h) {
-			return true
+func isDraftOnlyPackage(lowerID string, filePaths []string) bool {
+	trunks, drafts := 0, 0
+	for _, p := range filePaths {
+		base := strings.ToLower(filepath.Base(p))
+		if !strings.HasSuffix(base, ".gguf") {
+			continue
 		}
+		if strings.Contains(base, "mmproj") || strings.Contains(base, "mm-proj") ||
+			strings.Contains(base, "projector") {
+			continue
+		}
+		if ok, _ := gguf.LooksLikeSpeculativeDraftName(base); ok {
+			drafts++
+			continue
+		}
+		trunks++
+	}
+	if trunks > 0 {
+		return false
+	}
+	if drafts > 0 {
+		return true
+	}
+	return repoIDLooksLikeDraftPackage(lowerID)
+}
+
+func repoIDLooksLikeDraftPackage(lowerID string) bool {
+	name := lowerID
+	if _, n, ok := strings.Cut(lowerID, "/"); ok {
+		name = n
+	}
+	if ok, _ := gguf.LooksLikeSpeculativeDraftName(name + ".gguf"); ok {
+		return true
 	}
 	if mtpSidecarInPath(lowerID) {
 		return true
 	}
-	for _, t := range tags {
-		lt := strings.ToLower(t)
-		if lt == "speculative-decoding" || lt == "eagle3" || lt == "dflash" ||
-			lt == "dspark" || lt == "speculator" || lt == "draft-model" {
+	for _, h := range []string{
+		"speculator", "eagle3", "eagle-3", "dflash", "d-flash", "dspark", "d-spark",
+		"spec-draft", "draft-model",
+	} {
+		if containsToken(name, h) || containsToken(lowerID, h) {
 			return true
 		}
 	}
@@ -203,7 +231,7 @@ func looksLikeSpeculativeDraftRepo(lowerID string, tags []string) bool {
 func DetectEmbedding(repoID, pipelineTag string, tags []string, filePaths []string) string {
 	lowerID := strings.ToLower(strings.TrimSpace(repoID))
 	lowerPipe := strings.ToLower(strings.TrimSpace(pipelineTag))
-	if looksLikeSpeculativeDraftRepo(lowerID, tags) {
+	if isDraftOnlyPackage(lowerID, filePaths) {
 		return ""
 	}
 
@@ -256,6 +284,49 @@ func DetectEmbedding(repoID, pipelineTag string, tags []string, filePaths []stri
 	if embed {
 		return "embedding"
 	}
+	return ""
+}
+
+// DetectDraftSidecar reports a speculative sidecar present in a Hugging Face
+// repo (dflash / eagle3 / dspark / mtp-draft / draft). Mixed VL + drafter
+// packages still return the sidecar kind — they are not draft-only.
+func DetectDraftSidecar(repoID string, tags []string, filePaths []string) string {
+	seen := map[gguf.SpecType]bool{}
+	for _, p := range filePaths {
+		base := strings.ToLower(filepath.Base(p))
+		if !strings.HasSuffix(base, ".gguf") {
+			continue
+		}
+		if strings.Contains(base, "mmproj") || strings.Contains(base, "mm-proj") ||
+			strings.Contains(base, "projector") {
+			continue
+		}
+		if ok, st := gguf.LooksLikeSpeculativeDraftName(base); ok {
+			seen[st] = true
+		}
+	}
+	for _, st := range []gguf.SpecType{
+		gguf.SpecDFlash, gguf.SpecEagle3, gguf.SpecDSpark, gguf.SpecMTP, gguf.SpecSimple,
+	} {
+		if seen[st] {
+			return gguf.SpecShortLabel(st)
+		}
+	}
+	if len(filePaths) == 0 && repoIDLooksLikeDraftPackage(strings.ToLower(repoID)) {
+		if ok, st := gguf.LooksLikeSpeculativeDraftName(strings.ToLower(repoID) + ".gguf"); ok {
+			return gguf.SpecShortLabel(st)
+		}
+		lower := strings.ToLower(repoID)
+		switch {
+		case containsToken(lower, "dflash") || containsToken(lower, "d-flash"):
+			return "dflash"
+		case containsToken(lower, "eagle3") || containsToken(lower, "eagle-3"):
+			return "eagle3"
+		case containsToken(lower, "dspark"):
+			return "dspark"
+		}
+	}
+	_ = tags
 	return ""
 }
 

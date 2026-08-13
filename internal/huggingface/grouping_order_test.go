@@ -10,7 +10,7 @@ func TestGroupFilesSortedByQuant(t *testing.T) {
 		{Path: "m-Q2_K.gguf", Size: 2000},
 		{Path: "m-Q6_K.gguf", Size: 6000},
 	}
-	groups, _ := GroupFiles(files)
+	groups, _, _ := GroupFiles(files)
 	want := []string{"Q2_K", "Q4_K_M", "Q6_K", "Q8_0", "F16"}
 	if len(groups) != len(want) {
 		t.Fatalf("got %d groups: %+v", len(groups), groups)
@@ -35,7 +35,7 @@ func TestProjectorsNotDuplicated(t *testing.T) {
 		{Path: "m-Q4_K_M.gguf", Size: 4000},
 		{Path: "mmproj-m-f16.gguf", Size: 600},
 	}
-	groups, projectors := GroupFiles(files)
+	groups, projectors, _ := GroupFiles(files)
 	if len(groups) != 2 {
 		t.Fatalf("want 2 groups (one per quant), got %+v", groups)
 	}

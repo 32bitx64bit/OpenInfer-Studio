@@ -139,7 +139,7 @@ func (h *handlers) hfRepo(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 502, "loading repository failed", err)
 		return
 	}
-	groups, projectors := huggingface.GroupFiles(info.Files)
+	groups, projectors, drafts := huggingface.GroupFiles(info.Files)
 	filePaths := make([]string, 0, len(info.Files))
 	for _, f := range info.Files {
 		filePaths = append(filePaths, f.Path)
@@ -147,8 +147,10 @@ func (h *handlers) hfRepo(w http.ResponseWriter, r *http.Request) {
 	modalities := huggingface.DetectModalities(info.ID, info.PipelineTag, info.Tags, filePaths)
 	writeJSON(w, 200, map[string]any{
 		"repo": info, "groups": groups, "projectors": projectors,
+		"drafts":        drafts,
 		"modalities":    modalities,
 		"mtp":           huggingface.DetectMTP(info.ID, info.Tags, filePaths),
+		"draft":         huggingface.DetectDraftSidecar(info.ID, info.Tags, filePaths),
 		"embedding":     huggingface.DetectEmbedding(info.ID, info.PipelineTag, info.Tags, filePaths),
 		"download_base": h.d.Layout.Models,
 	})

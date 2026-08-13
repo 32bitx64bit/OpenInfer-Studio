@@ -100,6 +100,26 @@ func TestDraftCompatibleGemma4Assistant(t *testing.T) {
 	}
 }
 
+func TestDraftCompatibleMuseGlimmerAssistant(t *testing.T) {
+	target := Model{
+		ID: "glimmer", Architecture: "muse-glimmer", SizeBytes: 17 << 30,
+		Metadata: metaTok("gpt2"),
+	}
+	draft := Model{
+		ID: "dflash", Architecture: "muse-glimmer-assistant", SizeBytes: 1600 << 20,
+		PrimaryPath: "/m/Muse-Glimmer-30B-assistant-Q8_0.gguf",
+		Metadata:    json.RawMessage(`{"tokenizer":"gpt2","speculative_draft":true,"spec_type":"draft-dflash"}`),
+	}
+	ok, reason := DraftCompatible(target, draft)
+	if !ok {
+		t.Fatalf("muse-glimmer-assistant must pair as dflash: %s", reason)
+	}
+	filtered := FilterDraftCandidates(target, []Model{target, draft}, true)
+	if len(filtered) != 1 || filtered[0].ID != "dflash" {
+		t.Fatalf("filtered picker must include glimmer assistant, got %+v", filtered)
+	}
+}
+
 func TestFilterDraftCandidates(t *testing.T) {
 	target := Model{ID: "t", Architecture: "llama", Parameters: 8e9, Metadata: metaTok("llama")}
 	lib := []Model{

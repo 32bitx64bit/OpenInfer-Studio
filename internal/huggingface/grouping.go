@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/openinfer/openinfer-studio/internal/gguf"
 )
 
 // FileKind classifies a repository file.
@@ -13,15 +15,18 @@ type FileKind string
 const (
 	KindGGUF      FileKind = "gguf"
 	KindProjector FileKind = "projector"
+	KindDraft     FileKind = "draft"
 	KindOther     FileKind = "other"
 )
 
 // GroupedFile is one downloadable file inside a group.
 type GroupedFile struct {
-	Path string `json:"path"`
-	Size int64  `json:"size"`
-	Kind string `json:"kind"` // gguf|projector
-	Part int    `json:"part,omitempty"`
+	Path     string `json:"path"`
+	Size     int64  `json:"size"`
+	Kind     string `json:"kind"` // gguf|projector|draft
+	Part     int    `json:"part,omitempty"`
+	Quant    string `json:"quant,omitempty"`
+	SpecType string `json:"spec_type,omitempty"`
 }
 
 // FileGroup is one logical download unit: a single GGUF, a complete split
@@ -32,8 +37,10 @@ type FileGroup struct {
 	Quant       string        `json:"quant"`
 	Split       bool          `json:"split"`
 	Parts       int           `json:"parts"`
-	Vision      bool          `json:"vision"`        // includes an mmproj file
-	MTP         string        `json:"mtp,omitempty"` // "" | "mtp" | "mtp-draft"
+	Vision      bool          `json:"vision"`              // includes an mmproj file
+	Draft       bool          `json:"draft"`               // speculative sidecar, not a chat model
+	MTP         string        `json:"mtp,omitempty"`       // "" | "mtp" | "mtp-draft"
+	SpecType    string        `json:"spec_type,omitempty"` // llama.cpp --spec-type when Draft
 	TotalBytes  int64         `json:"total_bytes"`
 	Files       []GroupedFile `json:"files"`
 	EstMemBytes int64         `json:"est_memory_bytes"` // rough estimate, clearly marked
@@ -58,7 +65,18 @@ func classifyFile(path string) FileKind {
 	if projRe.MatchString(base) {
 		return KindProjector
 	}
+	if ok, _ := gguf.LooksLikeSpeculativeDraftName(base); ok {
+		return KindDraft
+	}
 	return KindGGUF
+}
+
+func fileSpecType(path string) string {
+	ok, st := gguf.LooksLikeSpeculativeDraftName(path)
+	if !ok {
+		return ""
+	}
+	return string(st)
 }
 
 // quantOf extracts the quantization token from a filename.
@@ -94,15 +112,19 @@ func quantOf(path string) string {
 // split shards are merged into one set, and non-GGUF files are excluded.
 // Non-split GGUFs are one group per file so mixed MTP / non-MTP quants in the
 // same repo (same quant token, different filenames) stay distinct.
-// Projector (mmproj) files are returned separately: the UI offers a single
-// "include vision" toggle that appends them to whichever group is chosen,
-// instead of duplicating every quant as a separate vision variant.
-func GroupFiles(files []FileEntry) (groups []FileGroup, projectors []GroupedFile) {
+// Projector (mmproj) files and speculative sidecars (dflash-/eagle3-/mtp-/…)
+// are returned separately: the UI offers include-vision / include-drafter
+// toggles that append them to a chosen trunk group, instead of listing
+// companions as fake quants (or pairing mmproj onto a drafter).
+func GroupFiles(files []FileEntry) (groups []FileGroup, projectors []GroupedFile, drafts []GroupedFile) {
+	files = dedupeAliasFiles(files)
+
 	type key struct{ stem, quant, mtp string }
 	regular := map[key][]GroupedFile{}
 	splits := map[key][]GroupedFile{}
 	splitDeclared := map[key]int{} // declared shard count from filename
 	projByQuant := map[string][]GroupedFile{}
+	var draftFiles []GroupedFile
 
 	for _, f := range files {
 		kind := classifyFile(f.Path)
@@ -111,9 +133,14 @@ func GroupFiles(files []FileEntry) (groups []FileGroup, projectors []GroupedFile
 		}
 		q := quantOf(f.Path)
 		mtp := FileMTP(f.Path)
-		gf := GroupedFile{Path: f.Path, Size: f.Size, Kind: string(kind)}
+		spec := fileSpecType(f.Path)
+		gf := GroupedFile{Path: f.Path, Size: f.Size, Kind: string(kind), Quant: q, SpecType: spec}
 		if kind == KindProjector {
 			projByQuant[q] = append(projByQuant[q], gf)
+			continue
+		}
+		if kind == KindDraft {
+			draftFiles = append(draftFiles, gf)
 			continue
 		}
 		if m := splitRe.FindStringSubmatch(f.Path); len(m) == 3 {
@@ -156,7 +183,7 @@ func GroupFiles(files []FileEntry) (groups []FileGroup, projectors []GroupedFile
 	for k, fs := range regular {
 		g := FileGroup{
 			ID:    uniqID(k.stem, k.quant, k.mtp),
-			Label: quantLabel(k.quant, k.mtp, fs[0].Path),
+			Label: quantLabel(k.quant, k.mtp, "", fs[0].Path),
 			Quant: k.quant,
 			MTP:   k.mtp,
 			Files: sortedFiles(fs),
@@ -177,7 +204,7 @@ func GroupFiles(files []FileEntry) (groups []FileGroup, projectors []GroupedFile
 		}
 		g := FileGroup{
 			ID:         uniqID(k.stem, k.quant, k.mtp),
-			Label:      quantLabel(k.quant, k.mtp, fs[0].Path) + " split set",
+			Label:      quantLabel(k.quant, k.mtp, "", fs[0].Path) + " split set",
 			Quant:      k.quant,
 			MTP:        k.mtp,
 			Split:      true,
@@ -194,16 +221,43 @@ func GroupFiles(files []FileEntry) (groups []FileGroup, projectors []GroupedFile
 	for _, ps := range projByQuant {
 		allProjectors = append(allProjectors, ps...)
 	}
-	if len(allProjectors) > 0 && len(groups) == 0 {
+	allProjectors = sortedFiles(allProjectors)
+	allDrafts := sortedFiles(draftFiles)
+
+	if len(groups) == 0 && len(allProjectors) > 0 {
 		// Projector-only repository corner case: offer the set directly and
 		// suppress the separate return so it is not added twice.
-		g := FileGroup{ID: uniqID("projectors", "", ""), Label: "Projector files", Vision: true, Files: sortedFiles(allProjectors)}
+		g := FileGroup{ID: uniqID("projectors", "", ""), Label: "Projector files", Vision: true, Files: allProjectors}
 		for _, f := range allProjectors {
 			g.TotalBytes += f.Size
 		}
 		groups = append(groups, g)
 		allProjectors = nil
 	}
+	if len(groups) == 0 && len(allDrafts) > 0 {
+		// Draft-only repository: each sidecar is a downloadable group, never
+		// paired with vision.
+		for _, d := range allDrafts {
+			mtp := ""
+			if d.SpecType == string(gguf.SpecMTP) {
+				mtp = "mtp-draft"
+			}
+			g := FileGroup{
+				ID:       uniqID(strings.TrimSuffix(d.Path, ".gguf"), d.Quant, mtp),
+				Label:    quantLabel(d.Quant, mtp, d.SpecType, d.Path),
+				Quant:    d.Quant,
+				Draft:    true,
+				MTP:      mtp,
+				SpecType: d.SpecType,
+				Files:    []GroupedFile{d},
+			}
+			g.TotalBytes = d.Size
+			groups = append(groups, g)
+		}
+		allDrafts = nil
+	}
+
+	disambiguateGroupLabels(groups)
 
 	// Memory estimate: file size + ~25% overhead for context/KV at defaults.
 	for i := range groups {
@@ -220,16 +274,147 @@ func GroupFiles(files []FileEntry) (groups []FileGroup, projectors []GroupedFile
 		if groups[a].Quant == groups[b].Quant && groups[a].MTP != groups[b].MTP {
 			return groups[a].MTP < groups[b].MTP
 		}
+		if groups[a].Draft != groups[b].Draft {
+			return !groups[a].Draft && groups[b].Draft
+		}
 		if groups[a].TotalBytes != groups[b].TotalBytes {
 			return groups[a].TotalBytes < groups[b].TotalBytes
 		}
 		return groups[a].Label < groups[b].Label
 	})
-	return groups, sortedFiles(allProjectors)
+	return groups, allProjectors, allDrafts
 }
 
-// quantLabel builds the Discover download-row title for a quant (+ MTP).
-func quantLabel(quant, mtp, path string) string {
+// aliasSizeSlop is how close two large GGUF sizes must be to treat the
+// shorter / generic name as a duplicate alias (Muse Glimmer kquant copies
+// differ by ~3 KiB). Small files are never slop-matched — test fixtures and
+// tiny GGUFs would otherwise collapse into one group.
+const (
+	aliasSizeSlop int64 = 16 << 10
+	aliasMinSize  int64 = 32 << 20
+)
+
+// aliasItem is one GGUF considered by alias dedupe.
+type aliasItem struct {
+	kind  FileKind
+	idx   int
+	score int
+	size  int64
+}
+
+// dedupeAliasFiles drops near-duplicate GGUFs that are alias names of a
+// more specific sibling (mmproj-kquant.gguf next to mmproj-Model-Q4_K_M.gguf).
+// Size-unknown files (0) are never clustered.
+func dedupeAliasFiles(files []FileEntry) []FileEntry {
+	drop := map[int]bool{}
+	var ggufs []aliasItem
+	for i, f := range files {
+		k := classifyFile(f.Path)
+		if k == KindOther || f.Size <= 0 {
+			continue
+		}
+		ggufs = append(ggufs, aliasItem{kind: k, idx: i, score: aliasScore(f.Path), size: f.Size})
+	}
+	sort.Slice(ggufs, func(i, j int) bool {
+		if ggufs[i].kind != ggufs[j].kind {
+			return ggufs[i].kind < ggufs[j].kind
+		}
+		if ggufs[i].size != ggufs[j].size {
+			return ggufs[i].size < ggufs[j].size
+		}
+		return ggufs[i].score > ggufs[j].score
+	})
+	for i := 0; i < len(ggufs); i++ {
+		if drop[ggufs[i].idx] {
+			continue
+		}
+		for j := i + 1; j < len(ggufs); j++ {
+			if ggufs[j].kind != ggufs[i].kind {
+				break
+			}
+			if !isAliasPair(ggufs[i], ggufs[j], files) {
+				if ggufs[j].size-ggufs[i].size > aliasSizeSlop {
+					break
+				}
+				continue
+			}
+			if ggufs[j].score > ggufs[i].score {
+				drop[ggufs[i].idx] = true
+				break
+			}
+			drop[ggufs[j].idx] = true
+		}
+	}
+	out := make([]FileEntry, 0, len(files))
+	for i, f := range files {
+		if drop[i] {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+func isAliasPair(a, b aliasItem, files []FileEntry) bool {
+	if a.kind != b.kind {
+		return false
+	}
+	delta := a.size - b.size
+	if delta < 0 {
+		delta = -delta
+	}
+	scoreGap := a.score - b.score
+	if scoreGap < 0 {
+		scoreGap = -scoreGap
+	}
+	if scoreGap < 20 {
+		return false
+	}
+	large := a.size >= aliasMinSize && b.size >= aliasMinSize
+	if large && delta <= aliasSizeSlop {
+		return true
+	}
+	if delta == 0 && (looksLikeGenericAlias(files[a.idx].Path) || looksLikeGenericAlias(files[b.idx].Path)) {
+		return true
+	}
+	return false
+}
+
+func looksLikeGenericAlias(path string) bool {
+	stem := strings.TrimSuffix(strings.ToLower(filepathBase(path)), ".gguf")
+	if stem == "dflash-kquant" || stem == "mmproj-kquant" {
+		return true
+	}
+	return strings.Contains(stem, "kquant") && quantOf(path) == ""
+}
+
+func aliasScore(path string) int {
+	base := strings.ToLower(filepathBase(path))
+	stem := strings.TrimSuffix(base, ".gguf")
+	score := 0
+	if quantOf(path) != "" {
+		score += 100
+	}
+	score += len(stem)
+	if stem == "dflash-kquant" || stem == "mmproj-kquant" ||
+		(strings.HasSuffix(stem, "-kquant") && quantOf(path) == "") {
+		score -= 80
+	}
+	if strings.Contains(stem, "kquant") && quantOf(path) == "" {
+		score -= 20
+	}
+	return score
+}
+
+func filepathBase(path string) string {
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		return path[i+1:]
+	}
+	return path
+}
+
+// quantLabel builds the Discover download-row title for a quant (+ MTP / draft).
+func quantLabel(quant, mtp, spec, path string) string {
 	label := orDefault(quant, "GGUF")
 	if hint := mtpVariantHint(path); hint != "" && mtp == "mtp" {
 		label += " · " + hint
@@ -240,7 +425,94 @@ func quantLabel(quant, mtp, path string) string {
 	case "mtp-draft":
 		label += " · MTP draft"
 	}
+	if mtp != "mtp-draft" {
+		switch spec {
+		case string(gguf.SpecDFlash):
+			label += " · DFlash draft"
+		case string(gguf.SpecEagle3):
+			label += " · EAGLE3 draft"
+		case string(gguf.SpecDSpark):
+			label += " · DSpark draft"
+		case string(gguf.SpecMTP):
+			label += " · MTP draft"
+		case string(gguf.SpecSimple):
+			label += " · draft"
+		}
+	}
 	return label
+}
+
+// disambiguateGroupLabels appends a short stem hint when two groups would
+// otherwise share a label (e.g. two Q4_K_M trunks from different builds).
+func disambiguateGroupLabels(groups []FileGroup) {
+	byLabel := map[string][]int{}
+	for i, g := range groups {
+		byLabel[g.Label] = append(byLabel[g.Label], i)
+	}
+	for label, idxs := range byLabel {
+		if len(idxs) < 2 {
+			continue
+		}
+		hints := make([]string, len(idxs))
+		used := map[string]int{}
+		for n, i := range idxs {
+			h := distinctiveStem(groups[i])
+			hints[n] = h
+			used[h]++
+		}
+		for n, i := range idxs {
+			h := hints[n]
+			if h == "" || used[h] == len(idxs) {
+				continue // identical hint is not distinctive
+			}
+			groups[i].Label = label + " · " + h
+		}
+	}
+}
+
+func distinctiveStem(g FileGroup) string {
+	if len(g.Files) == 0 {
+		return ""
+	}
+	stem := strings.ToUpper(stemOf(g.Files[0].Path))
+	parts := strings.FieldsFunc(stem, func(r rune) bool {
+		return r == '-' || r == '_' || r == '.'
+	})
+	quant := strings.ToUpper(g.Quant)
+	skip := map[string]bool{
+		"GGUF": true, "GGML": true, "MODEL": true, "KQUANT": true,
+		quant: true,
+	}
+	var keep []string
+	for _, p := range parts {
+		if skip[p] || p == "" {
+			continue
+		}
+		if quant != "" && strings.HasPrefix(p, quant) {
+			continue
+		}
+		switch p {
+		case "17GB", "26GB", "32GB", "DYNAMIC", "XL", "L", "S", "M",
+			"AMD", "LOW", "HIGH", "ULTRA", "FAST", "SPARSE", "DENSE", "UD":
+			keep = append(keep, p)
+		}
+	}
+	if len(keep) > 0 {
+		if len(keep) > 2 {
+			keep = keep[:2]
+		}
+		return strings.Join(keep, " ")
+	}
+	for i := len(parts) - 1; i >= 0; i-- {
+		p := parts[i]
+		if skip[p] || p == "" {
+			continue
+		}
+		if len(p) >= 2 && len(p) <= 16 {
+			return p
+		}
+	}
+	return ""
 }
 
 // mtpVariantHint pulls a short build tag immediately before MTP in the
@@ -267,14 +539,14 @@ func mtpVariantHint(path string) string {
 // Known quantization sort order (smallest → largest).
 var quantRanks = map[string]int{
 	"IQ1_S": 1, "IQ1_M": 2,
-	"IQ2_XXS": 3, "IQ2_XS": 4, "Q2_K_S": 5, "Q2_K": 6, "IQ2_S": 7, "IQ2_M": 8,
-	"IQ3_XXS": 9, "IQ3_XS": 10, "Q3_K_S": 11, "IQ3_S": 12, "IQ3_M": 13,
-	"Q3_K_M": 14, "Q3_K_L": 15,
-	"IQ4_NL": 16, "IQ4_XS": 17, "Q4_0": 18, "Q4_K_S": 19, "Q4_K_M": 20, "Q4_1": 21,
-	"Q5_0": 22, "Q5_K_S": 23, "Q5_K_M": 24, "Q5_1": 25,
-	"Q6_K": 26, "Q8_0": 27,
-	"TQ1_0": 28, "TQ2_0": 29, "MXFP4": 30,
-	"F16": 40, "BF16": 41, "F32": 42,
+	"IQ2_XXS": 3, "IQ2_XS": 4, "Q2_K_S": 5, "Q2_K": 6, "Q2_K_L": 7, "Q2_K_XL": 8, "IQ2_S": 9, "IQ2_M": 10,
+	"IQ3_XXS": 11, "IQ3_XS": 12, "Q3_K_S": 13, "IQ3_S": 14, "IQ3_M": 15,
+	"Q3_K_M": 16, "Q3_K_L": 17, "Q3_K_XL": 18,
+	"IQ4_NL": 19, "IQ4_XS": 20, "Q4_0": 21, "Q4_K_S": 22, "Q4_K_M": 23, "Q4_K_L": 24, "Q4_K_XL": 25, "Q4_1": 26,
+	"Q5_0": 27, "Q5_K_S": 28, "Q5_K_M": 29, "Q5_K_L": 30, "Q5_K_XL": 31, "Q5_1": 32,
+	"Q6_K": 33, "Q6_K_L": 34, "Q6_K_XL": 35, "Q8_0": 36, "Q8_K_L": 37, "Q8_K_XL": 38,
+	"TQ1_0": 39, "TQ2_0": 40, "MXFP4": 41,
+	"F16": 50, "BF16": 51, "F32": 52,
 }
 
 // quantRank returns the sort rank of a group; unknown quants rank by a
@@ -283,7 +555,7 @@ func quantRank(g FileGroup) int {
 	if r, ok := quantRanks[g.Quant]; ok {
 		return r
 	}
-	return 35
+	return 45
 }
 
 func sortedFiles(fs []GroupedFile) []GroupedFile {

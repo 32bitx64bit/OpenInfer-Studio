@@ -40,9 +40,27 @@ var speculativeArchs = map[string]SpecType{
 	// *-assistant*.gguf without an mtp- prefix; architecture is the signal.
 	"gemma4-assistant": SpecMTP,
 	"gemma4_assistant": SpecMTP,
+	// Muse Glimmer DFlash drafter (Meta). Transformers arch is
+	// muse_glimmer_assistant; GGUF may use hyphen or underscore.
+	"muse-glimmer-assistant": SpecDFlash,
+	"muse_glimmer_assistant": SpecDFlash,
+	"museglimmer-assistant":  SpecDFlash,
+}
+
+// first-stem-token → spec. DFlash/DSpark must not match mid-name feature
+// tags on a trunk (e.g. Muse-Glimmer-30B-DFlash-ROCmFP4.gguf).
+var speculativeFirstTokens = map[string]SpecType{
+	"mtp":     SpecMTP,
+	"eagle3":  SpecEagle3,
+	"dflash":  SpecDFlash,
+	"dspark":  SpecDSpark,
+	"d-flash": SpecDFlash,
+	"d-spark": SpecDSpark,
 }
 
 // Extra name tokens (community GGUFs that don't use the official prefix).
+// These are matched as delimited tokens, except dflash/dspark which are
+// prefix / first-token only (see LooksLikeSpeculativeDraftName).
 var speculativeNameHints = []struct {
 	token string
 	spec  SpecType
@@ -52,10 +70,6 @@ var speculativeNameHints = []struct {
 	{"eagle_3", SpecEagle3},
 	{"speculator.eagle3", SpecEagle3},
 	{"speculator-eagle3", SpecEagle3},
-	{"dflash", SpecDFlash},
-	{"d-flash", SpecDFlash},
-	{"dspark", SpecDSpark},
-	{"d-spark", SpecDSpark},
 	{"speculator", SpecSimple}, // generic; refine via arch/keys when possible
 	{"spec-draft", SpecSimple},
 	{"draft-eagle", SpecEagle3},
@@ -165,26 +179,104 @@ func HasSpeculativeDraftKeys(raw map[string]any) bool {
 
 // LooksLikeSpeculativeDraftName reports draft/speculator naming outside the
 // official sidecar prefixes (community uploads, older converters).
+//
+// DFlash / DSpark are prefix- or first-token-only: a trunk named
+// Muse-Glimmer-30B-DFlash-….gguf is not a sidecar. EAGLE3 / speculator
+// tokens may appear later in the basename.
 func LooksLikeSpeculativeDraftName(s string) (bool, SpecType) {
 	if st := SidecarSpecType(s); st != SpecNone {
 		return true, st
 	}
-	lower := strings.ToLower(s)
 	base := strings.ToLower(filepath.Base(s))
-	hay := lower + " " + base
+	if strings.Contains(base, "mmproj") || strings.Contains(base, "mm-proj") ||
+		strings.Contains(base, "projector") {
+		return false, SpecNone
+	}
+	stem := strings.TrimSuffix(base, ".gguf")
+	first := firstPathToken(stem)
+	if st, ok := speculativeFirstTokens[first]; ok {
+		return true, st
+	}
+	if st := assistantSidecarSpec(base); st != SpecNone {
+		return true, st
+	}
 	for _, h := range speculativeNameHints {
-		if strings.Contains(hay, h.token) {
+		if delimitedToken(base, h.token) || strings.HasPrefix(stem, h.token) {
 			return true, h.spec
 		}
 	}
 	// Trailing draft markers for draft-simple companions.
-	stem := strings.TrimSuffix(base, ".gguf")
 	if strings.Contains(base, "-draft.") || strings.Contains(base, "_draft.") ||
 		strings.Contains(base, "-draft-") || strings.Contains(base, "_draft_") ||
 		strings.HasSuffix(stem, "-draft") || strings.HasSuffix(stem, "_draft") {
 		return true, SpecSimple
 	}
 	return false, SpecNone
+}
+
+func firstPathToken(stem string) string {
+	stem = strings.ToLower(strings.TrimSpace(stem))
+	for i := 0; i < len(stem); i++ {
+		c := stem[i]
+		if c == '-' || c == '_' || c == '.' {
+			return stem[:i]
+		}
+	}
+	return stem
+}
+
+func delimitedToken(s, tok string) bool {
+	if tok == "" || !strings.Contains(s, tok) {
+		return false
+	}
+	for i := 0; i+len(tok) <= len(s); i++ {
+		if s[i:i+len(tok)] != tok {
+			continue
+		}
+		leftOK := i == 0 || !isDraftAlnum(s[i-1])
+		rightOK := i+len(tok) == len(s) || !isDraftAlnum(s[i+len(tok)])
+		if leftOK && rightOK {
+			return true
+		}
+	}
+	return false
+}
+
+func isDraftAlnum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || (b >= 'A' && b <= 'Z')
+}
+
+// assistantSidecarSpec maps *-assistant*.gguf companions that omit an
+// official mtp-/dflash- prefix (Gemma 4 MTP, Muse Glimmer DFlash).
+func assistantSidecarSpec(base string) SpecType {
+	if !strings.Contains(base, "assistant") {
+		return SpecNone
+	}
+	if strings.Contains(base, "glimmer") || strings.Contains(base, "museglimmer") {
+		return SpecDFlash
+	}
+	if strings.Contains(base, "gemma-4") || strings.Contains(base, "gemma4") {
+		return SpecMTP
+	}
+	return SpecNone
+}
+
+// SpecShortLabel is a compact UI tag for a --spec-type (dflash, eagle3, …).
+func SpecShortLabel(st SpecType) string {
+	switch st {
+	case SpecDFlash:
+		return "dflash"
+	case SpecEagle3:
+		return "eagle3"
+	case SpecDSpark:
+		return "dspark"
+	case SpecMTP:
+		return "mtp-draft"
+	case SpecSimple:
+		return "draft"
+	default:
+		return ""
+	}
 }
 
 // DetectSpeculativeDraft combines architecture, official sidecar prefixes,

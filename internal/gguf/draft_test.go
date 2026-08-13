@@ -59,6 +59,53 @@ func TestSidecarPrefixes(t *testing.T) {
 	}
 }
 
+func TestLooksLikeSpeculativeDraftName(t *testing.T) {
+	cases := []struct {
+		path string
+		ok   bool
+		spec SpecType
+	}{
+		{"dflash-Muse-Glimmer-30B-Q4_K_M.gguf", true, SpecDFlash},
+		{"dflash-kquant.gguf", true, SpecDFlash},
+		{"eagle3.gguf", true, SpecEagle3},
+		{"mtp-Qwen3.6-27B-Q4_K_M.gguf", true, SpecMTP},
+		{"Muse-Glimmer-30B-assistant-Q8_0.gguf", true, SpecDFlash},
+		{"gemma-4-E2B-it-assistant.Q8_0.gguf", true, SpecMTP},
+		{"mmproj-Muse-Glimmer-30B-Q4_K_M.gguf", false, SpecNone},
+		// Trunk with DFlash as a feature tag, not a sidecar prefix.
+		{"Muse-Glimmer-30B-DFlash-ROCmFP4.gguf", false, SpecNone},
+		{"Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf", false, SpecNone},
+		{"Qwen3.6-NEO-MTP-IQ4_XS.gguf", false, SpecNone},
+	}
+	for _, tc := range cases {
+		ok, spec := LooksLikeSpeculativeDraftName(tc.path)
+		if ok != tc.ok || spec != tc.spec {
+			t.Errorf("%s: got (%v,%q) want (%v,%q)", tc.path, ok, spec, tc.ok, tc.spec)
+		}
+	}
+}
+
+func TestMuseGlimmerAssistantArch(t *testing.T) {
+	ok, spec := DetectSpeculativeDraft("muse-glimmer-assistant", "Hf_Museglimmer",
+		"/m/Muse-Glimmer-30B-assistant-Q8_0.gguf", nil)
+	if !ok || spec != SpecDFlash {
+		t.Fatalf("muse-glimmer-assistant: ok=%v spec=%q", ok, spec)
+	}
+	md := &Metadata{
+		Architecture: "muse_glimmer_assistant",
+		Name:         "Hf_Museglimmer",
+		Raw:          map[string]any{"clip.has_vision_encoder": true},
+	}
+	md.extract()
+	md.ApplySpeculativeFlags("/m/Muse-Glimmer-30B-assistant-Q8_0.gguf")
+	if !md.SpeculativeDraft || md.SpecType != SpecDFlash {
+		t.Fatalf("expected dflash draft: draft=%v type=%q", md.SpeculativeDraft, md.SpecType)
+	}
+	if md.HasVision || md.Multimodal {
+		t.Fatal("assistant sidecar must clear multimodal")
+	}
+}
+
 func TestDetectSpeculativeDraftArch(t *testing.T) {
 	ok, spec := DetectSpeculativeDraft("eagle3", "", "", nil)
 	if !ok || spec != SpecEagle3 {
