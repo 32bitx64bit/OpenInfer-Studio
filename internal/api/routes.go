@@ -13,6 +13,7 @@ import (
 	"github.com/openinfer/openinfer-studio/internal/instances"
 	"github.com/openinfer/openinfer-studio/internal/models"
 	"github.com/openinfer/openinfer-studio/internal/proxy"
+	"github.com/openinfer/openinfer-studio/internal/quantize"
 	"github.com/openinfer/openinfer-studio/internal/runtimes"
 )
 
@@ -31,6 +32,7 @@ type Deps struct {
 	Proxy    *proxy.Server
 	HostIt   *hostit.Bridge
 	Logs     *diagnostics.Manager
+	Quant    *quantize.Manager
 }
 
 // RegisterRoutes wires every REST endpoint and the event WebSocket.
@@ -90,6 +92,19 @@ func (s *Server) RegisterRoutes(d *Deps) {
 	s.Handle("POST /api/v1/runtimes/{id}/preferred", h.preferRuntime)
 	s.Handle("POST /api/v1/runtimes/{id}/health", h.healthRuntime)
 	s.Handle("GET /api/v1/runtimes/{id}/capabilities", h.runtimeCaps)
+	s.Handle("GET /api/v1/runtimes/{id}/tools", h.runtimeTools)
+
+	s.Handle("GET /api/v1/quantize/types", h.quantizeTypes)
+	s.Handle("POST /api/v1/quantize/preview", h.quantizePreview)
+	s.Handle("POST /api/v1/quantize/jobs", h.startQuantizeJob)
+	s.Handle("GET /api/v1/quantize/jobs", h.listQuantizeJobs)
+	s.Handle("POST /api/v1/quantize/jobs/clear-history", h.clearQuantizeHistory)
+	s.Handle("GET /api/v1/quantize/jobs/{id}", h.getQuantizeJob)
+	s.Handle("POST /api/v1/quantize/jobs/{id}/cancel", h.cancelQuantizeJob)
+	s.Handle("DELETE /api/v1/quantize/jobs/{id}", h.deleteQuantizeJob)
+	s.Handle("GET /api/v1/quantize/imatrices", h.listIMatrices)
+	s.Handle("POST /api/v1/quantize/imatrices/import", h.importIMatrix)
+	s.Handle("DELETE /api/v1/quantize/imatrices/{id}", h.deleteIMatrix)
 
 	s.Handle("GET /api/v1/instances", h.listInstances)
 

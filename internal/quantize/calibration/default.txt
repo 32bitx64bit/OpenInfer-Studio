@@ -1,0 +1,349 @@
+OpenInfer Studio default imatrix calibration text.
+
+This file is original project material: mixed chat, code, and prose so
+llama-imatrix can initialize. llama.cpp requires at least two context
+windows of tokens (typically 1024 at the default 512 context). A custom
+file with tens of thousands of tokens is still better for thorough IQ
+work.
+
+User: Explain how a hash map differs from a binary search tree.
+Assistant: A hash map stores key-value pairs in buckets chosen by a hash
+function, so typical lookup is constant time. A binary search tree keeps
+keys ordered, so lookup is logarithmic and you can iterate in sorted
+order. Hash maps need a good hash and can clash; trees stay ordered but
+need balancing (AVL, red-black) to avoid degenerating into a list.
+
+User: Write a Python function that merges two sorted lists.
+Assistant: def merge_sorted(a, b):
+    i = j = 0
+    out = []
+    while i < len(a) and j < len(b):
+        if a[i] <= b[j]:
+            out.append(a[i]); i += 1
+        else:
+            out.append(b[j]); j += 1
+    out.extend(a[i:])
+    out.extend(b[j:])
+    return out
+
+User: Why does speculative decoding help?
+Assistant: A small draft model proposes several tokens. The large model
+checks them in one parallel forward pass. Accepted tokens are kept; the
+first rejection is sampled from the large model. When the draft is right
+often, you skip sequential steps on the large model and raise tokens
+per second without changing the output distribution.
+
+The river cut a narrow shelf of limestone. Wind moved the grass in long
+waves. A fox paused at the tree line, then crossed the path without
+sound. Downstream, the mill wheel still turned though the miller had
+left the door unlatched. Someone had stacked firewood under the eaves
+in a pattern that would shed rain. Evening came early in the gorge.
+
+A recipe for barley stew: toast the grain in a dry pan until it smells
+nutty. Soften onion and carrot in oil. Add the barley, a bay leaf, and
+stock to cover by two fingers. Simmer until the grain is tender, not
+mush. Finish with parsley, black pepper, and a splash of vinegar.
+
+fn clamp(x: f32, lo: f32, hi: f32) -> f32 {
+    if x < lo { lo } else if x > hi { hi } else { x }
+}
+
+SELECT name, COUNT(*) AS n
+FROM events
+WHERE ts >= DATE('now', '-7 days')
+GROUP BY name
+ORDER BY n DESC
+LIMIT 20;
+
+The compiler error said the lifetime of the returned reference did not
+live long enough. The fix was to take the buffer by value, or to tie
+the output slice to the caller-owned backing store instead of a
+temporary vector that dropped at the end of the function.
+
+User: Summarize the last meeting in four bullets.
+Assistant: - Ship the library scan fix this week; it unblocks import.
+- Keep the public API loopback-only until the key rotation test lands.
+- Draft models stay optional; do not auto-pair by filename alone.
+- Next review is Thursday, same time, with a short demo of load estimates.
+
+In distributed systems, at-least-once delivery plus idempotent handlers
+is usually simpler than exactly-once. Exactly-once needs a consensus
+log or a transactional outbox. At-least-once will retry; the handler
+must ignore duplicates using an idempotency key.
+
+A sonnet is fourteen lines. This is not a sonnet. It is a reminder that
+form is a tool: when you need compression, use a form that forces you
+to cut. When you need exploration, use a loose paragraph and walk.
+
+TODO: measure KV cache bytes at 8k and 32k context for the 7B Q4_K_M
+build. If 32k spills VRAM, recommend Q4_K_S or quantized K/V cache
+before telling the user to buy more memory.
+
+The museum closed at six. She stood another minute in front of the
+small painting of a kitchen window, then wrote the title in a notebook
+and left. Outside, buses hissed at the curb. Rain started, light, the
+kind that makes people walk faster without quite running.
+
+User: What is an importance matrix used for when compressing weights?
+Assistant: You run the model over sample text and record how much each
+tensor moves the output. Later, a quantizer spends more bits on the
+sensitive tensors and fewer on the rest. If the sample is too short,
+the tool cannot fill even two context windows and it refuses to start.
+Mixed domains help: dialogue, code, and ordinary prose.
+
+User: Show a Go function that joins paths without building a shell string.
+Assistant: dest := filepath.Join(root, "models", name+".gguf")
+if _, err := filepath.Abs(dest); err != nil {
+    return err
+}
+
+Night trains still stop at the branch station even when nobody gets
+off. The platform lights are sodium, the waiting room clock is three
+minutes fast, and the vending machine takes coins the town no longer
+mints. A paper timetable lists connections that were cut in spring.
+Someone taped a handwritten note: last bus is 21:40, do not wait for
+the 22:10, it does not run on Sundays.
+
+package cache
+
+type Entry struct {
+    Key     string
+    Value   []byte
+    Expires int64
+}
+
+func (c *Cache) Get(key string) ([]byte, bool) {
+    e, ok := c.m[key]
+    if !ok || e.Expires < nowUnix() {
+        return nil, false
+    }
+    return e.Value, true
+}
+
+JSON is a decent interchange format and a poor configuration language.
+Use it on the wire. Prefer typed structs in the process. When a client
+sends unknown fields, reject them: silent drops hide mistakes, and a
+long job is a bad place to discover a typo.
+
+The workshop smelled of cut cedar and old varnish. He squared a board
+against the fence, marked a line with a knife instead of a pencil, and
+sawed on the waste side. Glue-up was overnight, clamps every hand
+width, cauls to keep the panel flat. In the morning the joints would
+either disappear or tell on him.
+
+math: softmax(x)_i = exp(x_i - m) / sum_j exp(x_j - m) where m is the
+max of x. Subtracting the max is not optional if you like finite
+floats. RMSNorm is x * g / rms(x); no mean subtraction, fewer running
+statistics to store.
+
+A grocery list is a tree if you group by aisle, a sequence if you walk
+the store, and a set if you only care that nothing is missing. Pick
+the structure that matches the operation. Sorting a set to print it
+does not make it a list in the domain model.
+
+for i, name := range tensors {
+    fmt.Fprintf(w, "%s=%s\n", name, assign[i])
+}
+
+User: Why bind a local inference server to loopback?
+Assistant: The process should not be reachable from the LAN by accident.
+A random port and a per-process key are extra belts. If you want a
+public OpenAI-compatible endpoint, that is a separate service with an
+explicit start, its own key, and CORS you chose on purpose.
+
+Clouds stacked over the ridge until the valley went the color of wet
+slate. Crows lifted from the power line. The first drops hit the tin
+roof like gravel. In the shed, a radio counted seconds between thunder
+and the flash, converting weather into arithmetic a child could do.
+
+CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+CREATE INDEX IF NOT EXISTS idx_events_name ON events(name);
+
+Failed work should be removable from a history list. Running work
+should be canceled first. The file a job wrote into a library is not
+history; it is an artifact. History is the row, the log, and any
+scratch files in a job directory.
+
+User: Compare a 4-bit k-quant and a denser importance-aware 4-bit type.
+Assistant: The k-quant is the usual local default and does not require
+an importance matrix. The denser type needs that matrix or proper
+nouns and rare facts go soft. If the matrix tool cannot load a file,
+use the k-quant, or skip the matrix and accept a weaker result.
+
+She learned the city by walking the same loop at different hours.
+Morning was bakery vents and delivery trucks. Noon was schoolyards.
+Evening was kitchen windows and the smell of onions. After midnight
+the loop belonged to street sweepers and people who had missed the
+last train on purpose.
+
+func isFullPrecision(q string) bool {
+    switch strings.ToUpper(strings.TrimSpace(q)) {
+    case "F32", "F16", "BF16", "":
+        return true
+    default:
+        return false
+    }
+}
+
+Compressing an already compressed file is a second loss. A UI should
+block that until the user checks both allow and acknowledge. Accidents
+are expensive in disk and in trust.
+
+A good error is one sentence the operator can act on. How many tokens
+were needed, how many the file produced, and what to do next. A slice
+of CPU feature flags ending mid-line is a log tail that escaped.
+
+The orchard was planted in rows a wagon could pass. In late summer
+the ground under the pears was a map of what the wasps had started.
+He picked from the sunny side first, left the shaded fruit another
+week, and stacked crates in the barn where the air still moved.
+
+type Job struct {
+    Kind      string
+    SourceID  string
+    FType     string
+    CalPath   string
+    DraftID   string
+    DraftType string
+}
+
+Numbers for a weekend estimate: a 30 billion parameter k-quant is on
+the order of twenty gigabytes on disk. A small assistant at full
+precision might be five. The same assistant at four bits might be one
+and a half. Memory at runtime is the constraint that actually hurts;
+disk is only the queue.
+
+User: Write a test name that describes the behavior.
+Assistant: TestMergeKeepsSortOrder, TestCacheExpiresStaleEntries,
+TestRejectUnknownJSONKeys. The name is the spec. If you need a comment
+to explain the test, the name is wrong.
+
+In the old harbor the pilings were iron before they were wood, or the
+other way around, depending on which plaque you believed. Gulls argued
+over a fish crate. A ferry blew once, then again, and the ramp dropped
+with a sound like a trunk closing.
+
+print("hello, calibration")
+console.log("hello, calibration")
+
+Those lines are samples, not a command the application concatenates.
+Starting a child process should pass an argument vector. Building a
+shell string from user text is how injection bugs are born.
+
+User: What can you read from a GGUF header without loading tensors?
+Assistant: Architecture, file type, context length, embedding length,
+block count, tokenizer family, and flags for vision, audio, multi-token
+prediction, and embedding pooling. Enough to name the model, estimate
+memory, and decide whether a projector belongs with it. Not enough to
+run a conversation.
+
+There is a kind of quiet that is only the refrigerator and the street.
+He sat with a notebook and wrote until the page filled, then numbered
+the questions he still could not answer. The useful answers had the
+same shape: name things so a person can find them, fail with a
+sentence, and do not hide a companion file because a picker was built
+only for chat.
+
+KV cache grows with context and batch. Weights are mostly fixed by the
+chosen precision. If RAM is short, drop context before GPU layers
+unless the user is doing long documents. If VRAM is short, offload
+layers to CPU. If both are short, pick a smaller precision.
+
+User: Give a cautious recommendation for a 16 GB card and a 30B model.
+Assistant: A 4-bit k-quant, modest context, GPU layers until the
+estimate turns yellow, and a matching small assistant if you use
+speculative decoding. Do not promise a 128k window. Measure after the
+first load.
+
+Attention is a weighted average of values. The weights come from the
+dot product of queries and keys, scaled and softmaxed. Grouped-query
+attention shares keys and values across heads to shrink the cache.
+Sliding-window attention limits each token to a neighborhood so long
+sequences stay affordable. Hybrid models mix dense layers with window
+layers; the pattern lives in the header.
+
+User: Translate this into a careful commit message.
+Assistant: Skip the importance matrix on speculative assistant GGUFs and
+still run the quantizer, because the matrix tool cannot initialize
+those architectures alone.
+
+The last bus was already a rumor when they reached the stop. A cat
+watched from a garden wall. One window on the terrace still had a
+lamp on, a paperback splayed on the sill, steam on the glass from
+something on the stove. They walked home the long way, past the
+closed bakery, because the short way went by the river and the river
+path had no lights.
+
+func merge(dst, src map[string]string) {
+    for k, v := range src {
+        if _, ok := dst[k]; !ok {
+            dst[k] = v
+        }
+    }
+}
+
+Documentation should say why a flag exists, not only that it exists.
+A list of every llama.cpp switch copied into a GUI is not a product.
+The product is the subset that is safe, advertised by the runtime, and
+explained in a sentence a tired person can use at midnight.
+
+User: How do you estimate whether a model fits?
+Assistant: Size the weights from parameter count and bits per weight.
+Add a KV cache from context, batch, and head geometry. Add a little
+for graphs and runtime overhead. Compare against free VRAM and RAM.
+Yellow means tight. Red means pick a smaller quant or less context.
+
+A recipe for flatbread: flour, water, salt, a spoon of oil. Rest the
+dough until it feels less shy. Roll thin, cook in a dry pan until
+spots appear, flip, and keep them wrapped so they do not go stiff.
+Eat with the barley stew, or with cheese and black pepper.
+
+switch kind {
+case "quantize":
+    return runQuantize()
+case "imatrix":
+    return runIMatrix()
+default:
+    return fmt.Errorf("unknown kind %q", kind)
+}
+
+The library of a small town still stamps due dates in ink. The
+computer catalog is three versions behind. A volunteer knows where the
+gardening books actually live, which is not where the Dewey number
+says. Systems and people both store truth. When they disagree, ask
+who moved the shelf last.
+
+User: Explain beam search versus sampling without equations.
+Assistant: Beam search keeps several almost-best continuations and is
+good when there is a right answer, like translation. Sampling draws
+from the distribution, so stories wander and jokes land. Temperature
+stretches or flattens the distribution. Top-k and top-p throw away
+the long tail. For chat, sampling is the default for a reason.
+
+On the third day the fog did not lift. Ships used horns instead of
+sights. The lighthouse keeper made tea at the usual hours anyway,
+because a schedule is a way of remaining a person when the horizon
+has been deleted.
+
+type File struct {
+    Path string
+    Size int64
+    Role string
+}
+
+Weights, tokenizer, and chat template travel together in one GGUF more
+often than not. Projectors are extra files. Drafts are extra files.
+Split shards are one model in several files. A scan that treats every
+gguf as a chat target will offer the user a projector to talk to.
+
+User: What should happen when a tool exits non-zero?
+Assistant: Read the log for the lines that are actually errors. Turn
+the useful ones into one or two sentences. Keep the full log on disk
+for people who want the CPU flags and the timestamps.
+
+This closing block exists so the file is long enough for a large
+vocabulary tokenizer. Importance matrices need tokens. The tokens
+here are still sentences: mixed domains, mixed syntax, no copied
+encyclopedia, no song lyrics, no novels. Chat, code, and a walk
+through weather and work. That is the whole idea of a default file.
+It is not a research corpus. It is enough to start.

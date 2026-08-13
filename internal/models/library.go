@@ -23,8 +23,11 @@ var now = func() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
 // Filename quant / split patterns used when deriving a display alias.
 var (
-	aliasQuantRe = regexp.MustCompile(`(?i)[.\-_]((?:IQ[1-4]_[A-Z0-9]+|Q[1-8]_[A-Z0-9_]+(?:_[SMXL])?|F16|F32|BF16|TQ[12]_0|MXFP4|Q4_0))`)
+	aliasQuantRe = regexp.MustCompile(`(?i)[.\-_]((?:UD-)?(?:IQ[1-4]_[A-Z0-9]+|Q[1-8]_[A-Z0-9_]+(?:_[SMXL])?|F16|F32|BF16|TQ[12]_0|MXFP4|Q4_0))`)
 	aliasSplitRe = regexp.MustCompile(`(?i)-(\d{5})-of-(\d{5})$`)
+	// Trailing quant on a display name, including a space separator
+	// ("Muse Glimmer 30B Assistant Q4_K_M").
+	trailingQuantRe = regexp.MustCompile(`(?i)[.\-_\s]+(?:UD-)?(?:IQ[1-4]_[A-Z0-9]+|Q[1-8]_[A-Z0-9_]+(?:_[SMXL])?|F16|F32|BF16|TQ[12]_0|MXFP4|Q4_0)$`)
 )
 
 // goodAlias reports whether a GGUF general.name (or existing DB alias) is
@@ -42,10 +45,61 @@ func goodAlias(s string) bool {
 	return true
 }
 
+// StripTrailingQuant removes a filename/display-name quant suffix so a new
+// level can be appended (F16 → Q4_K_M, Q8_0 → Q4_K_M, …).
+func StripTrailingQuant(s string) string {
+	s = strings.TrimSpace(s)
+	for {
+		next := strings.TrimSpace(trailingQuantRe.ReplaceAllString(s, ""))
+		if next == s {
+			return next
+		}
+		s = next
+	}
+}
+
+// QuantizedAlias is the library display name for a newly quantized GGUF:
+// the source model's name with the new quant level at the end.
+func QuantizedAlias(name, ftype string) string {
+	name = strings.TrimSpace(name)
+	ftype = strings.TrimSpace(ftype)
+	base := StripTrailingQuant(name)
+	if base == "" {
+		base = name
+	}
+	if ftype == "" {
+		return base
+	}
+	return strings.TrimSpace(base + " " + ftype)
+}
+
+func isLocalLayout(path string) bool {
+	for p := filepath.Clean(path); p != "." && p != string(os.PathSeparator); {
+		if strings.HasPrefix(filepath.Base(p), "local--") {
+			return true
+		}
+		next := filepath.Dir(p)
+		if next == p {
+			break
+		}
+		p = next
+	}
+	return false
+}
+
 // deriveAlias chooses a human-readable library alias. Prefer a solid
 // general.name; otherwise build one from the GGUF filename or the managed
-// Hugging Face repo folder (author--Repo-Name-GGUF/…).
-func deriveAlias(primaryPath, ggufName string) string {
+// Hugging Face repo folder (author--Repo-Name-GGUF/…). Local quantize/import
+// outputs append the quant level so they are distinct from the source.
+func deriveAlias(primaryPath, ggufName, quantization string) string {
+	alias := deriveAliasBase(primaryPath, ggufName)
+	if quantization != "" && isLocalLayout(primaryPath) {
+		return QuantizedAlias(alias, quantization)
+	}
+	return alias
+}
+
+func deriveAliasBase(primaryPath, ggufName string) string {
 	if goodAlias(ggufName) {
 		return strings.TrimSpace(ggufName)
 	}
@@ -240,6 +294,9 @@ func (l *Library) Scan() (int, error) {
 		md.ApplySpeculativeFlags(primary)
 		md.ApplyEmbeddingFlags(primary)
 		md.ApplyDiffusionFlags(primary)
+		if q := gguf.UnslothDynamicQuant(primary, md.Name); q != "" {
+			md.Quantization = q
+		}
 		var total int64
 		for _, f := range files {
 			total += f.size
@@ -319,7 +376,7 @@ func (l *Library) Scan() (int, error) {
 			"tensor_errors":    tensorIssues,
 		})
 		id := stableID(primary)
-		alias := deriveAlias(primary, md.Name)
+		alias := deriveAlias(primary, md.Name, md.Quantization)
 		_, err = l.db.Exec(`INSERT INTO models
 			(id,alias,primary_path,projector_path,size_bytes,quantization,architecture,parameters,
 			 context_length,metadata_json,created_at,updated_at)
@@ -333,6 +390,8 @@ func (l *Library) Scan() (int, error) {
 			 alias=CASE
 			   WHEN length(trim(models.alias)) < 4
 			     OR lower(trim(models.alias)) IN ('model','gguf','untitled','unknown','none')
+			   THEN excluded.alias
+			   WHEN trim(models.alias) = trim(COALESCE(json_extract(models.metadata_json, '$.name'), ''))
 			   THEN excluded.alias
 			   ELSE models.alias
 			 END`,
@@ -484,6 +543,54 @@ func (l *Library) Update(id string, alias *string, favorite *bool, notes *string
 	return err
 }
 
+// AdoptQuantized stamps a freshly quantized GGUF in the library: display
+// name is the source alias plus the new quant level, and source_repo /
+// runtime pins are copied from the model that was quantized.
+func (l *Library) AdoptQuantized(id, srcAlias, ftype string, inherit *Model) (string, error) {
+	if id == "" {
+		return "", fmt.Errorf("missing model id")
+	}
+	m, err := l.Get(id)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(srcAlias) == "" {
+		srcAlias = m.Alias
+	}
+	alias := QuantizedAlias(srcAlias, ftype)
+	pinRT, pinBE := m.PinnedRuntime, m.PinnedBackend
+	if inherit != nil {
+		if pinRT == "" {
+			pinRT = inherit.PinnedRuntime
+		}
+		if pinBE == "" {
+			pinBE = inherit.PinnedBackend
+		}
+	}
+	if err := l.Update(id, &alias, nil, nil, &pinRT, &pinBE); err != nil {
+		return "", err
+	}
+	repo := m.SourceRepo
+	if inherit != nil && repo == "" && inherit.SourceRepo != "" {
+		repo = inherit.SourceRepo
+	}
+	if repo == "" {
+		repo = "local/" + safeImportName(alias+".gguf")
+	}
+	q := strings.TrimSpace(ftype)
+	if q == "" {
+		q = m.Quantization
+	}
+	_, err = l.db.Exec(`UPDATE models SET source_repo=?, quantization=?, updated_at=? WHERE id=?`,
+		repo, q, now(), id)
+	if l.events != nil {
+		l.events.Publish("library.model_imported", map[string]any{
+			"id": id, "alias": alias, "quantization": q, "source": "quantize",
+		})
+	}
+	return alias, err
+}
+
 // RecordLoad stores the outcome of a load attempt.
 func (l *Library) RecordLoad(id, runtimeID, result string) {
 	_, _ = l.db.Exec(`UPDATE models SET last_loaded_at=?, last_runtime=?, last_result=? WHERE id=?`,
@@ -624,6 +731,12 @@ func (l *Library) ImportFile(path string) (string, error) {
 		})
 	}
 	return id, nil
+}
+
+// IDForPath returns the library id whose primary, projector, or shard path
+// matches path, or "" if none.
+func (l *Library) IDForPath(path string) string {
+	return l.idForPath(path)
 }
 
 func (l *Library) idForPath(path string) string {

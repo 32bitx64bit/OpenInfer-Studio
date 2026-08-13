@@ -10,6 +10,17 @@ func metaTok(tok string) json.RawMessage {
 	return b
 }
 
+func TestIsSpeculativeDraft(t *testing.T) {
+	draft := Model{PrimaryPath: "/m/dflash-Muse-Glimmer-30B-F16.gguf"}
+	if !IsSpeculativeDraft(draft) {
+		t.Fatal("dflash- prefix must be a draft")
+	}
+	trunk := Model{PrimaryPath: "/m/Muse-Glimmer-30B-Q4_K_S.gguf", Architecture: "llama"}
+	if IsSpeculativeDraft(trunk) {
+		t.Fatal("trunk must not be a draft")
+	}
+}
+
 func TestDraftCompatibleSameModel(t *testing.T) {
 	m := Model{ID: "a", Architecture: "llama", Parameters: 7e9, Metadata: metaTok("llama")}
 	ok, reason := DraftCompatible(m, m)

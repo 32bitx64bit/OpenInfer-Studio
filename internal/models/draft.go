@@ -56,6 +56,17 @@ func isSpeculativeDraftModel(m Model) bool {
 	return ok
 }
 
+// IsSpeculativeDraft reports whether m is a draft sidecar (DFlash, EAGLE, MTP, …),
+// not a standalone chat model.
+func IsSpeculativeDraft(m Model) bool {
+	return isSpeculativeDraftModel(m)
+}
+
+// IsProjectorFile reports whether m is an mmproj / projector GGUF.
+func IsProjectorFile(m Model) bool {
+	return looksLikeProjector(m)
+}
+
 func draftSpecType(m Model) gguf.SpecType {
 	meta := parseDraftMeta(m.Metadata)
 	if meta.SpecType != "" {

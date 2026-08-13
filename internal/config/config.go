@@ -31,6 +31,11 @@ type Layout struct {
 	Sessions    string // <data>/sessions
 	Temp        string // <data>/temp
 	Attachments string // <data>/attachments (chat audio/files)
+
+	QuantJobs        string // <data>/quant/jobs
+	QuantIMatrices   string // <data>/quant/imatrices
+	QuantCalibration string // <data>/quant/calibration
+	QuantLogs        string // <data>/logs/quant
 }
 
 // Open resolves the layout, creating every directory. If dataOverride is
@@ -72,11 +77,16 @@ func Open(dataOverride string) (*Layout, error) {
 	l.Sessions = filepath.Join(dataDir, "sessions")
 	l.Temp = filepath.Join(dataDir, "temp")
 	l.Attachments = filepath.Join(dataDir, "attachments")
+	l.QuantJobs = filepath.Join(dataDir, "quant", "jobs")
+	l.QuantIMatrices = filepath.Join(dataDir, "quant", "imatrices")
+	l.QuantCalibration = filepath.Join(dataDir, "quant", "calibration")
+	l.QuantLogs = filepath.Join(dataDir, "logs", "quant")
 
 	for _, d := range []string{
 		l.ConfigDir, l.DataDir, l.CacheDir, l.Database, l.Runtimes, l.Models,
 		l.Partial, l.Active, l.HFCache, l.MetaCache, l.AppLogs, l.InstLogs,
 		l.Presets, l.Sessions, l.Temp, l.Attachments,
+		l.QuantJobs, l.QuantIMatrices, l.QuantCalibration, l.QuantLogs,
 	} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return nil, fmt.Errorf("creating %s: %w", d, err)

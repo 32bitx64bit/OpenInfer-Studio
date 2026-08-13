@@ -29,6 +29,7 @@ import (
 	"github.com/openinfer/openinfer-studio/internal/instances"
 	"github.com/openinfer/openinfer-studio/internal/models"
 	"github.com/openinfer/openinfer-studio/internal/proxy"
+	"github.com/openinfer/openinfer-studio/internal/quantize"
 	"github.com/openinfer/openinfer-studio/internal/runtimes"
 	"github.com/openinfer/openinfer-studio/internal/version"
 	"github.com/openinfer/openinfer-studio/migrations"
@@ -137,6 +138,14 @@ func main() {
 		}
 	}
 
+	qm := quantize.NewManager(db.DB, layout, rt, lib, hub, logs.Logger("quantize", slog.LevelInfo).Logger,
+		func(dir string) uint64 { return hardware.Detect(dir, dir).DiskFreeModels },
+		func() *hardware.Info { return hardware.Detect(layout.Models, layout.Runtimes) })
+	qm.SetInstanceHooks(func() []string { return api.LoadedModelIDs(im) }, im)
+	if err := qm.RecoverAfterRestart(); err != nil {
+		log.Warn("quant job recovery failed", "err", err)
+	}
+
 	// Forward structured log records to WS clients for the live Logs page.
 	go func() {
 		ch, unsub := logs.Subscribe()
@@ -189,7 +198,7 @@ func main() {
 	srv := api.NewServer(auth.Token(*tokenFlag), hub, logs.Logger("api", slog.LevelInfo).Logger)
 	srv.RegisterRoutes(&api.Deps{
 		Hub: hub, Layout: layout, DB: db, Settings: settings, HF: hf, DL: dl,
-		RT: rt, Lib: lib, IM: im, Chat: chatSvc, Proxy: px, HostIt: hostIt, Logs: logs,
+		RT: rt, Lib: lib, IM: im, Chat: chatSvc, Proxy: px, HostIt: hostIt, Logs: logs, Quant: qm,
 	})
 	if err := srv.Start(*portFlag); err != nil {
 		fmt.Fprintf(os.Stderr, `{"ready":false,"error":%q}`+"\n", "bind: "+err.Error())

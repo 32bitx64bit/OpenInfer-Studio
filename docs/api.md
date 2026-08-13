@@ -76,7 +76,48 @@ Events: `instance.state_changed`, `instance.updated`, `instance.activity`,
 | POST `/runtimes/import` | `{path}` custom llama-server executable or archive (`.zip` / `.tar.gz` / `.tgz`) |
 | POST `/runtimes/{id}/preferred`, `/health` | |
 | GET `/runtimes/{id}/capabilities` | parsed caps + raw help + version output |
+| GET `/runtimes/{id}/tools` | sibling binaries (`llama-quantize`, `llama-imatrix`, `llama-gguf-split`) + parsed flags + advertised ftypes |
 | DELETE `/runtimes/{id}` | refused while pinned by models |
+
+## Quantization
+
+GGUF → GGUF jobs driven by the selected runtime’s `llama-quantize` /
+`llama-imatrix`. HTTP is async: `POST /quantize/jobs` returns **202** and a
+job id. Preview is a cheap heuristic (no `--dry-run`).
+
+| Method & path | Purpose |
+|---|---|
+| GET `/quantize/types?runtime_id=` | ftypes with band, bpw, imatrix policy, plus tool catalog |
+| POST `/quantize/preview` | estimated size, VRAM/RAM/disk fit, warnings, companions, recommended ftype. Body is a `Request` |
+| POST `/quantize/jobs` | start `quantize` \| `imatrix` \| `combine_imatrix` \| `adaptive_quantize`. Returns 202 `{id, job}` |
+| GET `/quantize/jobs` | recent jobs |
+| GET `/quantize/jobs/{id}` | job + redacted log tail |
+| POST `/quantize/jobs/{id}/cancel` | KillTree; incomplete dest GGUF is deleted |
+| DELETE `/quantize/jobs/{id}` | remove a queued or finished job from history (not running). Library GGUFs are kept |
+| POST `/quantize/jobs/clear-history` | delete complete/failed/canceled jobs; returns `{removed}` |
+| GET `/quantize/imatrices?model_id=` | reusable importance matrices |
+| POST `/quantize/imatrices/import` | `{path, source_model_id, dataset_label}` copies into managed storage |
+| DELETE `/quantize/imatrices/{id}[?delete_file=1]` | forget (+ optional file delete) |
+
+`Request` fields (unknown JSON keys are rejected): `kind`, `runtime_id`,
+`source_model_id`, `ftype`, `output_name`, `threads`, `allow_requantize`,
+`leave_output_tensor`, `pure`, `keep_split`, `output_tensor_type`,
+`token_embedding_type`, `tensor_types`, `tensor_type_file`, `imatrix_id`,
+`generate_imatrix`, `calibration_path`, `calibration_preset`
+(`quick`\|`standard`\|`thorough`), `chunks`, `chunk_skip`, `gpu_layers`,
+`parse_special`, `process_output`, `combine_imatrix_ids`,
+`delete_intermediates`, `keep_imatrix`, `quantize_projector`,
+`projector_ftype`, `copy_projector`, `draft_model_id`, `quantize_draft`,
+`draft_ftype`, `adaptive_preset` (`quality`\|`balanced`\|`compact`),
+`target_bpw`, `target_bytes`, `acknowledge_requantize`,
+`acknowledge_experimental`, `unload_first`.
+
+I-quants that require an imatrix: `IQ1_*`, `IQ2_*`, `IQ3_XXS`, `Q2_K`,
+`Q2_K_S`. Mixed-precision jobs use `kind=adaptive_quantize` and are labeled
+**OpenInfer Adaptive** (not Unsloth Dynamic 2.0).
+
+Events: `quant.progress` (`id, stage, current, total, message, progress`),
+`quant.state_changed` (`id, state, kind, source_model_id, dest_path, model_id, ftype, error`).
 
 ## Chat
 

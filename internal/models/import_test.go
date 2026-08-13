@@ -87,6 +87,9 @@ func TestImportFileCopiesIntoManaged(t *testing.T) {
 	if m.SourceRepo == "" || !strings.HasPrefix(m.SourceRepo, "local/") {
 		t.Fatalf("source_repo = %q", m.SourceRepo)
 	}
+	if m.Alias != "Cool Model Q4_K_M" {
+		t.Fatalf("alias = %q, want source name + quant", m.Alias)
+	}
 	// Original left in place.
 	if _, err := os.Stat(src); err != nil {
 		t.Fatalf("source should remain: %v", err)
@@ -147,5 +150,32 @@ func TestImportFileAlreadyManaged(t *testing.T) {
 	}
 	if m.PrimaryPath != src {
 		t.Fatalf("should register in place, got %q want %q", m.PrimaryPath, src)
+	}
+}
+
+func TestScanRefreshesUncustomizedLocalAlias(t *testing.T) {
+	lib := testLibrary(t)
+	destDir := filepath.Join(lib.managed, "local--Assistant-Q4_K_M", "files")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := writeTestGGUF(t, destDir, "Assistant-Q4_K_M.gguf", "Muse Glimmer 30B Assistant")
+	id, err := lib.ImportFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pre-fix rows kept general.name as the alias; a rescan should append the quant.
+	if _, err := lib.db.Exec(`UPDATE models SET alias=? WHERE id=?`, "Muse Glimmer 30B Assistant", id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	m, err := lib.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Alias != "Muse Glimmer 30B Assistant Q4_K_M" {
+		t.Fatalf("alias = %q, want source name + quant", m.Alias)
 	}
 }
