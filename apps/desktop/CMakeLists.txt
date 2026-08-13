@@ -23,6 +23,14 @@ qt_add_executable(openinfer-studio
     resources.qrc
 )
 
+# AUTORCC sometimes only watches resources.qrc, not the QML it lists, so a
+# QML-only edit would leave the old pages baked into the binary.
+file(GLOB_RECURSE OPENINFER_QML_FILES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/qml/*.qml"
+    "${CMAKE_CURRENT_SOURCE_DIR}/qml/*.js"
+)
+set_property(SOURCE resources.qrc APPEND PROPERTY OBJECT_DEPENDS ${OPENINFER_QML_FILES})
+
 target_compile_definitions(openinfer-studio PRIVATE
     OPENINFER_VERSION="${OPENINFER_VERSION}"
 )

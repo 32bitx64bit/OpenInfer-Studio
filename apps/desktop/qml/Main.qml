@@ -38,12 +38,18 @@ ApplicationWindow {
                 window.refreshInstances()
                 break
             case "download.state_changed":
-                window.refreshDownloadsBadge()
+                window.refreshActivityBadge()
                 if (payload.state === "complete")
                     window.toast((payload.label || "Download") + " is ready in your library", "success")
                 break
             case "download.progress":
                 // DownloadsPage handles live progress; badge only needs state changes.
+                break
+            case "quant.state_changed":
+                if (payload.state === "complete")
+                    window.toast((payload.ftype ? payload.ftype : "Quantized model") + " is ready in your library", "success")
+                else if (payload.state === "failed")
+                    window.toast("Quantization failed" + (payload.error ? ": " + payload.error : ""), "error")
                 break
             case "runtime.installed":
                 window.toast("Runtime installed: " + (payload.id || ""), "success")
@@ -67,7 +73,7 @@ ApplicationWindow {
     property string previousRoute: "library"
 
     function routeIndex(route) {
-        var routes = ["chat", "models", "library", "developer", "runtimes",
+        var routes = ["chat", "models", "library", "developer", "runtimes", "quantize",
                       "downloads", "logs", "settings", "model-detail"]
         return routes.indexOf(route)
     }
@@ -113,7 +119,7 @@ ApplicationWindow {
             if (st === 200 && data) window.instances = data.instances || []
         })
     }
-    function refreshDownloadsBadge() {
+    function refreshActivityBadge() {
         api.get("/api/v1/downloads", function(st, data) {
             if (st === 200 && data)
                 window.downloadCount = (data.downloads || []).filter(
@@ -122,7 +128,7 @@ ApplicationWindow {
     }
     function reloadAll() {
         refreshInstances()
-        refreshDownloadsBadge()
+        refreshActivityBadge()
         refreshSettings()
         api.get("/api/v1/hardware", function(st, data) {
             if (st === 200 && data) {
@@ -202,7 +208,8 @@ ApplicationWindow {
                     }
                 }
                 AppButton {
-                    text: window.downloadCount > 0 ? "Downloads · " + window.downloadCount : "Activity"
+                    text: window.downloadCount > 0
+                          ? "Activity · " + window.downloadCount : "Activity"
                     primary: window.downloadCount > 0
                     onClicked: window.goTo("downloads")
                 }
@@ -263,6 +270,7 @@ ApplicationWindow {
                         model: [
                             { "label": "Downloads", "route": "downloads", "glyph": "↓" },
                             { "label": "Runtimes", "route": "runtimes", "glyph": "⚙" },
+                            { "label": "Quantization", "route": "quantize", "glyph": "▣" },
                             { "label": "Developer API", "route": "developer", "glyph": "⌘" },
                             { "label": "Logs", "route": "logs", "glyph": "≡" }
                         ]
@@ -307,7 +315,7 @@ ApplicationWindow {
                     events: events
                     experimentalAudio: window.experimentalAudioModels
                     onDownloadQueued: function(label) {
-                        window.refreshDownloadsBadge()
+                        window.refreshActivityBadge()
                         window.toast(label + " added to downloads", "success")
                     }
                 }
@@ -318,9 +326,14 @@ ApplicationWindow {
                     experimentalAudio: window.experimentalAudioModels
                     onOpenDetail: function(modelId) { window.openInstanceDetail(modelId) }
                     onBrowseModels: window.goTo("models")
+                    onQuantizeModel: function(modelId) {
+                        quantizePage.prefillModel(modelId)
+                        window.goTo("quantize")
+                    }
                 }
                 DeveloperPage { api: api; events: events }
                 RuntimesPage  { api: api; events: events; recommendation: window.recommendation }
+                QuantizationPage { id: quantizePage; api: api; events: events }
                 DownloadsPage { api: api; events: events }
                 LogsPage      { api: api; events: events }
                 SettingsPage  {
@@ -341,6 +354,10 @@ ApplicationWindow {
                     api: api
                     events: events
                     onBack: window.goBack()
+                    onQuantizeRequested: {
+                        quantizePage.prefillModel(instanceDetailPage.modelId)
+                        window.goTo("quantize")
+                    }
                 }
             }
         }

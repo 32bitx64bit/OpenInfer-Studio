@@ -59,6 +59,7 @@ Item {
 
     signal openDetail(string modelId)
     signal browseModels()
+    signal quantizeModel(string modelId)
 
     function copyText(text) {
         if (!text) return
@@ -210,6 +211,14 @@ Item {
                     onActionTriggered: page.browseModels()
                 }
 
+                EmptyState {
+                    visible: page.models.length > 0 && page.filteredModels().length === 0
+                    anchors.centerIn: parent
+                    icon: "▤"
+                    title: "No matching models"
+                    hint: "Clear the search filter."
+                }
+
                 delegate: Card {
                     width: ListView.view.width
                     implicitHeight: mrow.implicitHeight + 20
@@ -351,6 +360,10 @@ Item {
                                     MenuItem {
                                         text: "Reveal files"
                                         onTriggered: Qt.openUrlExternally("file://" + modelData.primary_path.substring(0, modelData.primary_path.lastIndexOf("/")))
+                                    }
+                                    MenuItem {
+                                        text: "Quantize…"
+                                        onTriggered: page.quantizeModel(modelData.id)
                                     }
                                     MenuSeparator {}
                                     MenuItem {

@@ -11,6 +11,7 @@ Item {
     property string modelId: ""
 
     signal back()
+    signal quantizeRequested()
 
     property var instance: null
     property var activity: null
@@ -104,6 +105,7 @@ Item {
                 elide: Text.ElideRight
                 Layout.fillWidth: true
             }
+            AppButton { text: "Quantize…"; flat: true; onClicked: page.quantizeRequested() }
             Label {
                 visible: page.activity && page.activity.busy
                 text: page.activity
@@ -184,7 +186,7 @@ Item {
                         Rectangle {
                             width: 8; height: 8; radius: 4
                             color: AppTheme.success
-                            anchors.verticalCenter: parent.verticalCenter
+                            Layout.alignment: Qt.AlignVCenter
                         }
                         Label {
                             text: "slot " + modelData.id + (modelData.task_id ? " · task " + modelData.task_id : "")

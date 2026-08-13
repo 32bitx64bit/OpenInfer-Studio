@@ -54,9 +54,9 @@ QtObject {
     function stateColor(state) {
         switch (state) {
         case "ready": case "complete": case "busy": return success
-        case "loading": case "starting": case "active": case "queued": return info
-        case "sleeping": case "paused": return warning
-        case "failed": case "crashed": return danger
+        case "loading": case "starting": case "active": case "queued": case "running": return info
+        case "sleeping": case "paused": case "canceling": return warning
+        case "failed": case "crashed": case "canceled": return danger
         default: return textFaint
         }
     }

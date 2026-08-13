@@ -8,7 +8,7 @@ Rectangle {
     color: AppTheme.stateColor(state)
 
     SequentialAnimation on opacity {
-        running: state === "loading" || state === "starting" || state === "active"
+        running: state === "loading" || state === "starting" || state === "active" || state === "running" || state === "queued"
         loops: Animation.Infinite
         NumberAnimation { to: 0.35; duration: 700 }
         NumberAnimation { to: 1.0; duration: 700 }

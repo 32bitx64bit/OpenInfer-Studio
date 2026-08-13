@@ -1,4 +1,5 @@
 <RCC>
+    <!-- QML is compiled into the binary; CMakeLists.txt tracks these files as rcc deps. -->
     <qresource prefix="/">
         <file>qml/Main.qml</file>
         <file>qml/AppTheme.qml</file>
@@ -37,6 +38,7 @@
         <file>qml/pages/LibraryPage.qml</file>
         <file>qml/pages/DeveloperPage.qml</file>
         <file>qml/pages/RuntimesPage.qml</file>
+        <file>qml/pages/QuantizationPage.qml</file>
         <file>qml/pages/DownloadsPage.qml</file>
         <file>qml/pages/LogsPage.qml</file>
         <file>qml/pages/InstanceDetailPage.qml</file>
