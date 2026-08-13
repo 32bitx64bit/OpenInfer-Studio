@@ -53,7 +53,7 @@ Item {
 
         PageHeader {
             title: "Activity"
-            subtitle: "Track model and runtime downloads. Completed models appear in your library automatically."
+            subtitle: "Track model downloads. Completed models appear in your library automatically."
         }
 
         ListView {
@@ -67,8 +67,8 @@ Item {
                 visible: page.downloads.length === 0
                 anchors.centerIn: parent
                 icon: "↓"
-                title: "No downloads"
-                hint: "Model and runtime downloads appear here. They resume automatically after interruption."
+                title: "No activity"
+                hint: "Model downloads appear here."
             }
 
             delegate: Card {
