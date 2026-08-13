@@ -511,6 +511,8 @@ func (m *Manager) HealthCheck(id string) (bool, string, error) {
 	if err != nil {
 		return false, "", err
 	}
+	// Refresh sibling-tool catalogs while we're probing.
+	_, _ = m.Tools(id)
 	return true, versionOut, nil
 }
 
@@ -570,19 +572,27 @@ func probeRuntime(exe string) (version, help string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("--version: %w: %s", err, truncate(string(vout), 512))
 	}
+	help, herr := ProbeHelp(exe)
+	if herr != nil {
+		return string(vout), "", herr
+	}
+	return string(vout), help, nil
+}
+
+// ProbeHelp runs `exe --help` with the same library-path and timeout rules as
+// llama-server probing. Some builds exit non-zero for --help; output is still
+// accepted when present.
+func ProbeHelp(exe string) (string, error) {
 	hctx, hcancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer hcancel()
 	hcmd := exec.CommandContext(hctx, exe, "--help")
 	hcmd.Dir = filepath.Dir(exe)
 	hcmd.Env = append(os.Environ(), LibPathEnv(exe)...)
 	hout, herr := hcmd.CombinedOutput()
-	if herr != nil {
-		// Some builds exit non-zero for --help; accept output anyway.
-		if len(hout) == 0 {
-			return string(vout), "", fmt.Errorf("--help: %w", herr)
-		}
+	if herr != nil && len(hout) == 0 {
+		return "", fmt.Errorf("--help: %w", herr)
 	}
-	return string(vout), string(hout), nil
+	return string(hout), nil
 }
 
 func truncate(s string, n int) string {
