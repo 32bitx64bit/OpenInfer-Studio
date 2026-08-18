@@ -1,5 +1,7 @@
 /build/
 /dist/
+quantlab/build/
+__cmake_systeminformation/
 packaging/linux/.cache/
 *.db
 *.db-wal
