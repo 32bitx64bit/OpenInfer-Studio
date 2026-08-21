@@ -1,0 +1,6 @@
+Final estimate: PPL = 6.1234 +/- 0.0432
+Mean KLD: 0.012500
+Maximum KLD: 0.030000
+95.0%   KLD: 0.025000
+RMS Δp: 0.001000
+Same top p: 99.10 %
