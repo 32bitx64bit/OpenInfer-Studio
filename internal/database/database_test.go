@@ -40,8 +40,8 @@ func TestMigrationsIdempotent(t *testing.T) {
 	defer db2.Close()
 	var n int
 	db2.QueryRow(`SELECT COUNT(1) FROM schema_migrations`).Scan(&n)
-	if n != 2 {
-		t.Errorf("migrations recorded = %d, want 2", n)
+	if n != 3 {
+		t.Errorf("migrations recorded = %d, want 3", n)
 	}
 }
 

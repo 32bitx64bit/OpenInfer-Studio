@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 func help() string {
@@ -17,6 +18,7 @@ func help() string {
   -o,    --output-file FNAME
   -ngl,  --n-gpu-layers N
   -t,    --threads N
+  -c,    --ctx-size N
          --chunks N
          --chunk N
          --parse-special
@@ -57,21 +59,30 @@ func main() {
 		case "-o", "--output-file":
 			out = val()
 		case "--in-file":
-			inFiles = append(inFiles, val())
+			for _, p := range strings.Split(val(), ",") {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					inFiles = append(inFiles, p)
+				}
+			}
 		case "--chunks":
 			_, _ = fmt.Sscanf(val(), "%d", &chunks)
 		case "--show-statistics":
 			showStats = true
-		case "--n-gpu-layers", "-ngl", "--threads", "-t", "--chunk":
+		case "--n-gpu-layers", "-ngl", "--threads", "-t", "--chunk", "-c", "--ctx-size":
 			_ = val()
 		}
 	}
 
 	if showStats {
+		if model == "" {
+			fmt.Fprintln(os.Stderr, "error: --model is required")
+			os.Exit(1)
+		}
 		src := ""
 		if len(inFiles) > 0 {
 			src = inFiles[0]
-		} else if model != "" {
+		} else {
 			src = model
 		}
 		fmt.Fprintf(os.Stderr, "statistics for %s\n", src)
@@ -82,6 +93,10 @@ func main() {
 	}
 
 	if len(inFiles) >= 2 {
+		if model == "" {
+			fmt.Fprintln(os.Stderr, "error: --model is required")
+			os.Exit(1)
+		}
 		if out == "" {
 			fmt.Fprintln(os.Stderr, "combine requires -o")
 			os.Exit(1)

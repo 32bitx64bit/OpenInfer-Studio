@@ -1,6 +1,8 @@
 package api
 
 import (
+	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +17,72 @@ func (h *handlers) requireQuant(w http.ResponseWriter) *quantize.Manager {
 		return nil
 	}
 	return h.d.Quant
+}
+
+// quantizeRequestBody is the API-facing quantize job body. A pointer retains
+// whether clients supplied `effort`, so the deprecated adaptive_mode field is
+// only forwarded when effort is absent. adaptive_preset passes through for the
+// backend's deprecated preset → target_bpw translation.
+type quantizeRequestBody struct {
+	quantize.Request
+	Effort *string `json:"effort"`
+}
+
+// decodeQuantizeRequest reads and validates a quantize job body. An explicit
+// `effort` and the deprecated `adaptive_mode` alias are kept on their
+// respective request fields. The backend resolves their precedence.
+func decodeQuantizeRequest(w http.ResponseWriter, r *http.Request) (quantize.Request, bool) {
+	var body quantizeRequestBody
+	if !decodeJSON(w, r, &body) {
+		return quantize.Request{}, false
+	}
+	req := body.Request
+	effortField := "adaptive_mode"
+	effort := strings.ToLower(strings.TrimSpace(req.AdaptiveMode))
+	if body.Effort != nil {
+		effortField = "effort"
+		effort = strings.ToLower(strings.TrimSpace(*body.Effort))
+		req.Effort = effort
+		req.AdaptiveMode = ""
+	} else {
+		req.AdaptiveMode = effort
+	}
+	if !validateQuantizeEffort(w, effortField, effort) {
+		return quantize.Request{}, false
+	}
+	req.QuantTier = strings.ToLower(strings.TrimSpace(req.QuantTier))
+	if !validateQuantTier(w, req.QuantTier) {
+		return quantize.Request{}, false
+	}
+	if req.QuantTier == quantize.QuantTierCustom && req.TargetBytes <= 0 {
+		writeErr(w, http.StatusBadRequest, "invalid target_bytes", fmt.Errorf("quant_tier %q requires a positive target_bytes", req.QuantTier))
+		return quantize.Request{}, false
+	}
+	return req, true
+}
+
+func validateQuantizeEffort(w http.ResponseWriter, field, effort string) bool {
+	switch effort {
+	case "", "fast", "profiled", "deep":
+		return true
+	default:
+		writeErr(w, http.StatusBadRequest, "invalid "+field, fmt.Errorf(
+			"%s must be \"fast\", \"profiled\", or \"deep\" (got %q); omit it for the default \"profiled\"", field, effort))
+		return false
+	}
+}
+
+// validateQuantTier accepts the OpenInfer Dynamic compression tier values. An
+// empty value is valid and defers to the backend default (q4).
+func validateQuantTier(w http.ResponseWriter, tier string) bool {
+	switch tier {
+	case "", "q5", "q4", "q3", "q2", "custom":
+		return true
+	default:
+		writeErr(w, http.StatusBadRequest, "invalid quant_tier", fmt.Errorf(
+			"quant_tier must be \"q5\", \"q4\", \"q3\", \"q2\", or \"custom\" (got %q); omit it for the default \"q4\"", tier))
+		return false
+	}
 }
 
 func (h *handlers) runtimeTools(w http.ResponseWriter, r *http.Request) {
@@ -58,8 +126,8 @@ func (h *handlers) quantizePreview(w http.ResponseWriter, r *http.Request) {
 	if q == nil {
 		return
 	}
-	var req quantize.Request
-	if !decodeJSON(w, r, &req) {
+	req, ok := decodeQuantizeRequest(w, r)
+	if !ok {
 		return
 	}
 	out, err := q.Preview(req)
@@ -70,13 +138,112 @@ func (h *handlers) quantizePreview(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
+func (h *handlers) quantizeFromHFPreview(w http.ResponseWriter, r *http.Request) {
+	q := h.requireQuant(w)
+	if q == nil {
+		return
+	}
+	repo, req, dynamic, ok := decodeFromHFPreviewRequest(w, r)
+	if !ok {
+		return
+	}
+	var (
+		out *quantize.FromHFPreview
+		err error
+	)
+	if dynamic {
+		out, err = q.ProbeFromHFForRequest(r.Context(), repo, req)
+	} else {
+		out, err = q.ProbeFromHF(r.Context(), repo)
+	}
+	if err != nil {
+		status := 502
+		if ae, ok := err.(interface{ HTTPStatus() int }); ok {
+			status = ae.HTTPStatus()
+		}
+		writeErr(w, status, "Hugging Face convert preview failed", err)
+		return
+	}
+	writeJSON(w, 200, out)
+}
+
+// decodeFromHFPreviewRequest reads the optional Dynamic sizing query. A
+// repo-only request intentionally remains the original conversion-only probe.
+func decodeFromHFPreviewRequest(w http.ResponseWriter, r *http.Request) (string, quantize.Request, bool, bool) {
+	query := r.URL.Query()
+	repo := strings.TrimSpace(query.Get("repo"))
+	if repo == "" {
+		writeErr(w, http.StatusBadRequest, "repo query parameter is required", nil)
+		return "", quantize.Request{}, false, false
+	}
+
+	dynamic := false
+	if raw, present := query["dynamic"]; present {
+		var err error
+		dynamic, err = strconv.ParseBool(strings.TrimSpace(raw[0]))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid dynamic", fmt.Errorf("dynamic must be true or false"))
+			return "", quantize.Request{}, false, false
+		}
+	}
+
+	effort := strings.ToLower(strings.TrimSpace(query.Get("effort")))
+	if !validateQuantizeEffort(w, "effort", effort) {
+		return "", quantize.Request{}, false, false
+	}
+	req := quantize.Request{Kind: quantize.KindFromHF, Effort: effort}
+	if dynamic && req.Effort == "" {
+		// Match the backend's default effort while marking this as Dynamic.
+		req.Effort = "profiled"
+	}
+
+	if raw, present := query["target_bpw"]; present {
+		value, err := strconv.ParseFloat(strings.TrimSpace(raw[0]), 64)
+		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			writeErr(w, http.StatusBadRequest, "invalid target_bpw", fmt.Errorf("target_bpw must be a non-negative number"))
+			return "", quantize.Request{}, false, false
+		}
+		req.TargetBPW = value
+	}
+	if raw, present := query["target_bytes"]; present {
+		value, err := strconv.ParseInt(strings.TrimSpace(raw[0]), 10, 64)
+		if err != nil || value < 0 {
+			writeErr(w, http.StatusBadRequest, "invalid target_bytes", fmt.Errorf("target_bytes must be a non-negative integer"))
+			return "", quantize.Request{}, false, false
+		}
+		req.TargetBytes = value
+	}
+
+	if raw, present := query["generate_imatrix"]; present {
+		value, err := strconv.ParseBool(strings.TrimSpace(raw[0]))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "invalid generate_imatrix", fmt.Errorf("generate_imatrix must be true or false"))
+			return "", quantize.Request{}, false, false
+		}
+		req.GenerateIMatrix = value
+	} else {
+		req.GenerateIMatrix = dynamic
+	}
+
+	tier := strings.ToLower(strings.TrimSpace(query.Get("quant_tier")))
+	if !validateQuantTier(w, tier) {
+		return "", quantize.Request{}, false, false
+	}
+	req.QuantTier = tier
+	if tier == quantize.QuantTierCustom && req.TargetBytes <= 0 {
+		writeErr(w, http.StatusBadRequest, "invalid target_bytes", fmt.Errorf("quant_tier %q requires a positive target_bytes", tier))
+		return "", quantize.Request{}, false, false
+	}
+	return repo, req, dynamic, true
+}
+
 func (h *handlers) startQuantizeJob(w http.ResponseWriter, r *http.Request) {
 	q := h.requireQuant(w)
 	if q == nil {
 		return
 	}
-	var req quantize.Request
-	if !decodeJSON(w, r, &req) {
+	req, ok := decodeQuantizeRequest(w, r)
+	if !ok {
 		return
 	}
 	job, err := q.Start(req)
@@ -124,6 +291,30 @@ func (h *handlers) cancelQuantizeJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := q.Cancel(r.PathValue("id")); err != nil {
 		writeErr(w, 400, "could not cancel job", err)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (h *handlers) pauseQuantizeJob(w http.ResponseWriter, r *http.Request) {
+	q := h.requireQuant(w)
+	if q == nil {
+		return
+	}
+	if err := q.Pause(r.PathValue("id")); err != nil {
+		writeErr(w, 400, "could not pause job", err)
+		return
+	}
+	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func (h *handlers) resumeQuantizeJob(w http.ResponseWriter, r *http.Request) {
+	q := h.requireQuant(w)
+	if q == nil {
+		return
+	}
+	if err := q.Resume(r.PathValue("id")); err != nil {
+		writeErr(w, 400, "could not resume job", err)
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})

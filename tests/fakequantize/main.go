@@ -15,7 +15,7 @@ func help() string {
 	return `usage: llama-quantize [--help] [--allow-requantize] [--leave-output-tensor]
        [--pure] [--imatrix] [--include-weights] [--exclude-weights]
        [--output-tensor-type] [--token-embedding-type] [--tensor-type]
-       [--tensor-type-file] [--keep-split] [--override-kv] [--dry-run]
+	       [--tensor-type-file] [--keep-split] [--override-kv] [--prior-weight] [--dry-run]
        input.gguf output.gguf TYPE [nthreads]
 
 Allowed quantization types:
@@ -53,7 +53,7 @@ func needsValue(flag string) bool {
 	switch flag {
 	case "--imatrix", "--output-tensor-type", "--token-embedding-type",
 		"--tensor-type", "--tensor-type-file", "--override-kv",
-		"--include-weights", "--exclude-weights":
+		"--include-weights", "--exclude-weights", "--prior-weight":
 		return true
 	}
 	return false
@@ -87,17 +87,31 @@ func main() {
 		}
 		positionals = append(positionals, a)
 	}
-	if len(positionals) < 3 {
+	minPositionals := 3
+	if dry {
+		minPositionals = 2
+	}
+	if len(positionals) < minPositionals {
 		fmt.Fprintln(os.Stderr, "usage: llama-quantize input output TYPE")
 		os.Exit(1)
 	}
-	in, out, ftype := positionals[0], positionals[1], positionals[2]
+	in := positionals[0]
+	out := ""
+	ftype := positionals[1]
+	if !dry {
+		out, ftype = positionals[1], positionals[2]
+	}
 	fmt.Fprintf(os.Stderr, "quantizing %s -> %s (%s)\n", in, out, ftype)
 	fmt.Fprintf(os.Stderr, "[ 1/3] token_embd.weight - f16 to %s\n", strings.ToLower(ftype))
 	fmt.Fprintf(os.Stderr, "[ 2/3] blk.0.attn_q.weight - f16 to %s\n", strings.ToLower(ftype))
 	fmt.Fprintf(os.Stderr, "[ 3/3] output.weight - f16 to %s\n", strings.ToLower(ftype))
 	if dry {
-		fmt.Fprintf(os.Stderr, "dry-run: would write %s\n", out)
+		st, err := os.Stat(in)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "llama_model_quantize_internal: quant size = %d bytes\n", st.Size())
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {

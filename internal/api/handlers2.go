@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -87,6 +88,10 @@ func (h *handlers) patchModel(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.d.Lib.Update(r.PathValue("id"), req.Alias, req.Favorite, req.Notes,
 		req.PinnedRuntime, req.PinnedBackend); err != nil {
+		if errors.Is(err, models.ErrEmptyDisplayName) {
+			writeErr(w, 400, "display name cannot be empty", err)
+			return
+		}
 		writeErr(w, 500, "updating model", err)
 		return
 	}
@@ -279,7 +284,7 @@ func (h *handlers) previewLoad(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	h.applyMultimodalDefaults(r.PathValue("id"), &s)
+	h.applyChatTemplateDefaults(r.PathValue("id"), &s)
 	h.applyEmbedderDefaults(r.PathValue("id"), &s)
 	br, err := h.d.IM.Preview(r.PathValue("id"), s)
 	if err != nil {
@@ -452,7 +457,7 @@ func (h *handlers) loadModel(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	h.applyMultimodalDefaults(r.PathValue("id"), &s)
+	h.applyChatTemplateDefaults(r.PathValue("id"), &s)
 	h.applyEmbedderDefaults(r.PathValue("id"), &s)
 	inst, err := h.d.IM.Start(r.PathValue("id"), s)
 	if err != nil {
@@ -462,31 +467,27 @@ func (h *handlers) loadModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 202, inst)
 }
 
-// applyMultimodalDefaults enables Jinja when omitted and the model is
-// multimodal — most audio/vision chat templates require it.
-func (h *handlers) applyMultimodalDefaults(modelID string, s *instances.LoadSettings) {
-	if s.Jinja != nil {
-		return
-	}
+// applyChatTemplateDefaults enables Jinja, Muse Glimmer kwargs, and
+// reasoning-preserve when omitted. Text-only OID Glimmer quants have no
+// mmproj, but still need --jinja or reasoning never splits into streamed
+// content. Templates that can keep prior-turn reasoning default
+// --reasoning-preserve on.
+func (h *handlers) applyChatTemplateDefaults(modelID string, s *instances.LoadSettings) {
 	m, err := h.d.Lib.Get(modelID)
 	if err != nil {
 		return
 	}
 	var meta struct {
-		HasAudio         bool `json:"has_audio"`
-		HasVision        bool `json:"has_vision"`
-		Multimodal       bool `json:"multimodal"`
-		SpeculativeDraft bool `json:"speculative_draft"`
-		IsEmbedding      bool `json:"is_embedding"`
+		HasAudio         bool           `json:"has_audio"`
+		HasVision        bool           `json:"has_vision"`
+		Multimodal       bool           `json:"multimodal"`
+		SpeculativeDraft bool           `json:"speculative_draft"`
+		IsEmbedding      bool           `json:"is_embedding"`
+		Reasoning        gguf.Reasoning `json:"reasoning"`
 	}
 	_ = json.Unmarshal(m.Metadata, &meta)
-	if meta.SpeculativeDraft || meta.IsEmbedding {
-		return
-	}
-	if m.ProjectorPath != "" || meta.HasAudio || meta.HasVision || meta.Multimodal {
-		t := true
-		s.Jinja = &t
-	}
+	multimodal := m.ProjectorPath != "" || meta.HasAudio || meta.HasVision || meta.Multimodal
+	instances.ApplyTemplateDefaults(s, m.Architecture, multimodal, meta.SpeculativeDraft, meta.IsEmbedding, meta.Reasoning)
 }
 
 // applyEmbedderDefaults turns on --embedding for detected embedders/rerankers
@@ -532,7 +533,7 @@ func (h *handlers) restartModel(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	h.applyMultimodalDefaults(r.PathValue("id"), &s)
+	h.applyChatTemplateDefaults(r.PathValue("id"), &s)
 	h.applyEmbedderDefaults(r.PathValue("id"), &s)
 	inst, err := h.d.IM.Restart(r.PathValue("id"), s)
 	if err != nil {
