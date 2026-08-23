@@ -141,6 +141,7 @@ func main() {
 	qm := quantize.NewManager(db.DB, layout, rt, lib, hub, logs.Logger("quantize", slog.LevelInfo).Logger,
 		func(dir string) uint64 { return hardware.Detect(dir, dir).DiskFreeModels },
 		func() *hardware.Info { return hardware.Detect(layout.Models, layout.Runtimes) })
+	qm.SetConvertDeps(hf, dl)
 	qm.SetInstanceHooks(func() []string { return api.LoadedModelIDs(im) }, im)
 	if err := qm.RecoverAfterRestart(); err != nil {
 		log.Warn("quant job recovery failed", "err", err)

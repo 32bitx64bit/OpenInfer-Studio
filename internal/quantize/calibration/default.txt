@@ -2,9 +2,9 @@ OpenInfer Studio default imatrix calibration text.
 
 This file is original project material: mixed chat, code, and prose so
 llama-imatrix can initialize. llama.cpp requires at least two context
-windows of tokens (typically 1024 at the default 512 context). A custom
-file with tens of thousands of tokens is still better for thorough IQ
-work.
+windows of tokens (8192 at --ctx-size 4096). OpenInfer clamps context
+down when this file is short, and refreshes the installed copy when
+the bundled text changes.
 
 User: Explain how a hash map differs from a binary search tree.
 Assistant: A hash map stores key-value pairs in buckets chosen by a hash
@@ -341,9 +341,785 @@ Assistant: Read the log for the lines that are actually errors. Turn
 the useful ones into one or two sentences. Keep the full log on disk
 for people who want the CPU flags and the timestamps.
 
+User: Give a short timeline of the Apollo program with dates.
+Assistant: Mercury proved a person could orbit. Gemini, from 1965 to 1966,
+practiced rendezvous and spacewalks. Apollo 7 flew in Earth orbit in
+October 1968. Apollo 8 circled the Moon that December. Apollo 11 landed
+on 20 July 1969. Apollo 13 aborted in April 1970 and still brought the
+crew home. The last landing, Apollo 17, was in December 1972.
+
+User: Why do dates and order matter more than a vibe?
+Assistant: A fact is often a relation: this happened before that, this
+quantity is larger, this place is east of that one. If the order flips,
+the sentence still sounds fluent and is wrong. Chronology is a cheap
+test of whether the weights still hold those relations.
+
+Water at standard pressure boils at 100 C and freezes at 0 C. At 2 000
+metres the boiling point falls because air pressure is lower. Sound in
+dry air at 20 C is about 343 metres per second. Light in vacuum is
+299 792 458 metres per second by definition. A year is about 365.24
+days; that leftover is why calendars need leap days.
+
+The speed of a falling object near Earth gains about 9.8 metres per
+second each second if you ignore drag. Double the time, quadruple the
+distance from rest. A 3-4-5 triangle is right-angled. There are 2 pi
+radians in a full turn, and 360 degrees in the same turn.
+
+User: Place these in time: the fall of Constantinople, the printing press
+in Europe, and the first steam locomotives.
+Assistant: Constantinople fell in 1453. Movable type was at work in Europe
+in the 1450s. Steam locomotives are a nineteenth-century machine, around
+four hundred years later. Mixing those centuries is a common failure
+when a model compresses history into a blur.
+
+A river delta is not the source. The source is upstream, often in hills.
+The mouth is where the river meets a sea or a larger river. Flood plains
+are built by repeated overflow. A watershed is the ridge that decides
+which way rain will drain.
+
+User: Convert 32 F, 0 C, and 100 C and say which are the same points.
+Assistant: 32 F is 0 C, the freezing point of water at standard pressure.
+100 C is 212 F, the boiling point at that same pressure. They are not
+three temperatures; they are two physical points written two ways.
+
+In 1905 several papers appeared on light quanta, Brownian motion, and
+special relativity. In 1915 the field equation for gravity was published.
+In 1928 the Dirac equation mixed quantum mechanics with special
+relativity. In 1953 a structure for DNA was proposed. Those years are
+not interchangeable labels; each sits on a different stack of prior work.
+
+A hash collision is not a search miss. A cache miss is not a segfault.
+HTTP 304 means the copy is still valid. HTTP 404 means no resource.
+HTTP 429 means slow down. Mixing those codes is the same class of error
+as mixing centuries: the shape of the sentence survives, the referent
+does not.
+
+North of the equator, June is summer. South of the equator, June is
+winter. The tilt of the Earth, not distance to the Sun, drives that
+season. Perihelion is in early January, when the southern hemisphere is
+in summer. Distance and season are easy to fuse and wrong to fuse.
+
+User: What happened first: the transistor, the integrated circuit, or
+the microprocessor?
+Assistant: The point-contact transistor is 1947. The integrated circuit
+is 1958-1959. A microprocessor as a CPU on one chip is 1971. Each step
+needed the one before it. Reverse the order and the causal story dies.
+
+The library of a small town still stamps due dates in ink. 14 March is
+not 3 November. A due date that slips by a month is a different fact
+from a due date that slips by a day. Numbers in prose are not
+decoration; they are the payload.
+
 This closing block exists so the file is long enough for a large
 vocabulary tokenizer. Importance matrices need tokens. The tokens
 here are still sentences: mixed domains, mixed syntax, no copied
-encyclopedia, no song lyrics, no novels. Chat, code, and a walk
-through weather and work. That is the whole idea of a default file.
-It is not a research corpus. It is enough to start.
+encyclopedia, no song lyrics, no novels. Chat, code, chronology, and
+a walk through weather and work. That is the whole idea of a default
+file. It is not a research corpus. It is enough to start.
+
+User: How many bits is a byte, and how many bytes in a kibibyte versus a kilobyte?
+Assistant: A byte is eight bits. A kibibyte is 1024 bytes. A kilobyte in
+SI is 1000 bytes. Disk tools mix the two. File sizes in this app are
+shown in GiB, which are 1024 cubed, not one billion bytes. A 12.4 GiB
+GGUF is about 13.3 billion bytes.
+
+User: Convert 1 GiB, 1 GB, and 1 MiB into bytes.
+Assistant: 1 GiB is 1 073 741 824 bytes. 1 GB is 1 000 000 000 bytes.
+1 MiB is 1 048 576 bytes. 12.443 GiB is the Unsloth UD-Q3 size class
+on a 30B dense model, not 12.443 billion bytes.
+
+A mutex protects a critical section. A channel sequences work. An
+atomic counter is not a lock. A wait group waits for a set of tasks
+to finish. Mixing those primitives is how deadlocks and missed wakes
+are born. Prefer the smallest tool that states the invariant.
+
+func minInt(a, b int) int {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+func maxInt(a, b int) int {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+The first programmable electronic computer that ran a stored program
+in memory did so in 1948 in Manchester. ENIAC was earlier and was
+programmed with plugs and switches. The difference matters: stored
+program versus rewiring. Collapsing them into "computers in the 1940s"
+loses the causal step.
+
+User: Order these: vacuum tube, transistor, MOSFET, FinFET.
+Assistant: Vacuum tubes came first. The point-contact transistor is 1947.
+MOSFET devices followed in the 1960s. FinFET is a twenty-first-century
+geometry for keeping electrostatic control as gates shrank. Reverse
+that list and the physics story is nonsense.
+
+A GPU kernel is not a CPU thread. A warp or wavefront is a lockstep
+group. Occupancy is how many such groups fit. Shared memory is on-chip
+scratch. Global memory is large and slower. Quantized weights reduce
+global traffic. An importance matrix does not change the kernel; it
+changes which weights survive compression.
+
+SELECT id, state, kind, error
+FROM quant_jobs
+WHERE state IN ('failed', 'canceled')
+ORDER BY updated_at DESC
+LIMIT 50;
+
+The boiling point of ethanol at standard pressure is about 78 C, not
+100 C. Water is 100 C. Confusing those two is a common fluent error.
+Mercury melts at about -39 C. Lead melts at about 327 C. Gold melts
+at about 1064 C. Those are not interchangeable metal facts.
+
+User: What is RMSNorm, and how does it differ from LayerNorm?
+Assistant: RMSNorm scales by the root-mean-square of the activations
+and a gain. It does not subtract a mean. LayerNorm subtracts the mean
+and divides by the standard deviation, then applies gain and bias.
+RMSNorm stores fewer statistics. Both keep residual streams from
+drifting in scale as depth grows.
+
+She counted fence posts from the gate to the oak: forty-eight. The
+survey map said the lot was two hundred metres deep. If posts were
+four metres apart, forty-eight gaps would be one hundred ninety-two
+metres, so the oak stood a little short of the back line. Arithmetic
+on a walk is how you notice when a story and a landscape disagree.
+
+type Palette struct {
+    Floor   string
+    Default string
+    Types   []string
+}
+
+A residual stream is the highway. Attention and FFN are on-ramps.
+If you damage the highway more than the ramps, the destination
+smears. That is why output and embeddings often keep more bits than
+a middle feed-forward up-projection. It is not a fashion. It is
+where the facts live.
+
+User: Name the four inner planets and the four outer planets.
+Assistant: Mercury, Venus, Earth, Mars are the inner planets. Jupiter,
+Saturn, Uranus, Neptune are the outer planets. Pluto is a dwarf planet
+in the Kuiper belt, not the ninth planet in the current IAU list.
+Putting Pluto back between Mars and Jupiter is a geography error, not
+a taste.
+
+The speed of sound in steel is much higher than in air, on the order
+of kilometres per second, which is why a tap on a rail can be felt
+before it is heard through the air. Light still wins. Mixing those
+speeds is the same class of error as mixing centuries.
+
+for layer := 0; layer < nLayers; layer++ {
+    if layer < edge || layer >= nLayers-edge {
+        raiseFloor(layer, "iq3_s")
+    }
+}
+
+User: What does GQA mean in a transformer?
+Assistant: Grouped-query attention shares key and value heads across
+several query heads. The KV cache shrinks. Quality usually holds if
+the grouping is not extreme. Multi-query attention is the limit of
+one key/value head. Multi-head attention is the other end, one key
+and value per query head.
+
+A hash map is not sorted. A B-tree is. A skip list is probabilistic
+and still ordered. An LSM tree batches writes and compact later.
+Picking the structure is picking which operation is cheap. If you
+need range scans, do not start with a hash map and sort it on every
+read unless the set is tiny.
+
+The Greenwich meridian is 0 degrees longitude by convention. The
+equator is 0 degrees latitude by geometry. A point at 51 N, 0 W is
+near London. A point at 0 N, 0 W is in the Atlantic, south of Ghana,
+not in England. Swapping lat and lon is a fluent mistake that puts
+a city in the ocean.
+
+User: Convert 5 km to metres and to miles, approximately.
+Assistant: 5 km is 5000 metres. A mile is about 1.609 km, so 5 km is
+about 3.1 miles. 8 km is about 5 miles. These are walking distances,
+not orbital ones. Mixing km and AU is how a unit error becomes a
+plot hole.
+
+package paths
+
+func SafeJoin(root, name string) (string, error) {
+    p := filepath.Join(root, name)
+    abs, err := filepath.Abs(p)
+    if err != nil {
+        return "", err
+    }
+    if !strings.HasPrefix(abs, root) {
+        return "", fmt.Errorf("path escapes root")
+    }
+    return abs, nil
+}
+
+Nitrogen is most of dry air, about 78 percent. Oxygen is about 21
+percent. Argon is about 0.9 percent. Carbon dioxide is a trace, a few
+hundred parts per million, and still drives climate because of how it
+absorbs infrared. Saying the air is "mostly oxygen" is wrong in a
+way that sounds casual and confident.
+
+User: When was the first successful heavier-than-air powered flight,
+and who flew it?
+Assistant: 17 December 1903, near Kitty Hawk. The Wright Flyer. Earlier
+gliders and steam attempts do not count as that event. The date is
+not 1908, and it is not 1914. Those years belong to other machines.
+
+A softmax over logits is a distribution. Argmax is a decision. Sampling
+is a draw. Beam search is several decisions kept in parallel. If you
+want a story, sample. If you want a deterministic extract, argmax or
+a low temperature. Do not advertise sampling and then ship argmax.
+
+The workshop clock jumped a minute, then another, as the power blipped.
+He wrote the outage start as 14:07 and the restore as 14:11. Four
+minutes. A log that says "about a quarter hour" would be a different
+fact. Precision is not pedantry when the next person has to replay it.
+
+CREATE TABLE imatrices (
+    id TEXT PRIMARY KEY,
+    source_model_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    n_chunks INTEGER,
+    created_at TEXT NOT NULL
+);
+
+User: What is a KV cache and why does context length hurt VRAM?
+Assistant: For every token, the model stores keys and values per layer
+and head. Longer context means more stored vectors. Batch and parallel
+slots multiply that. Weights are mostly a fixed cost. Context is the
+sliding cost. That is why dropping context is the first lever when
+memory is yellow.
+
+A litre of water has a mass of about one kilogram at standard
+conditions. A cubic metre is 1000 litres and about one tonne of
+water. A swimming pool is not a cup. Mixing mL and L by a thousand
+is a unit error that looks like a typo and ruins a recipe or a dose.
+
+The Andes run along the west of South America. The Himalaya stand
+north of the Indian subcontinent. The Alps are in Europe. The Rockies
+are in North America. Putting the Himalaya in Peru is a map error,
+not a metaphor.
+
+func clampBPW(v, lo, hi float64) float64 {
+    if v < lo {
+        return lo
+    }
+    if v > hi {
+        return hi
+    }
+    return v
+}
+
+User: Explain why requantizing a Q4 file into Q3 is a bad default.
+Assistant: You are compressing noise left by the first quant. Start
+from F16, BF16, or at least Q8 when you can. If the UI must allow it,
+require an explicit checkbox so the loss is chosen, not accidental.
+
+Dawn on the ridge was a line of pale copper. He timed the walk down
+at thirty-two minutes with a pack, twenty-six without. The map's
+contour interval was 10 metres and he counted fourteen lines, so the
+drop was about 140 metres. That matches a steep path, not a cliff.
+
+A process group on Unix and a Job Object on Windows are how a parent
+kills the children it spawned. Leaking a llama-server on exit is a
+product bug. Loopback and a random port are not optional decorations.
+
+User: What does --tensor-type-file do in llama-quantize?
+Assistant: It assigns a ggml type per tensor name. Mixed precision
+lives there. The ftype is then a base, not the whole story. If a type
+is an I-quant that needs 256 columns, and the tensor is narrower, the
+tool falls back. Plan for that fallback or the file grows.
+
+Iron rusts. Stainless steel resists because of chromium. Aluminum
+makes a thin oxide that protects it. Mixing those three as "metal
+corrosion" without the mechanism is how a fluent paragraph loses
+the fact.
+
+The Battle of Hastings is 1066. The Magna Carta is 1215. The American
+Declaration of Independence is 1776. The French Revolution's storming
+of the Bastille is 1789. Putting 1776 after 1789 is a timeline slip
+that a compressed model makes when centuries blur.
+
+User: Show a small SQL migration rule.
+Assistant: Never edit an applied migration file. Add a new numbered
+file. The history is the schema. Rewriting history on disk is how
+two installs diverge and nobody can say why.
+
+She packed the crate with 24 jars, 4 rows of 6. A second crate took
+18, 3 rows of 6, because two jars had cracked. The inventory is 42,
+not 48. A summary that rounds to "about fifty" is a different document.
+
+type TensorClass int
+
+const (
+    classSkip TensorClass = iota
+    classProtected
+    classAttnV
+    classFFNDown
+    classEmbed
+    classOutput
+)
+
+A tokenizer is not a dictionary you can read like a book. It is a
+learned split of bytes into ids. Special tokens are ids with a role:
+begin, end, user, assistant. If you train an importance matrix without
+parsing special tokens, chat markup becomes ordinary text and the
+matrix misses how the model actually runs.
+
+User: Why is IQ2 on dense FFN considered a factuality cliff?
+Assistant: Those tensors are large and carry a lot of the MLP. Two
+bits there, even with an imatrix, often smear rare names and numbers.
+IQ3_XXS on middle attention is a different bet. The cliff is the dense
+feed-forward, not every 2-bit tensor in the file.
+
+The river at the gauge read 1.2 metres at dawn and 1.7 metres after
+the storm. Half a metre is not a trickle. Sandbags go on the 1.5
+line because that is when the footpath goes under. A report that
+says "the water rose a bit" is not a gauge reading.
+
+Hydrogen has atomic number 1. Helium is 2. Carbon is 6. Nitrogen is
+7. Oxygen is 8. Sodium is 11. Iron is 26. Gold is 79. Uranium is 92.
+Swapping gold and iron is not a style choice. It is a wrong map of
+the periodic table.
+
+User: Give a careful difference between RAM and VRAM in this app.
+Assistant: VRAM holds offloaded weights and cache on the GPU. RAM holds
+the rest of the weights, the process, and CPU layers. A yellow VRAM
+estimate means drop GPU layers or context. A yellow RAM estimate
+means a smaller quant or less context. They are not the same pool.
+
+Evening again. The same ridge, a different wind. He wrote the heading
+as 240 degrees, southwest, and the time as 18:42. Tomorrow he would
+know whether the cloud on that bearing was weather or just the hill
+wearing a hat. Notes beat vibes when you have to repeat the walk.
+
+This extra block exists so llama-imatrix can fill two 4096-token
+windows on a large-vocabulary tokenizer. The sentences are still
+original project material: units, dates, code, and ordinary work.
+No novels, no lyrics, no pasted encyclopedia. Enough tokens to start
+a thorough matrix without the tool refusing to boot.
+
+User: How many seconds in an hour, a day, and a week?
+Assistant: 3600 seconds in an hour. 86400 in a day. 604800 in a week.
+A millisecond is a thousandth of a second. A nanosecond is a billionth.
+Mixing ms and ns by a million is a timing bug that looks like a typo.
+
+A binary search on a sorted slice is logarithmic. A linear scan is
+fine under a few dozen items. An index is how you avoid the scan when
+the table grows. If you sort on every request, you have not designed
+a read path, you have postponed one.
+
+func average(xs []float64) float64 {
+    if len(xs) == 0 {
+        return 0
+    }
+    var s float64
+    for _, x := range xs {
+        s += x
+    }
+    return s / float64(len(xs))
+}
+
+The Amazon is a river in South America. The Nile is in Africa. The
+Yangtze is in China. The Mississippi is in North America. The Danube
+is in Europe. Swapping the Nile and the Amazon is a map error, not a
+poetic device.
+
+User: What is 2^10, 2^20, and 2^30 in decimal?
+Assistant: 1024, 1 048 576, and 1 073 741 824. Those are the kibi, mebi,
+and gibi prefixes. They are why a "1 TB" drive formats closer to 931
+GiB. The missing capacity is the prefix, not a scam by default.
+
+A JSON object is a map of strings to values. An array is ordered.
+A number in JSON is not an integer type you can trust for ids; large
+ids belong in strings. Unknown keys should be rejected in a control
+API. Silent ignore is how a typo becomes a default you did not want.
+
+The first moon landing was 20 July 1969. The first spacewalk was
+1965 (Leonov). The first woman in space was 1963 (Tereshkova). The
+first satellite was 1957 (Sputnik 1). Reverse any of those and the
+century still sounds right while the story is wrong.
+
+User: Explain copy-on-write at a high level.
+Assistant: Both sides share pages until one writes. The writer gets a
+private copy. Fork is cheap until mutation. Snapshots of filesystems
+use the same idea. It is not a deep copy up front, and it is not a
+shared mutable buffer without a plan.
+
+Rain on the tin roof started at 19:05 and eased at 19:40. Thirty-five
+minutes. The barrel under the downspout rose from a mark at 12 cm to
+a mark at 19 cm. Seven centimetres in a 40 cm diameter barrel is a
+volume you can compute, not "a lot of rain".
+
+package bits
+
+func CeilDiv(n, d int) int {
+    if d <= 0 {
+        return 0
+    }
+    return (n + d - 1) / d
+}
+
+A compass points to magnetic north, not true north. The difference is
+declination and it changes by place and year. Hiking with a map that
+uses true north without adjusting is how a careful person still walks
+off a ridge. The error is geometric, not moral.
+
+User: What is the difference between latency and throughput?
+Assistant: Latency is how long one item takes. Throughput is how many
+items per unit time. You can have high throughput with high latency
+if you batch. Chat tokens are latency-sensitive. Bulk quant jobs are
+throughput-sensitive. Do not tune them with the same knob.
+
+Copper is a better conductor than iron. Silver is better than copper
+and more expensive. Superconductors drop resistance to zero below a
+critical temperature. Calling every metal "a good conductor" erases
+the reason we pick wires.
+
+The Treaty of Westphalia is 1648. The Congress of Vienna is 1815.
+The Treaty of Versailles is 1919. The United Nations charter is 1945.
+Stacking those as "the big peace treaties" without years is a blur.
+The years are the payload.
+
+User: Why loopback-only for a local inference server?
+Assistant: So a browser on another machine cannot talk to it by
+accident. Bind 127.0.0.1, pick a random port, give the process its
+own key. A public proxy is a different binary path with a start
+switch the user can see.
+
+He measured the desk at 140 cm wide and 70 cm deep. A 27 inch monitor
+is about 61 cm diagonal, not 27 cm. Inches and centimetres mixed in
+one sentence without conversion is how a shopping list becomes a
+return.
+
+type Progress struct {
+    Current int
+    Total   int
+    Message string
+}
+
+func (p Progress) Frac() float64 {
+    if p.Total <= 0 {
+        return 0
+    }
+    return float64(p.Current) / float64(p.Total)
+}
+
+A linked list is not a vector. A deque is not a stack, though a stack
+can be a deque with one end ignored. A priority queue is not sorted
+in the sense that indexing the k-th item is cheap. Pick the operations
+you need, then pick the structure.
+
+User: Place the Renaissance, the Industrial Revolution, and the
+internet in time, roughly.
+Assistant: The Renaissance is a late-medieval to early-modern European
+period, fifteenth and sixteenth centuries in the usual school sketch.
+The Industrial Revolution is eighteenth and nineteenth. The public
+internet as a popular network is late twentieth. Folding them into
+one "modernity" is how a model loses the machines.
+
+Sound needs a medium. Light does not. That is why space is silent and
+still lit by the Sun. A fluent paragraph that puts thunder in vacuum
+has failed a grade-school physics check.
+
+The checksum did not match. He compared the first sixteen hex chars
+and the last sixteen. The middle could wait. A truncated compare is
+not a full verify, and the log should say which it was. Ambiguous
+success is worse than a clean failure.
+
+INSERT INTO settings(key, value) VALUES('onboarding.completed', '1')
+ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+
+User: What is a GGUF split file?
+Assistant: One model stored as several numbered shards, like
+00001-of-00002. They must be kept together. Quantizing or moving one
+shard is not a complete copy. The scanner should treat the set as one
+library item.
+
+A hectare is 10 000 square metres. An acre is about 4047 square
+metres. A square kilometre is 100 hectares. Mixing acre and hectare
+without a factor is a land-area bug. The factor is not 1.
+
+The Pacific is the largest ocean. The Arctic is the smallest of the
+usual five. The Mediterranean is a sea, not an ocean. Calling the
+Mediterranean an ocean is a category error, not a translation.
+
+func redacted(s string) string {
+    if len(s) < 8 {
+        return "***"
+    }
+    return s[:2] + "…" + s[len(s)-2:]
+}
+
+User: Why keep secrets out of SQLite and logs?
+Assistant: Because backups, crash reports, and "send me the log" are
+how keys leak. The Hugging Face token belongs in the OS keychain.
+API keys for local servers are per process and die with the process.
+
+Frost on the inner pane meant the room was wetter and colder than
+the hall. He wrote 9 C inside, 4 C outside, 81 percent humidity.
+Opening a window would swap air, not magic. A note that says "it
+felt damp" cannot be compared to tomorrow.
+
+A mutex around I/O will serialize your throughput. A worker pool with
+a bounded queue will not, if the work is actually parallel. Measuring
+beats folklore. The first metric is wall time for a known input.
+
+The speed of Earth's rotation gives a day. The orbit gives a year.
+A leap second is not a leap day. A leap day is the extra calendar
+day in a leap year. Mixing those two is a timekeeping error with a
+confident tone.
+
+User: What should a progress event contain?
+Assistant: Job id, stage, current, total, a short message, and a
+fraction if you have one. Envelope version 1, event name, timestamp,
+payload. Do not invent a second schema for the same job.
+
+Oak is harder than pine. Balsa is lighter than both. Density is not
+strength, but they often travel together. A furniture note that says
+"wood" without the species is not a materials spec.
+
+The equator is hotter on average than the poles because sunlight hits
+more directly, not because those latitudes are closer to the Sun.
+Distance to the Sun changes little over a year compared with the tilt.
+Season is tilt. That sentence is worth repeating until it sticks.
+
+package jobs
+
+var (
+    ErrCanceled = errors.New("canceled")
+    ErrNotFound = errors.New("not found")
+)
+
+User: Give three HTTP methods and what they mean here.
+Assistant: GET reads. POST creates or starts a job. DELETE removes a
+record. PATCH updates a few fields. PUT replaces. Using GET to start
+a quant is a cache and a retry bug waiting to happen.
+
+A parabola is not a circle. An ellipse is a circle stretched, in the
+school picture. A hyperbola is a different conic. Mixing them in a
+trajectory sentence is how an orbit becomes a cartoon.
+
+The crate label said 12.4 kg. The scale said 12.37 kg. He logged the
+scale. Labels lie in the direction of round numbers. Instruments lie
+too, but they are the ones you can calibrate.
+
+SELECT COUNT(*) FROM models WHERE quantization IN ('F16', 'BF16', 'F32');
+
+A stack grows down on many machines and a heap does not care. You do
+not need that to write Go. You do need it to read a crash that says
+stack overflow. The name is the clue.
+
+User: What is speculative decoding's failure mode?
+Assistant: If the draft is often wrong, you pay for a draft forward
+and still sample from the large model. Net speed drops. Pair a draft
+that matches the domain, or turn it off. Filename similarity is not
+a pairing algorithm.
+
+South is 180 degrees. East is 90. West is 270. North is 0 or 360.
+A heading of 90 is not "kind of south". Bearings are not vibes.
+
+The library closed at 17:00 on Saturday and 20:00 on Thursday. He
+arrived at 17:10 on Saturday and wrote "closed" with the time. A
+diary that says "the library is never open" is a different document
+from two measured hours.
+
+func contains(ss []string, v string) bool {
+    for _, s := range ss {
+        if s == v {
+            return true
+        }
+    }
+    return false
+}
+
+A calorie in food labels is a kilocalorie. A joule is an SI energy
+unit. About 4184 joules in a food calorie. Mixing them by a thousand
+is a diet-math error. The number is the point.
+
+The first programmable microprocessor widely sold as a CPU on a chip
+is 1971. Personal computers as a product are later, mid-to-late
+1970s. A smartphone is later still. Compressing that into "computers
+were invented in 1971" is a timeline smear.
+
+User: How do you cancel a running quant job?
+Assistant: Kill the process tree, mark the job canceled, delete the
+incomplete dest GGUF. Keep the log. Do not delete a finished library
+file because the history row went away.
+
+Wind from the west, 12 metres per second, gusts 18. He stayed off the
+ridge. A forecast that says "breezy" cannot be compared to a meter.
+The meter is the source of truth until it is broken, and then you
+write that it is broken.
+
+A set has no duplicates. A list may. A map has keys. If you need
+"membership" you wanted a set. If you need "order of arrival" you
+wanted a list. Using a list and scanning for duplicates is a choice
+you should be able to explain.
+
+This last stretch is still original calibration text: numbers, dates,
+small programs, and measured weather. It exists so two 4096-token
+windows fit. When a custom corpus is available, use that instead.
+The default is a starter, not a research dump.
+
+User: Bind these facts as exact relations, not vibes. Penicillin was isolated
+in a usable form in 1928 by Fleming. The structure of DNA was published
+in 1953. The World Wide Web was proposed in 1989 and opened to the public
+in the early 1990s. Movable type in Europe is the 1450s. The transistor
+is 1947. The integrated circuit is 1958-1959. A microprocessor as a CPU
+on one chip is 1971. Keep the years glued to the names.
+
+Assistant: Fleming / penicillin / 1928. Watson and Crick / DNA structure /
+1953. Berners-Lee / WWW / 1989. Gutenberg-era movable type / 1450s.
+Bardeen, Brattain, Shockley / transistor / 1947. Kilby and Noyce /
+integrated circuit / 1958-1959. Intel 4004 / 1971. If a year moves to
+the wrong name, the relation is broken even if every word is fluent.
+
+User: Convert these and keep the numbers: 0 C = 32 F. 100 C = 212 F.
+1 inch = 2.54 cm. 1 mile ≈ 1.609 km. 1 kg ≈ 2.205 lb. Water density is
+about 1 g/mL at 4 C. Standard gravity is 9.80665 m/s². Atmospheric
+pressure at sea level is 101.325 kPa. Do not swap the units.
+
+Assistant: Freezing is 0 C and 32 F, the same point. Boiling at standard
+pressure is 100 C and 212 F. An inch is 2.54 centimetres exactly by
+definition in the international inch. A mile is 1609 metres to the
+usual three-metre rounding. A kilogram is 2.205 pounds to three
+decimals. Mixing 2.54 with miles is a unit-binding error.
+
+Record 14: a JSON-like fact card, not a web page.
+{"entity":"Ada Lovelace","role":"wrote notes on the Analytical Engine","year":1843}
+{"entity":"Alan Turing","role":"computability and the 1936 paper","year":1936}
+{"entity":"Grace Hopper","role":"compiler work leading to COBOL","year":1950s}
+{"entity":"Katherine Johnson","role":"orbital mechanics calculations","year":1960s}
+
+The 1843 notes are Lovelace. The 1936 paper is Turing. COBOL is later
+than 1936. Do not attach 1843 to Turing.
+
+User: A timeline that is not aerospace: 1789 Bastille; 1804 Napoleon
+emperor; 1815 Waterloo; 1861-1865 American Civil War; 1868 Meiji
+Restoration; 1871 German unification; 1914-1918 World War I; 1939-1945
+World War II; 1947 independence of India; 1949 PRC founded; 1961
+Berlin Wall built; 1989 Berlin Wall opened; 1991 USSR dissolved.
+Keep each date on its event.
+
+Assistant: 1789 is the Bastille, not Waterloo. Waterloo is 1815. The
+American Civil War is 1861 to 1865, not 1914. World War I is 1914-1918.
+World War II is 1939-1945. The Berlin Wall went up in 1961 and opened
+in 1989. The USSR dissolved in 1991. Swapping 1961 and 1989 is a
+temporal-order error.
+
+func siPrefix(n float64) string {
+    switch {
+    case n >= 1e9:
+        return fmt.Sprintf("%.3f G", n/1e9)
+    case n >= 1e6:
+        return fmt.Sprintf("%.3f M", n/1e6)
+    case n >= 1e3:
+        return fmt.Sprintf("%.3f k", n/1e3)
+    default:
+        return fmt.Sprintf("%.3f", n)
+    }
+}
+
+Chemistry cards: hydrogen Z=1, helium Z=2, carbon Z=6, nitrogen Z=7,
+oxygen Z=8, sodium Z=11, chlorine Z=17, iron Z=26, gold Z=79, lead
+Z=82, uranium Z=92. NaCl is sodium chloride. CO2 is carbon dioxide.
+H2O is water. Do not write gold as Z=26.
+
+Geography cards: the Amazon drains to the Atlantic. The Nile flows
+north to the Mediterranean. The Mississippi flows south to the Gulf
+of Mexico. Mount Everest is 8849 m in the usual modern figure. The
+Mariana Trench is about 11 km deep. Equator 0 latitude. Prime meridian
+0 longitude. 51 N, 0 W is near London, not in the Gulf of Guinea.
+
+User: Give three programming numeric literals and what they mean.
+Assistant: 0xFF is 255. 1<<10 is 1024. 1e-3 is 0.001. 0b1010 is 10.
+Mixing 0xFF with 256 is an off-by-one in hex. 1<<10 is a kibibyte of
+bytes, not a kilobit.
+
+Math cards: a 3-4-5 triangle is right-angled. The sum of interior
+angles in a triangle is 180 degrees. pi is about 3.14159. e is about
+2.71828. sqrt(2) is about 1.41421. 2^10=1024. 2^16=65536. 2^32 is
+4294967296. Factorial 5 is 120. Do not write 5! as 25.
+
+Medicine-history cards: Jenner / smallpox vaccine / 1796. Pasteur /
+germ theory and vaccines / late 19th century. Insulin isolated / 1921.
+Salk polio vaccine / 1955. These years stay on those names.
+
+A measured walk: 3.2 km in 38 minutes, average 5.05 km/h. If the log
+says 32 minutes, the speed is wrong. 38 is the payload.
+
+SELECT year, event FROM timeline
+WHERE year BETWEEN 1450 AND 1975
+ORDER BY year ASC;
+
+Order is the fact. Sorting DESC would reverse causation in a reader's
+head even if every row is still true.
+
+User: Bind SI units to quantities. Energy in joules. Power in watts
+(J/s). Force in newtons (kg·m/s²). Pressure in pascals (N/m²). Charge
+in coulombs. Potential in volts. Frequency in hertz. Do not assign
+watts to energy.
+
+Assistant: A joule is energy. A watt is power. A newton is force. A
+pascal is pressure. A 60 W bulb uses 60 joules per second. Calling
+that "60 joules" drops the time and breaks the quantity.
+
+Code with numbers that must survive compression:
+assert 24 * 60 == 1440  # minutes in a day
+assert 7 * 24 == 168    # hours in a week
+assert abs(9.8 - 9.80665) < 0.01
+const unixEpoch = "1970-01-01T00:00:00Z"
+const isoDate = "2001-09-01"
+
+ISO dates are year-month-day. 1970-01-01 is the Unix epoch, not
+2001-09-01. Swapping those two is a date-binding error.
+
+User: Keep the vehicle glued to the mission. Apollo 11 launched on a
+Saturn V from Kennedy Space Center on 16 July 1969 and landed on 20
+July 1969. Yuri Gagarin flew Vostok 1 on 12 April 1961. Sputnik 1
+reached orbit on 4 October 1957. The first Shuttle flight, STS-1, was
+12 April 1981 on Columbia. Do not move Saturn V onto Gagarin or 1961
+onto Apollo 11.
+
+Assistant: Apollo 11 / Saturn V / 16 July 1969 launch / 20 July 1969
+landing. Gagarin / Vostok 1 / 12 April 1961. Sputnik 1 / 4 October
+1957. STS-1 / Columbia / 12 April 1981. The year 1961 belongs to
+Gagarin. The launcher Saturn V belongs to Apollo, not Vostok.
+
+This factual-binding block is general-purpose: years glued to names,
+numbers glued to units, ordered lists that must not reverse. It is
+not a single-topic quiz. It exists so the importance matrix sees
+low-margin token distinctions while remaining a default corpus.
+
+User: Write a local checklist for copying a sensor log without converting units.
+Assistant: 1) Copy the marker string as written. 2) Copy the unit token from the
+instrument plate, not from a spreadsheet header. 3) If a line is torn,
+leave a hole; do not average neighbors. 4) A remainder used for routing
+is not a physical reading. 5) Weather stays a weather word.
+
+User: Show a tiny Go test that two timestamps stay ordered.
+Assistant: func TestStampOrder(t *testing.T) {
+    a := time.Date(1969, 7, 16, 0, 0, 0, 0, time.UTC)
+    b := time.Date(1969, 7, 20, 0, 0, 0, 0, time.UTC)
+    if !a.Before(b) {
+        t.Fatal("launch must stay before landing")
+    }
+}
+
+A harbour ledger from a rainy Tuesday: three crates of copper fittings,
+one crate labelled in kilograms, one labelled in pounds, one with the
+unit line blank. The blank crate is incomplete. The kilogram crate is
+not converted into pounds to make the columns match. The harbour is not
+a laboratory, and the laboratory's millivolt column is not a harbour unit.
+
+SELECT marker, unit, COUNT(*) AS n
+FROM harbour_ledger
+GROUP BY marker, unit
+HAVING unit <> ''
+ORDER BY marker, unit;
