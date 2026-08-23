@@ -38,7 +38,7 @@ func TestCanonicalAndHighPrecision(t *testing.T) {
 	if CanonicalFType("q4_k") != "Q4_K_M" {
 		t.Errorf("alias Q4_K = %s", CanonicalFType("q4_k"))
 	}
-	if !HighPrecision("F16") || !HighPrecision("Q8_0") || HighPrecision("Q4_K_M") {
+	if !HighPrecision("F16") || !HighPrecision("Q8_0") || HighPrecision("Q4_K_M") || HighPrecision("OID-Q4_K_XL") {
 		t.Fatal("high precision classification")
 	}
 	if needsRequantizeFlag("F16") || !needsRequantizeFlag("Q8_0") || !needsRequantizeFlag("Q4_K_M") {

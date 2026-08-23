@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openinfer/openinfer-studio/internal/gguf"
 	"github.com/openinfer/openinfer-studio/internal/storage"
 )
 
@@ -138,4 +139,45 @@ func (m *Manager) recordGeneratedIMatrix(modelID, path, label string, chunks int
 		Origin: origin, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	return &im, m.insertIMatrix(im)
+}
+
+func imatrixChunkCount(path string) int {
+	if fileSize(path) <= 0 {
+		return 0
+	}
+	md, err := gguf.ParseFile(path)
+	if err != nil || md == nil || md.Raw == nil {
+		return 0
+	}
+	return kvAsInt(md.Raw["imatrix.chunk_count"])
+}
+
+func kvAsInt(v any) int {
+	switch n := v.(type) {
+	case uint8:
+		return int(n)
+	case uint16:
+		return int(n)
+	case uint32:
+		return int(n)
+	case uint64:
+		if n > uint64(^uint(0)>>1) {
+			return 0
+		}
+		return int(n)
+	case int8:
+		return int(n)
+	case int16:
+		return int(n)
+	case int32:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
 }

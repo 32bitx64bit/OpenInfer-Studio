@@ -151,11 +151,18 @@ func ParseQuantizeTypes(help string) []FType {
 // usual "full quality" download. llama-quantize still needs
 // --allow-requantize for Q8 (see needsRequantizeFlag).
 func HighPrecision(quant string) bool {
-	switch strings.ToUpper(strings.TrimSpace(quant)) {
+	switch stripDynamicPrefix(quant) {
 	case "", "F32", "F16", "BF16", "Q8_0":
 		return true
 	}
 	return false
+}
+
+func stripDynamicPrefix(quant string) string {
+	u := strings.ToUpper(strings.TrimSpace(quant))
+	u = strings.TrimPrefix(u, "UD-")
+	u = strings.TrimPrefix(u, "OID-")
+	return u
 }
 
 // needsRequantizeFlag reports whether llama-quantize will refuse the source

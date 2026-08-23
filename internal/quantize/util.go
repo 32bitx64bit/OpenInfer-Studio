@@ -1,8 +1,10 @@
 package quantize
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -48,6 +50,50 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
+// copyFileAtomic never exposes a partially copied publication artifact.
+func copyFileAtomic(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".tmp-")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.ReadFrom(in); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, dst)
+}
+
+func hashFile(path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return "", 0, err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), n, nil
+}
+
 var unsafeNameRe = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
 func safeName(s string) string {
@@ -73,11 +119,6 @@ func sidecarFilePrefix(path string) string {
 		}
 	}
 	return ""
-}
-
-func looksLikeMoE(arch, alias string) bool {
-	a := strings.ToLower(arch + " " + alias)
-	return strings.Contains(a, "moe") || strings.Contains(a, "mixtral") || strings.Contains(a, "deepseek")
 }
 
 func isSplitPath(path string) bool {
@@ -106,6 +147,7 @@ var (
 	llamaErrLineRe = regexp.MustCompile(`(?:^|\s)E\s+(\S+:\s*.+)$`)
 	imatrixNeedRe  = regexp.MustCompile(`(?i)need at least (\d+) tokens`)
 	imatrixHaveRe  = regexp.MustCompile(`(?i)tokenizes to only (\d+) tokens`)
+	tensorShapeRe  = regexp.MustCompile(`(?i)tensor '([^']+)' has wrong shape;\s*expected\s+([0-9, ]+),\s*got\s+([0-9, ]+)`)
 )
 
 func llamaErrorLines(tail string) string {
@@ -159,10 +201,29 @@ func friendlyToolError(msg string) string {
 	if strings.Contains(lower, "dflash requires ctx_other") {
 		return "llama-imatrix cannot initialize this speculative assistant GGUF without the main model."
 	}
+	if m := tensorShapeRe.FindStringSubmatch(msg); len(m) == 4 {
+		name := m[1]
+		exp, got := compactDims(m[2]), compactDims(m[3])
+		if strings.Contains(name, "token_embd") || strings.Contains(name, "output") {
+			return fmt.Sprintf("%s shape does not match the architecture vocab (expected %s, file has %s). Embedding rows, output rows, and tokenizer length must agree — reconvert from the Hugging Face weights.", name, exp, got)
+		}
+		return fmt.Sprintf("Tensor %s has the wrong shape for this architecture (expected %s, file has %s). The GGUF metadata does not match the weight layout.", name, exp, got)
+	}
+	if strings.Contains(lower, "check_tensor_dims") || strings.Contains(lower, "has wrong shape") {
+		return "A GGUF tensor has the wrong shape for this architecture. Reconvert from the Hugging Face weights, or use a GGUF built for this llama.cpp version."
+	}
 	if strings.Contains(lower, "requantizing") && strings.Contains(lower, "disabled") {
 		return "Source is already quantized. llama-quantize refused to requantize it. Start from F16/BF16/F32, or enable Allow requantize in Advanced for Q6 and below."
 	}
 	return ""
+}
+
+func compactDims(s string) string {
+	fields := strings.Fields(strings.ReplaceAll(s, ",", " "))
+	for len(fields) > 1 && fields[len(fields)-1] == "1" {
+		fields = fields[:len(fields)-1]
+	}
+	return strings.Join(fields, "×")
 }
 
 func summarizeToolFailure(waitErr error, tail string) error {

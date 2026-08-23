@@ -8,6 +8,7 @@ require (
 	github.com/zalando/go-keyring v0.2.6
 	golang.org/x/sys v0.46.0
 	modernc.org/sqlite v1.54.0
+	quantlab v0.0.0
 )
 
 require (
@@ -22,3 +23,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace quantlab => ./quantlab
