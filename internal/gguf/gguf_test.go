@@ -51,6 +51,13 @@ func buildGGUF(t *testing.T, kvs map[string]any) []byte {
 			for _, x := range val {
 				w32(x)
 			}
+		case []string:
+			w32(tArray)
+			w32(tString)
+			w64(uint64(len(val)))
+			for _, s := range val {
+				wstr(s)
+			}
 		default:
 			t.Fatalf("unsupported kv type %T for %s", v, k)
 		}
@@ -83,6 +90,25 @@ func TestParseValid(t *testing.T) {
 	}
 	if md.ContextLength != 4096 || md.Embedding != 4096 {
 		t.Errorf("ctx/emb = %d/%d", md.ContextLength, md.Embedding)
+	}
+}
+
+func TestTokenizerCount(t *testing.T) {
+	data := buildGGUF(t, map[string]any{
+		"general.architecture":  "llama",
+		"llama.vocab_size":      uint32(5),
+		"tokenizer.ggml.tokens": []string{"a", "b", "c", "d", "e"},
+		"tokenizer.ggml.model":  "llama",
+	})
+	md, err := parse(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if md.TokenizerCount != 5 {
+		t.Fatalf("tokenizer_count=%d want 5", md.TokenizerCount)
+	}
+	if md.VocabSize != 5 {
+		t.Fatalf("vocab_size=%d want 5", md.VocabSize)
 	}
 }
 
@@ -191,5 +217,14 @@ func TestParseFullAttentionInterval(t *testing.T) {
 	if md.FullAttentionInterval != 4 || md.SSMStateSize != 128 || md.SSMInnerSize != 2048 {
 		t.Errorf("hybrid meta = interval=%d state=%d inner=%d",
 			md.FullAttentionInterval, md.SSMStateSize, md.SSMInnerSize)
+	}
+}
+
+func TestBytesForType(t *testing.T) {
+	if got := BytesForType(256, "q4_k"); got != 144 {
+		t.Errorf("q4_k 256 = %d, want 144", got)
+	}
+	if got := BytesForType(256, "q8_0"); got != 272 {
+		t.Errorf("q8_0 256 = %d, want 272", got)
 	}
 }

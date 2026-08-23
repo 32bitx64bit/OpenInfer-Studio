@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -144,5 +145,41 @@ func TestValidateUnknownTypeTolerated(t *testing.T) {
 	}
 	if len(issues) != 0 {
 		t.Errorf("unknown type must not produce false positives: %v", issues)
+	}
+}
+
+func TestValidateSSMConv1dMustBeF32(t *testing.T) {
+	path := buildGGUFWithTensors(t, []struct {
+		name string
+		typ  uint32
+		dims []uint64
+		off  uint64
+	}{
+		{"blk.0.ssm_conv1d.weight", 30, []uint64{4, 64}, 0}, // bf16
+		{"blk.0.attn_qkv.weight", 30, []uint64{256, 64}, 512},
+	}, 4096)
+	issues, _, err := ValidateFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) == 0 || !strings.Contains(issues[0], "ssm_conv1d") {
+		t.Fatalf("bf16 ssm_conv1d must be flagged, got %v", issues)
+	}
+
+	ok := buildGGUFWithTensors(t, []struct {
+		name string
+		typ  uint32
+		dims []uint64
+		off  uint64
+	}{
+		{"blk.0.ssm_conv1d.weight", 0, []uint64{4, 64}, 0}, // f32
+		{"blk.0.attn_qkv.weight", 30, []uint64{256, 64}, 1024},
+	}, 65536)
+	issues, _, err = ValidateFile(ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 0 {
+		t.Fatalf("f32 ssm_conv1d must not be flagged, got %v", issues)
 	}
 }

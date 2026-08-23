@@ -3,15 +3,26 @@ package gguf
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 // Tensor describes one GGUF tensor table entry without loading payload bytes.
 type Tensor struct {
-	Name     string `json:"name"`
-	TypeID   uint32 `json:"type_id"`
-	TypeName string `json:"type_name,omitempty"`
-	Elements uint64 `json:"elements"`
-	Bytes    uint64 `json:"bytes,omitempty"` // 0 when the ggml type layout is unknown
+	Name     string   `json:"name"`
+	TypeID   uint32   `json:"type_id"`
+	TypeName string   `json:"type_name,omitempty"`
+	NDims    uint32   `json:"ndims,omitempty"`
+	Shape    []uint64 `json:"shape,omitempty"` // GGUF dims; Shape[0] is ne[0] / ncols
+	Elements uint64   `json:"elements"`
+	Bytes    uint64   `json:"bytes,omitempty"` // 0 when the ggml type layout is unknown
+}
+
+// NCols is ggml ne[0], the inner dimension llama.cpp checks against block size.
+func (t Tensor) NCols() uint64 {
+	if len(t.Shape) == 0 {
+		return 0
+	}
+	return t.Shape[0]
 }
 
 // ggmlTypeNames maps ggml_type enum values to llama-quantize type tokens.
@@ -61,12 +72,9 @@ func ListTensors(path string) ([]Tensor, *Metadata, error) {
 
 	md := &Metadata{Version: version, TensorCount: tensors, Raw: map[string]any{}}
 	for i := uint64(0); i < kvCount; i++ {
-		key := r.str()
-		val := r.value(fileSize)
-		if r.err != nil {
-			return nil, nil, r.err
+		if err := takeKV(r, md, fileSize); err != nil {
+			return nil, nil, err
 		}
-		md.Raw[key] = val
 	}
 	md.extract()
 
@@ -77,9 +85,11 @@ func ListTensors(path string) ([]Tensor, *Metadata, error) {
 		if r.err != nil {
 			return out, md, r.err
 		}
+		shape := make([]uint64, nDims)
 		var elems uint64 = 1
 		for d := uint32(0); d < nDims; d++ {
 			dim := r.u64()
+			shape[d] = dim
 			elems *= dim
 		}
 		typ := r.u32()
@@ -87,7 +97,7 @@ func ListTensors(path string) ([]Tensor, *Metadata, error) {
 		if r.err != nil {
 			return out, md, r.err
 		}
-		t := Tensor{Name: name, TypeID: typ, TypeName: ggmlTypeNames[typ], Elements: elems}
+		t := Tensor{Name: name, TypeID: typ, TypeName: ggmlTypeNames[typ], NDims: nDims, Shape: shape, Elements: elems}
 		if tt, ok := tensorTypes[typ]; ok && tt.blockSize > 0 {
 			blocks := (elems + tt.blockSize - 1) / tt.blockSize
 			t.Bytes = blocks * tt.typeSize
@@ -95,4 +105,38 @@ func ListTensors(path string) ([]Tensor, *Metadata, error) {
 		out = append(out, t)
 	}
 	return out, md, nil
+}
+
+// ggmlTypeName returns the canonical lowercase token for a ggml type id
+// ("" when unknown).
+func ggmlTypeName(id uint32) string {
+	return ggmlTypeNames[id]
+}
+
+func ggmlTypeID(name string) (uint32, bool) {
+	want := strings.ToLower(strings.TrimSpace(name))
+	if want == "" {
+		return 0, false
+	}
+	for id, n := range ggmlTypeNames {
+		if n == want {
+			return id, true
+		}
+	}
+	return 0, false
+}
+
+// BytesForType is the on-disk size of elements stored as ggml type typeName.
+// Unknown types fall back to 4.5 bpw.
+func BytesForType(elements uint64, typeName string) uint64 {
+	id, ok := ggmlTypeID(typeName)
+	if !ok {
+		return uint64(float64(elements) * 4.5 / 8)
+	}
+	tt, ok := tensorTypes[id]
+	if !ok || tt.blockSize == 0 {
+		return uint64(float64(elements) * 4.5 / 8)
+	}
+	blocks := (elements + tt.blockSize - 1) / tt.blockSize
+	return blocks * tt.typeSize
 }

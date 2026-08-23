@@ -52,7 +52,10 @@ type Metadata struct {
 	SSMStateSize          uint32         `json:"ssm_state_size,omitempty"`
 	SSMInnerSize          uint32         `json:"ssm_inner_size,omitempty"`
 	ChatTemplate          string         `json:"chat_template,omitempty"`
+	Reasoning             Reasoning      `json:"reasoning,omitempty"`
 	Tokenizer             string         `json:"tokenizer,omitempty"`
+	TokenizerCount        uint32         `json:"tokenizer_count,omitempty"` // tokenizer.ggml.tokens length
+	VocabSize             uint32         `json:"vocab_size,omitempty"`      // <arch>.vocab_size or tokenizer count
 	Multimodal            bool           `json:"multimodal"`
 	HasVision             bool           `json:"has_vision"`
 	HasAudio              bool           `json:"has_audio"`
@@ -91,9 +94,10 @@ var fileTypeNames = map[uint32]string{
 
 // reader wraps io.ReaderAt with a hard cursor and error stickiness.
 type reader struct {
-	r   io.ReaderAt
-	off int64
-	err error
+	r      io.ReaderAt
+	off    int64
+	err    error
+	arrayN uint64 // length of the last array value, if any
 }
 
 func (r *reader) read(p []byte) {
@@ -170,6 +174,7 @@ func fixedSize(t uint32) (uint64, bool) {
 // value reads one metadata value; strings and small scalar arrays are
 // captured, everything else is skipped.
 func (r *reader) value(fileSize int64) any {
+	r.arrayN = 0
 	t := r.u32()
 	if r.err != nil {
 		return nil
@@ -187,6 +192,7 @@ func (r *reader) value(fileSize int64) any {
 			r.err = fmt.Errorf("%w: array length %d", ErrBoundsUnsafe, n)
 			return nil
 		}
+		r.arrayN = n
 		if et == tString {
 			// Read up to 64 strings for inspection, skip the rest.
 			out := make([]string, 0, 8)
@@ -313,6 +319,19 @@ func ParseFile(path string) (*Metadata, error) {
 	return parse(f, st.Size())
 }
 
+func takeKV(r *reader, md *Metadata, fileSize int64) error {
+	key := r.str()
+	val := r.value(fileSize)
+	if r.err != nil {
+		return r.err
+	}
+	md.Raw[key] = val
+	if key == "tokenizer.ggml.tokens" && r.arrayN > 0 {
+		md.TokenizerCount = uint32(r.arrayN)
+	}
+	return nil
+}
+
 func parse(ra io.ReaderAt, fileSize int64) (*Metadata, error) {
 	r := &reader{r: ra}
 	if magic := r.u32(); magic != magicGGUF {
@@ -336,12 +355,9 @@ func parse(ra io.ReaderAt, fileSize int64) (*Metadata, error) {
 
 	md := &Metadata{Version: version, TensorCount: tensors, Raw: map[string]any{}}
 	for i := uint64(0); i < kvCount; i++ {
-		key := r.str()
-		val := r.value(fileSize)
-		if r.err != nil {
-			return nil, r.err
+		if err := takeKV(r, md, fileSize); err != nil {
+			return nil, err
 		}
-		md.Raw[key] = val
 	}
 	md.extract()
 	return md, nil
@@ -380,6 +396,11 @@ func (md *Metadata) extract() {
 		if v, ok := get(md.Architecture + ".embedding_length"); ok {
 			if n, ok := toUint32(v); ok {
 				md.Embedding = n
+			}
+		}
+		if v, ok := get(md.Architecture + ".vocab_size"); ok {
+			if n, ok := toUint32(v); ok {
+				md.VocabSize = n
 			}
 		}
 		if v, ok := get(md.Architecture + ".block_count"); ok {
@@ -472,10 +493,14 @@ func (md *Metadata) extract() {
 			md.ChatTemplate = s
 		}
 	}
+	md.Reasoning = DetectReasoning(md.ChatTemplate, md.Architecture)
 	if v, ok := get("tokenizer.ggml.model"); ok {
 		if s, ok := v.(string); ok {
 			md.Tokenizer = s
 		}
+	}
+	if md.VocabSize == 0 {
+		md.VocabSize = md.TokenizerCount
 	}
 	// Multimodal indicators (vision / audio encoders live in mmproj or fused GGUF).
 	// Boolean encoder flags must be truthy — vision-only mmproj files often

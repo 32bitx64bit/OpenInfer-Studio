@@ -3,6 +3,7 @@ package gguf
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 // tensorType describes a ggml tensor type's block layout: values are stored
@@ -159,7 +160,24 @@ func ValidateFile(path string) (issues []string, md *Metadata, err error) {
 		return issues, md, nil
 	}
 
+	ssmConvReported := false
 	for i, ti := range infos {
+		// llama.cpp's SSM conv kernels read ssm_conv1d weights as raw F32
+		// (ggml asserts src1->nb[0] == sizeof(float) on CPU and CUDA).
+		// A bf16/f16 conv aborts or garbles every linear-attention layer.
+		if strings.HasSuffix(ti.name, "ssm_conv1d.weight") && ti.typ != 0 && !ssmConvReported {
+			tn := ggmlTypeName(ti.typ)
+			if tn == "" {
+				tn = fmt.Sprintf("type %d", ti.typ)
+			}
+			issues = append(issues, fmt.Sprintf(
+				"tensor %q: stored as %s, but llama.cpp %s",
+				ti.name, tn, ssmConvValidationTag))
+			ssmConvReported = true
+			if len(issues) >= 8 {
+				return issues, md, nil
+			}
+		}
 		if i > 0 && ti.offset < infos[i-1].offset {
 			issues = append(issues, fmt.Sprintf(
 				"tensor %q: offset %d is before previous tensor end (expected >= %d) — file is corrupt",
