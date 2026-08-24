@@ -20,5 +20,6 @@ TextArea {
         border.width: 1
         border.color: root.activeFocus ? AppTheme.borderFocus
                      : root.hovered ? AppTheme.textFaint : AppTheme.border
+        Behavior on border.color { ColorAnimation { duration: AppTheme.motionFast } }
     }
 }

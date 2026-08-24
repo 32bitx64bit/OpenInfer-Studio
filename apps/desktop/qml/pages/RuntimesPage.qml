@@ -26,9 +26,9 @@ Item {
         })
         api.get("/api/v1/downloads", function(st, data) {
             if (st !== 200) return
-            page.runtimeDownloads = ((data && data.downloads) || []).filter(function(d) {
+            page.runtimeDownloads = AppTheme.keepRows(page.runtimeDownloads, ((data && data.downloads) || []).filter(function(d) {
                 return d.kind === "runtime" && ["queued", "active", "paused", "failed"].indexOf(d.state) >= 0
-            })
+            }))
         })
     }
 

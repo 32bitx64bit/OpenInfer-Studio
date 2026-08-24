@@ -14,6 +14,7 @@ Column {
 
     spacing: 4
     opacity: supported ? 1.0 : 0.55
+    Behavior on opacity { NumberAnimation { duration: AppTheme.motion; easing.type: Easing.OutCubic } }
 
     Row {
         spacing: 6

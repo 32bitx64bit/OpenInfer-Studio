@@ -4,6 +4,7 @@ import ".."
 
 Card {
     id: root
+    hoverHighlight: false
 
     property string title: ""
     property string subtitle: ""

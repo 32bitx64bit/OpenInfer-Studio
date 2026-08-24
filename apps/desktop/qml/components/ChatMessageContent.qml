@@ -36,12 +36,14 @@ ColumnLayout {
         return false
     }
 
-    // Streaming or prose-only: Qt's built-in Markdown renderer.
+    // Streaming uses plain text so each token paints; MarkdownText often
+    // does not relayout while the string is still growing.
     TextEdit {
         Layout.fillWidth: true
+        Layout.preferredHeight: contentHeight
         visible: !root.useSplit && root.content !== ""
         text: root.content
-        textFormat: TextEdit.MarkdownText
+        textFormat: root.streaming ? TextEdit.PlainText : TextEdit.MarkdownText
         readOnly: true
         selectByMouse: true
         wrapMode: TextEdit.Wrap

@@ -51,11 +51,25 @@ QtObject {
     readonly property int fontTitle: 16
     readonly property int fontHero: 22
 
+    // Motion — short, purposeful, no bounce. Hover/press use motionFast;
+    // page/enter uses motion; toast/dialog uses motionSlow.
+    readonly property int motionFast: 120
+    readonly property int motion: 180
+    readonly property int motionSlow: 240
+    readonly property int motionPulse: 700
+    readonly property real motionPressScale: 0.98
+
+    // Same RGB as c with alpha 0, so ColorAnimation does not interpolate
+    // through black when fading a fill in or out of "transparent".
+    function ghost(c) {
+        return Qt.rgba(c.r, c.g, c.b, 0)
+    }
+
     function stateColor(state) {
         switch (state) {
         case "ready": case "complete": case "busy": return success
         case "loading": case "starting": case "active": case "queued": case "running": return info
-        case "sleeping": case "paused": case "canceling": return warning
+        case "sleeping": case "paused": case "pausing": case "canceling": return warning
         case "failed": case "crashed": case "canceled": return danger
         default: return textFaint
         }
@@ -73,11 +87,18 @@ QtObject {
         return v ? v.toFixed(1) + " tok/s" : "—"
     }
 
-    // F32 / F16 / BF16, or unknown (empty). Q8, K-quants, IQ, Unsloth UD, etc. are not.
-    function isFullPrecisionQuant(q) {
+    // F32 / F16 / BF16, or unknown (empty). Q8, K-quants, IQ, Unsloth UD, OpenInfer OID, etc. are not.
+    function stripDynamicQuantPrefix(q) {
         var u = String(q || "").toUpperCase()
         if (u.indexOf("UD-") === 0)
-            u = u.substring(3)
+            return u.substring(3)
+        if (u.indexOf("OID-") === 0)
+            return u.substring(4)
+        return u
+    }
+
+    function isFullPrecisionQuant(q) {
+        var u = stripDynamicQuantPrefix(q)
         return u === "" || u === "F32" || u === "F16" || u === "BF16"
     }
 
@@ -85,8 +106,16 @@ QtObject {
         return String(q || "").toUpperCase().indexOf("UD-") === 0
     }
 
+    function isOpenInferDynamicQuant(q) {
+        return String(q || "").toUpperCase().indexOf("OID-") === 0
+    }
+
     function quantTagTone(q) {
-        return isUnslothDynamicQuant(q) ? warning : info
+        if (isUnslothDynamicQuant(q))
+            return warning
+        if (isOpenInferDynamicQuant(q))
+            return accent
+        return info
     }
 
     // Apply Fusion palette so stock controls inherit the app theme.
@@ -113,5 +142,23 @@ QtObject {
         target.palette.placeholderText = textFaint
         target.palette.toolTipBase = surfaceHi
         target.palette.toolTipText = text
+    }
+
+    // Repeater/ListView treat a new JS array as a full model reset. Keep the
+    // existing array (and its delegates) when ids and states match so
+    // progress bars are not remounted on every poll.
+    function keepRows(current, incoming, key) {
+        incoming = incoming || []
+        current = current || []
+        key = key || "id"
+        if (current.length !== incoming.length)
+            return incoming
+        for (var i = 0; i < incoming.length; i++) {
+            var a = current[i]
+            var b = incoming[i]
+            if (!a || !b || a[key] !== b[key] || a.state !== b.state)
+                return incoming
+        }
+        return current
     }
 }

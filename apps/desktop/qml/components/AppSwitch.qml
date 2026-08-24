@@ -17,6 +17,8 @@ Switch {
         radius: 12
         color: root.checked ? AppTheme.accent : AppTheme.surfaceHi
         border.color: root.checked ? AppTheme.accent : AppTheme.border
+        Behavior on color { ColorAnimation { duration: AppTheme.motionFast } }
+        Behavior on border.color { ColorAnimation { duration: AppTheme.motionFast } }
 
         Rectangle {
             x: root.checked ? parent.width - width - 3 : 3
@@ -26,8 +28,10 @@ Switch {
             radius: 9
             color: root.checked ? AppTheme.onAccent : AppTheme.surface
             border.color: root.checked ? AppTheme.accentHi : AppTheme.border
+            Behavior on color { ColorAnimation { duration: AppTheme.motionFast } }
+            Behavior on border.color { ColorAnimation { duration: AppTheme.motionFast } }
 
-            Behavior on x { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+            Behavior on x { NumberAnimation { duration: AppTheme.motionFast; easing.type: Easing.OutCubic } }
         }
     }
 

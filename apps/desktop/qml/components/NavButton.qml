@@ -19,10 +19,23 @@ ItemDelegate {
 
     background: Rectangle {
         color: root.current ? AppTheme.surfaceSelected
-             : root.hovered ? AppTheme.surfaceHover : "transparent"
+             : root.hovered ? AppTheme.surfaceHover : AppTheme.ghost(AppTheme.surfaceHover)
         radius: AppTheme.radius
         border.width: root.current ? 1 : 0
-        border.color: root.current ? Qt.alpha(AppTheme.accent, 0.35) : "transparent"
+        border.color: root.current ? Qt.alpha(AppTheme.accent, 0.35) : AppTheme.ghost(AppTheme.accent)
+        Behavior on color { ColorAnimation { duration: AppTheme.motionFast } }
+        Behavior on border.color { ColorAnimation { duration: AppTheme.motionFast } }
+
+        Rectangle {
+            width: 2
+            height: parent.height - 12
+            radius: 1
+            x: 4
+            anchors.verticalCenter: parent.verticalCenter
+            color: AppTheme.accent
+            opacity: root.current ? 1 : 0
+            Behavior on opacity { NumberAnimation { duration: AppTheme.motion; easing.type: Easing.OutCubic } }
+        }
     }
 
     contentItem: Item {
@@ -37,6 +50,7 @@ ItemDelegate {
             font.pixelSize: 18
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
+            Behavior on color { ColorAnimation { duration: AppTheme.motionFast } }
         }
 
         // Expanded: glyph + label centered as one unit.
@@ -51,6 +65,7 @@ ItemDelegate {
                 width: 20
                 horizontalAlignment: Text.AlignHCenter
                 anchors.verticalCenter: parent.verticalCenter
+                Behavior on color { ColorAnimation { duration: AppTheme.motionFast } }
             }
             Text {
                 text: root.text
@@ -59,6 +74,7 @@ ItemDelegate {
                 font.weight: root.current ? Font.DemiBold : Font.Normal
                 horizontalAlignment: Text.AlignHCenter
                 anchors.verticalCenter: parent.verticalCenter
+                Behavior on color { ColorAnimation { duration: AppTheme.motionFast } }
             }
         }
     }

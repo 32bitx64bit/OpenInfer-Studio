@@ -11,6 +11,10 @@ Dialog {
     padding: AppTheme.pad
     topPadding: AppTheme.pad
     bottomPadding: AppTheme.pad
+    transformOrigin: Item.Center
+    enter: DialogEnter {}
+    exit: DialogExit {}
+    Overlay.modal: Rectangle { color: AppTheme.overlay }
 
     header: Label {
         visible: root.title !== ""

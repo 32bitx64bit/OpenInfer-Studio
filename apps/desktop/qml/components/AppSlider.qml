@@ -33,8 +33,9 @@ Slider {
         implicitWidth: 16
         implicitHeight: 16
         radius: 8
-        color: root.pressed ? AppTheme.accentHi : AppTheme.accent
+        color: root.pressed ? AppTheme.accentHi : (root.hovered ? AppTheme.accentHi : AppTheme.accent)
         border.color: AppTheme.onAccent
         border.width: 1
+        Behavior on color { ColorAnimation { duration: AppTheme.motionFast } }
     }
 }

@@ -265,6 +265,21 @@ Item {
             clip: true
             spacing: 8
             model: page.results
+            add: Transition {
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                }
+            }
+            populate: Transition {
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                }
+            }
+            displaced: Transition {
+                NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+            }
 
             EmptyState {
                 visible: page.results.length === 0 && !page.searching
@@ -346,6 +361,10 @@ Item {
         modal: true
         standardButtons: Dialog.NoButton
         padding: 0
+        transformOrigin: Item.Center
+        enter: DialogEnter {}
+        exit: DialogExit {}
+        Overlay.modal: Rectangle { color: AppTheme.overlay }
 
         background: Rectangle {
             color: AppTheme.bg
@@ -502,7 +521,7 @@ Item {
                         text: "Hide Q8 and below"
                         checked: page.hideQ8AndBelow
                         ToolTip.visible: hovered
-                        ToolTip.text: "Show only F32, F16, and BF16. Q8, K-quants, IQ, and Unsloth UD files are hidden."
+                        ToolTip.text: "Show only F32, F16, and BF16. Q8, K-quants, IQ, Unsloth UD, and OpenInfer OID files are hidden."
                         onToggled: page.hideQ8AndBelow = checked
                     }
                     Item { Layout.fillWidth: true }
@@ -517,6 +536,18 @@ Item {
                         clip: true
                         spacing: 8
                         model: page.filteredDetailGroups()
+                        add: Transition {
+                            ParallelAnimation {
+                                NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                                NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                            }
+                        }
+                        populate: Transition {
+                            NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppTheme.motionFast; easing.type: Easing.OutCubic }
+                        }
+                        displaced: Transition {
+                            NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                        }
                         delegate: Card {
                             width: ListView.view.width - 4
                             implicitHeight: gcol.implicitHeight + 20
@@ -532,6 +563,12 @@ Item {
                                         visible: AppTheme.isUnslothDynamicQuant(modelData.quant)
                                         text: "UD"
                                         tone: AppTheme.warning
+                                        Layout.minimumWidth: implicitWidth
+                                    }
+                                    Tag {
+                                        visible: AppTheme.isOpenInferDynamicQuant(modelData.quant)
+                                        text: "OID"
+                                        tone: AppTheme.accent
                                         Layout.minimumWidth: implicitWidth
                                     }
                                     Tag { visible: modelData.split; text: modelData.parts + " parts"; tone: AppTheme.info; Layout.minimumWidth: implicitWidth }

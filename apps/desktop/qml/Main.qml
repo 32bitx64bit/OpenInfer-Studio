@@ -71,6 +71,7 @@ ApplicationWindow {
     property bool onboardingPrompted: false
     property string currentRoute: "chat"
     property string previousRoute: "library"
+    readonly property bool compactNav: window.width < 1060
 
     function routeIndex(route) {
         var routes = ["chat", "models", "library", "developer", "runtimes", "quantize",
@@ -160,20 +161,21 @@ ApplicationWindow {
         anchors.fill: parent
         spacing: 0
 
-        // Calm global bar: app identity on the left, activity on the right.
+        // Calm global bar: identity left, chat model centered, actions right.
         Rectangle {
             Layout.fillWidth: true
             Layout.preferredHeight: 56
             color: AppTheme.bgAlt
             border.color: AppTheme.border
 
-            RowLayout {
+            Item {
                 anchors.fill: parent
                 anchors.leftMargin: AppTheme.pad
                 anchors.rightMargin: AppTheme.pad
-                spacing: AppTheme.gap
 
                 Column {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
                     spacing: 1
                     Text {
                         text: "OpenInfer Studio"
@@ -182,42 +184,84 @@ ApplicationWindow {
                         font.weight: Font.DemiBold
                     }
                     Text {
+                        visible: window.currentRoute !== "chat"
                         text: "Local inference, made practical"
                         color: AppTheme.textFaint
                         font.pixelSize: AppTheme.fontSmall
                     }
                 }
-                Item { Layout.fillWidth: true }
 
-                // Keep operational context available without turning the header
-                // into a permanent status dashboard.
-                RowLayout {
-                    visible: window.instances.length > 0
-                    spacing: 6
-                    Text {
-                        text: window.instances.filter(function(i) {
-                            return ["ready", "busy", "loading", "starting"].indexOf(i.state) >= 0
-                        }).length + " active model" + (window.instances.length === 1 ? "" : "s")
+                Row {
+                    visible: window.currentRoute === "chat"
+                    anchors.centerIn: parent
+                    spacing: 8
+                    AppComboBox {
+                        id: headerModelSelector
+                        width: Math.min(320, Math.max(200, window.width * 0.28))
+                        model: chatPage.headerModels
+                        textRole: "alias"
+                        subtitleRole: "quantization"
+                        currentIndex: chatPage.selectedModelIndex
+                        onActivated: function(i) { chatPage.setConversationModel(i) }
+                    }
+                    Tag {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: chatPage.loadingModel ? "Loading…" : chatPage.modelState()
+                        tone: chatPage.loadingModel ? AppTheme.info
+                            : chatPage.modelState() === "Ready" ? AppTheme.success : AppTheme.warning
+                    }
+                }
+
+                Row {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: 8
+
+                    Row {
+                        visible: window.currentRoute !== "chat" && window.instances.length > 0
+                        spacing: 6
+                        Text {
+                            text: window.instances.filter(function(i) {
+                                return ["ready", "busy", "loading", "starting"].indexOf(i.state) >= 0
+                            }).length + " active model" + (window.instances.length === 1 ? "" : "s")
+                            color: AppTheme.textDim
+                            font.pixelSize: AppTheme.fontSmall
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Rectangle {
+                            width: 7; height: 7; radius: 4
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: window.instances.some(function(i) { return i.state === "busy" })
+                                ? AppTheme.success : AppTheme.info
+                            Behavior on color { ColorAnimation { duration: AppTheme.motion } }
+                        }
+                    }
+                    Label {
+                        visible: window.currentRoute === "chat" && chatPage.lastStats !== null
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: chatPage.lastStats
+                            ? (chatPage.lastStats.tokens_per_second || 0).toFixed(1) + " tok/s"
+                            : ""
                         color: AppTheme.textDim
                         font.pixelSize: AppTheme.fontSmall
                     }
-                    Rectangle {
-                        width: 7; height: 7; radius: 4
-                        color: window.instances.some(function(i) { return i.state === "busy" })
-                            ? AppTheme.success : AppTheme.info
+                    AppButton {
+                        visible: window.currentRoute === "chat"
+                        text: "Chat settings"
+                        onClicked: chatPage.openChatSettings()
                     }
-                }
-                AppButton {
-                    text: window.downloadCount > 0
-                          ? "Activity · " + window.downloadCount : "Activity"
-                    primary: window.downloadCount > 0
-                    onClicked: window.goTo("downloads")
-                }
-                Row {
-                    visible: api.lastError !== "" && !events.connected
-                    spacing: 6
-                    Rectangle { width: 8; height: 8; radius: 4; color: AppTheme.danger; anchors.verticalCenter: parent.verticalCenter }
-                    Text { text: "Backend offline"; color: AppTheme.danger; font.pixelSize: AppTheme.fontSmall }
+                    AppButton {
+                        text: window.downloadCount > 0
+                              ? "Activity · " + window.downloadCount : "Activity"
+                        primary: window.downloadCount > 0
+                        onClicked: window.goTo("downloads")
+                    }
+                    Row {
+                        visible: api.lastError !== "" && !events.connected
+                        spacing: 6
+                        Rectangle { width: 8; height: 8; radius: 4; color: AppTheme.danger; anchors.verticalCenter: parent.verticalCenter }
+                        Text { text: "Backend offline"; color: AppTheme.danger; font.pixelSize: AppTheme.fontSmall; anchors.verticalCenter: parent.verticalCenter }
+                    }
                 }
             }
         }
@@ -231,9 +275,12 @@ ApplicationWindow {
             // the secondary group without competing with the everyday flow.
             Rectangle {
                 Layout.fillHeight: true
-                Layout.preferredWidth: window.width < 1060 ? 64 : 196
+                Layout.preferredWidth: window.compactNav ? 64 : 196
                 color: AppTheme.bgAlt
                 border.color: AppTheme.border
+                Behavior on Layout.preferredWidth {
+                    NumberAnimation { duration: AppTheme.motionSlow; easing.type: Easing.OutCubic }
+                }
 
                 ColumnLayout {
                     anchors.fill: parent
@@ -248,7 +295,7 @@ ApplicationWindow {
                         delegate: NavButton {
                             text: modelData.label
                             glyph: modelData.glyph
-                            compact: window.width < 1060
+                            compact: window.compactNav
                             current: window.currentRoute === modelData.route
                                 || (window.currentRoute === "model-detail" && modelData.route === "library")
                             onClicked: window.goTo(modelData.route)
@@ -256,7 +303,7 @@ ApplicationWindow {
                     }
                     Rectangle { Layout.fillWidth: true; Layout.preferredHeight: 1; color: AppTheme.border; Layout.topMargin: 8 }
                     Label {
-                        visible: window.width >= 1060
+                        visible: !window.compactNav
                         text: "TOOLS"
                         color: AppTheme.textFaint
                         font.pixelSize: AppTheme.fontSmall
@@ -277,7 +324,7 @@ ApplicationWindow {
                         delegate: NavButton {
                             text: modelData.label
                             glyph: modelData.glyph
-                            compact: window.width < 1060
+                            compact: window.compactNav
                             current: window.currentRoute === modelData.route
                             onClicked: window.goTo(modelData.route)
                         }
@@ -286,7 +333,7 @@ ApplicationWindow {
                     NavButton {
                         text: "Settings"
                         glyph: "⚙"
-                        compact: window.width < 1060
+                        compact: window.compactNav
                         current: window.currentRoute === "settings"
                         onClicked: window.goTo("settings")
                     }
@@ -299,14 +346,27 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 currentIndex: window.routeIndex(window.currentRoute)
+                property bool ready: false
+                Component.onCompleted: ready = true
+                onCurrentIndexChanged: {
+                    if (!ready)
+                        return
+                    var item = itemAt(currentIndex)
+                    if (!item)
+                        return
+                    pageFade.stop()
+                    item.opacity = 0
+                    pageFade.target = item
+                    pageFade.start()
+                }
 
                 ChatPage {
+                    id: chatPage
                     api: api
                     events: events
                     experimentalAudio: window.experimentalAudioModels
                     onOpenLibrary: window.goTo("library")
                     onConfigureModel: function(modelId) {
-                        window.goTo("library")
                         libraryPage.openLoad(modelId)
                     }
                 }
@@ -370,16 +430,33 @@ ApplicationWindow {
         goTo("model-detail")
     }
 
-    // Toast overlay
-    Column {
+    NumberAnimation {
+        id: pageFade
+        property: "opacity"
+        to: 1
+        duration: AppTheme.motion
+        easing.type: Easing.OutCubic
+    }
+
+    // Toast overlay — fade/scale in at the bottom-right; fade out before removal.
+    ListView {
+        id: toastList
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.margins: 16
+        width: 480
+        height: contentHeight
         spacing: 8
         z: 100
-        Repeater {
-            model: toastModel
-            delegate: Rectangle {
+        interactive: false
+        clip: false
+        model: toastModel
+        delegate: Item {
+            width: toastList.width
+            height: 40
+            transformOrigin: Item.Center
+            Rectangle {
+                anchors.right: parent.right
                 width: toastText.implicitWidth + 32
                 height: 40
                 radius: AppTheme.radius
@@ -395,6 +472,29 @@ ApplicationWindow {
                 }
                 MouseArea { anchors.fill: parent; onClicked: toastModel.remove(index) }
             }
+        }
+        add: Transition {
+            ParallelAnimation {
+                NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppTheme.motionSlow; easing.type: Easing.OutCubic }
+                NumberAnimation { property: "scale"; from: 0.96; to: 1; duration: AppTheme.motionSlow; easing.type: Easing.OutCubic }
+                NumberAnimation { property: "y"; duration: AppTheme.motionSlow; easing.type: Easing.OutCubic }
+            }
+        }
+        remove: Transition {
+            SequentialAnimation {
+                PropertyAction { property: "ListView.delayRemove"; value: true }
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; to: 0; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "scale"; to: 0.96; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                }
+                PropertyAction { property: "ListView.delayRemove"; value: false }
+            }
+        }
+        displaced: Transition {
+            NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+        }
+        removeDisplaced: Transition {
+            NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
         }
     }
 

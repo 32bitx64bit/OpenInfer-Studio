@@ -12,6 +12,28 @@ ColumnLayout {
     signal actionTriggered()
 
     spacing: 8
+    opacity: 0
+    transform: Translate {
+        id: appearShift
+        y: 8
+        Behavior on y { NumberAnimation { duration: AppTheme.motion; easing.type: Easing.OutCubic } }
+    }
+
+    function playAppear() {
+        opacity = 0
+        appearShift.y = 8
+        Qt.callLater(function() {
+            if (!root.visible)
+                return
+            root.opacity = 1
+            appearShift.y = 0
+        })
+    }
+
+    Component.onCompleted: if (visible) playAppear()
+    onVisibleChanged: if (visible) playAppear()
+
+    Behavior on opacity { NumberAnimation { duration: AppTheme.motion; easing.type: Easing.OutCubic } }
 
     Label {
         text: root.icon

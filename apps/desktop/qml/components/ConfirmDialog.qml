@@ -17,6 +17,10 @@ Dialog {
     width: Math.min(480, parent ? parent.width - 64 : 480)
     standardButtons: Dialog.NoButton
     padding: AppTheme.pad
+    transformOrigin: Item.Center
+    enter: DialogEnter {}
+    exit: DialogExit {}
+    Overlay.modal: Rectangle { color: AppTheme.overlay }
 
     background: Rectangle {
         color: AppTheme.bg

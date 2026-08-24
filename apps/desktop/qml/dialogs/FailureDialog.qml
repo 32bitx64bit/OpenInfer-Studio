@@ -22,6 +22,10 @@ Dialog {
     height: Math.min(620, parent ? parent.height - 64 : 620)
     anchors.centerIn: parent
     padding: AppTheme.pad
+    transformOrigin: Item.Center
+    enter: DialogEnter {}
+    exit: DialogExit {}
+    Overlay.modal: Rectangle { color: AppTheme.overlay }
 
     background: Rectangle {
         color: AppTheme.bg

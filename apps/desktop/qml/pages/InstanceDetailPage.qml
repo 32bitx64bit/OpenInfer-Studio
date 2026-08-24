@@ -151,6 +151,7 @@ Item {
                             font.pixelSize: AppTheme.fontBody
                             elide: Text.ElideRight
                             Layout.maximumWidth: 220
+                            Behavior on color { ColorAnimation { duration: AppTheme.motion } }
                         }
                     }
                 }

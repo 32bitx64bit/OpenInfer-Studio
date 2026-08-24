@@ -17,14 +17,17 @@ CheckBox {
         color: root.checked ? AppTheme.accent : AppTheme.surface
         border.color: root.checked ? AppTheme.accent
                      : root.hovered ? AppTheme.textFaint : AppTheme.border
+        Behavior on color { ColorAnimation { duration: AppTheme.motionFast } }
+        Behavior on border.color { ColorAnimation { duration: AppTheme.motionFast } }
 
         Text {
             anchors.centerIn: parent
-            visible: root.checked
+            opacity: root.checked ? 1 : 0
             text: "✓"
             color: AppTheme.onAccent
             font.pixelSize: 12
             font.weight: Font.Bold
+            Behavior on opacity { NumberAnimation { duration: AppTheme.motionFast; easing.type: Easing.OutCubic } }
         }
     }
 

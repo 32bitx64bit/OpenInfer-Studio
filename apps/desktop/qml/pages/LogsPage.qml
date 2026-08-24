@@ -83,6 +83,12 @@ Item {
                 Layout.fillHeight: true
                 clip: true
                 model: page.files
+                add: Transition {
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                }
+                displaced: Transition {
+                    NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                }
                 delegate: ItemDelegate {
                     width: ListView.view.width
                     highlighted: page.selectedFile === modelData.name
@@ -118,10 +124,12 @@ Item {
                         font.weight: parent.checked ? Font.DemiBold : Font.Normal
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
+                        Behavior on color { ColorAnimation { duration: AppTheme.motionFast } }
                     }
                     background: Rectangle {
                         color: parent.checked ? AppTheme.surfaceSelected : "transparent"
                         radius: AppTheme.radiusSmall
+                        Behavior on color { ColorAnimation { duration: AppTheme.motionFast } }
                     }
                 }
                 TabButton {
@@ -133,10 +141,12 @@ Item {
                         font.weight: parent.checked ? Font.DemiBold : Font.Normal
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
+                        Behavior on color { ColorAnimation { duration: AppTheme.motionFast } }
                     }
                     background: Rectangle {
                         color: parent.checked ? AppTheme.surfaceSelected : "transparent"
                         radius: AppTheme.radiusSmall
+                        Behavior on color { ColorAnimation { duration: AppTheme.motionFast } }
                     }
                 }
             }

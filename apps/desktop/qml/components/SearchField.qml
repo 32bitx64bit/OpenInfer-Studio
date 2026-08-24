@@ -18,6 +18,7 @@ TextField {
         color: AppTheme.surface
         border.width: 1
         border.color: root.activeFocus ? AppTheme.borderFocus : root.hovered ? AppTheme.textFaint : AppTheme.border
+        Behavior on border.color { ColorAnimation { duration: AppTheme.motionFast } }
         Text {
             anchors.left: parent.left
             anchors.leftMargin: 10

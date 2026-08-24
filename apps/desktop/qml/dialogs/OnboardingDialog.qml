@@ -35,6 +35,10 @@ Dialog {
     height: Math.min(480, (parent ? parent.height : 480) - 48)
     padding: 0
     closePolicy: Popup.NoAutoClose
+    transformOrigin: Item.Center
+    enter: DialogEnter {}
+    exit: DialogExit {}
+    Overlay.modal: Rectangle { color: AppTheme.overlay }
 
     background: Rectangle {
         color: AppTheme.bg
@@ -156,6 +160,14 @@ Dialog {
         onTriggered: root.refresh()
     }
 
+    NumberAnimation {
+        id: stepFade
+        property: "opacity"
+        to: 1
+        duration: AppTheme.motion
+        easing.type: Easing.OutCubic
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -190,6 +202,7 @@ Dialog {
                         Rectangle {
                             width: 28; height: 4; radius: 2
                             color: index <= root.step ? AppTheme.accent : AppTheme.border
+                            Behavior on color { ColorAnimation { duration: AppTheme.motion } }
                         }
                     }
                 }
@@ -197,10 +210,28 @@ Dialog {
         }
 
         StackLayout {
+            id: onboardingStack
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.margins: 16
             currentIndex: root.step
+            property bool ready: false
+            Component.onCompleted: ready = true
+            onCurrentIndexChanged: {
+                if (!ready)
+                    return
+                for (var i = 0; i < count; i++) {
+                    var p = itemAt(i)
+                    if (p)
+                        p.opacity = 1
+                }
+                var item = itemAt(currentIndex)
+                if (!item)
+                    return
+                item.opacity = 0
+                stepFade.target = item
+                stepFade.start()
+            }
 
             // Step 0 — Welcome
             ColumnLayout {

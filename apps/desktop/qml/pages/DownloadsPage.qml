@@ -14,7 +14,7 @@ Item {
 
     function reload() {
         api.get("/api/v1/downloads", function(st, data) {
-            if (st === 200) page.downloads = (data && data.downloads) || []
+            if (st === 200) page.downloads = AppTheme.keepRows(page.downloads, (data && data.downloads) || [])
         })
     }
 
@@ -62,6 +62,15 @@ Item {
             clip: true
             spacing: 8
             model: page.downloads
+            add: Transition {
+                ParallelAnimation {
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                    NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                }
+            }
+            displaced: Transition {
+                NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+            }
 
             EmptyState {
                 visible: page.downloads.length === 0
