@@ -14,6 +14,7 @@ Item {
     property var models: []
     property var runtimes: []
     property var jobs: []
+    property var liveProgress: ({})
     readonly property bool hasFinishedJobs: {
         for (var i = 0; i < jobs.length; i++) {
             var s = jobs[i] && jobs[i].state
@@ -59,13 +60,21 @@ Item {
     property string outputTensorType: ""
     property string tokenEmbeddingType: ""
     property string tensorTypesText: ""
-    property string adaptivePreset: ""
+    property bool dynamicEnabled: false
+    property string effort: "profiled" // fast|profiled|deep
+    property string quantTier: "q4" // q5|q4|q3|q2|custom
+    property string dynamicTargetBytesText: ""
+    property var adaptivePlan: null
     property bool unloadFirst: false
     property var loadedModels: []
     property string errorText: ""
     property string statusText: ""
     property bool hideQ8AndBelow: true
     property bool jobSubmitting: false
+    property string hfRepo: ""
+    property var hfPreview: null
+    property bool hfChecking: false
+    property string hfError: ""
 
     function prefillModel(id) {
         page.pendingSourceId = id || ""
@@ -99,18 +108,166 @@ Item {
                 if (page.runtimeId === "" && page.runtimes.length > 0)
                     page.runtimeId = page.runtimes[0].id
             }
+            // The model request may have run before the runtime arrived.
+            // Restarting the existing debounce refreshes preview and tools.
+            if (page.sourceId !== "" || page.hfIntent())
+                page.schedulePreview()
         })
         reloadJobs()
+        api.get("/api/v1/settings", function(st, data) {
+            if (st !== 200 || !data) return
+            if (page.hfRepo === "" && data["quantize.hf_repo"]) {
+                page.hfRepo = data["quantize.hf_repo"]
+                page.checkHFRepo()
+            }
+        })
     }
 
     function reloadJobs() {
         api.get("/api/v1/quantize/jobs", function(st, data) {
-            if (st === 200) page.jobs = (data && data.jobs) || []
+            if (st === 200) page.jobs = AppTheme.keepRows(page.jobs, (data && data.jobs) || [])
         })
+    }
+
+    function applyJobProgress(payload) {
+        if (!payload || !payload.id)
+            return
+        var next = {}
+        var old = page.liveProgress
+        for (var k in old)
+            next[k] = old[k]
+        next[payload.id] = payload
+        page.liveProgress = next
+    }
+
+    function jobProgressValue(job, persistedKey, liveKey, fallback) {
+        var live = page.liveProgress[job.id]
+        var key = liveKey || persistedKey
+        if (live && typeof live[key] !== "undefined")
+            return live[key]
+        if (job && typeof job[persistedKey] !== "undefined")
+            return job[persistedKey]
+        return fallback
+    }
+
+    function durationText(seconds) {
+        var s = Math.max(0, Math.round(Number(seconds) || 0))
+        if (s <= 0) return ""
+        if (s < 60) return s + " sec"
+        var minutes = Math.ceil(s / 60)
+        if (minutes < 60) return minutes + " min"
+        var hours = Math.floor(minutes / 60)
+        var rem = minutes % 60
+        return hours + " hr" + (rem > 0 ? " " + rem + " min" : "")
+    }
+
+    function stageLabel(kind, stage) {
+        var labels = {
+            "probe": "Inspecting source",
+            "download": "Downloading source",
+            "convert": "Converting to GGUF",
+            "scan": "Scanning model",
+            "imatrix": "Building importance matrix",
+            "combine_imatrix": "Combining importance matrices",
+            "adaptive": "Optimizing tensor mix",
+            "repair_source": "Repairing source tensors",
+            "analyze": "Analyzing source tensors",
+            "anchor": "Planning anchors",
+            "solve": "Solving bit allocation",
+            "validate": "Validating against source (KLD)",
+            "search": "Preparing output",
+            "finalize": "Publishing model",
+            "quantize_projector": "Quantizing projector",
+            "quantize_draft": "Quantizing draft model",
+            "validate_baseline": "Evaluating baseline",
+            "validate_candidate": "Evaluating quantized model"
+        }
+        if (stage === "quantize")
+            return kind === "adaptive_quantize" ? "Quantizing anchors" : "Quantizing weights"
+        return labels[stage] || String(stage || "Running").replace(/_/g, " ")
     }
 
     function clearJobHistory() {
         api.post("/api/v1/quantize/jobs/clear-history", {}, function() { page.reloadJobs() })
+    }
+
+    function effortHint(id) {
+        var hints = {
+            "fast": "Heuristic solve + mandatory 2-chunk KLD validation",
+            "profiled": "Exact-loss solve with ProbeKLD + 4-chunk KLD validation",
+            "deep": "Exact-loss solve with ProbeKLD + 8-chunk KLD validation"
+        }
+        return hints[id] || ""
+    }
+
+    function tierHint(id) {
+        var hints = {
+            "q5": "≈5.5 BPW — highest Dynamic quality",
+            "q4": "≈4.5 BPW — balanced default",
+            "q3": "≈3.5 BPW — compact",
+            "q2": "≈2.5 BPW — smallest",
+            "custom": "Target an exact byte budget"
+        }
+        return hints[id] || ""
+    }
+
+    function dynamicTargetBytesValue() {
+        var value = Number(page.dynamicTargetBytesText)
+        return isFinite(value) && value > 0 ? Math.round(value) : 0
+    }
+
+    function gateText(result) {
+        var gates = result && result.gates
+        if (!gates) return ""
+        var items = gates
+        if (!Array.isArray(gates)) {
+            items = []
+            for (var key in gates) {
+                var g = gates[key]
+                if (g && typeof g === "object") {
+                    var copy = {}
+                    for (var prop in g) copy[prop] = g[prop]
+                    if (!copy.name) copy.name = key
+                    items.push(copy)
+                } else {
+                    items.push({ "name": key, "pass": !!g })
+                }
+            }
+        }
+        var bits = []
+        for (var i = 0; i < items.length; i++) {
+            var item = items[i]
+            if (!item || typeof item !== "object") continue
+            var name = item.metric || item.name || item.id || item.gate || "gate"
+            var passed = typeof item.pass !== "undefined" ? item.pass
+                : (typeof item.passed !== "undefined" ? item.passed
+                : (typeof item.ok !== "undefined" ? item.ok : undefined))
+            if (typeof passed === "string") {
+                var status = passed.toLowerCase()
+                if (["pass", "passed", "ok", "true"].indexOf(status) >= 0) passed = true
+                else if (["fail", "failed", "false"].indexOf(status) >= 0) passed = false
+                else passed = undefined
+            } else if (typeof passed === "number") {
+                passed = passed !== 0
+            }
+            var measured = []
+            var value = typeof item.value !== "undefined" ? item.value
+                : (typeof item.absolute !== "undefined" ? item.absolute : undefined)
+            if (item.measured === true && typeof value !== "undefined")
+                measured.push("value " + value)
+            else if (typeof item.measured === "number" || typeof item.measured === "string")
+                measured.push("measured " + item.measured)
+            else if (typeof value !== "undefined" && value !== null)
+                measured.push("value " + value)
+            for (var m in item) {
+                if (["metric", "name", "id", "gate", "pass", "passed", "ok", "measured", "value", "absolute"].indexOf(m) >= 0) continue
+                if (typeof item[m] === "number") measured.push(m + " " + item[m])
+            }
+            var bit = name + (typeof passed === "undefined" ? "" : (passed ? " ✓" : " ✗"))
+            if (measured.length > 0) bit += " (" + measured.join(", ") + ")"
+            bits.push(bit)
+        }
+        return bits.join(" · ")
     }
 
     function reloadIMatrices() {
@@ -225,19 +382,15 @@ Item {
 
     function applyQuality(q) {
         page.quality = q
-        page.adaptivePreset = ""
+        page.dynamicEnabled = false
         if (q === "best") page.ftype = "Q8_0"
         else if (q === "balanced") page.ftype = "Q4_K_M"
         else if (q === "smaller") {
             page.ftype = page.pickType(["IQ4_XS", "Q3_K_M", "Q4_K_S"])
             page.generateIMatrix = page.isIQ(page.ftype)
             page.calibrationPreset = "standard"
-        } else if (q === "adaptive") {
-            page.adaptivePreset = "balanced"
-            page.ftype = "Q4_K_M"
-            page.generateIMatrix = true
         }
-        if (page.quality !== "smaller" && page.quality !== "adaptive" && !isIQ(page.ftype))
+        if (page.quality !== "smaller" && !isIQ(page.ftype))
             page.generateIMatrix = page.generateIMatrix && page.quality === "custom"
         schedulePreview()
     }
@@ -249,11 +402,15 @@ Item {
             if (s !== "") tensors.push(s)
         })
         var kind = "quantize"
-        if (page.adaptivePreset !== "") kind = "adaptive_quantize"
+        if (page.dynamicEnabled) kind = "adaptive_quantize"
+        if (page.useFromHF()) {
+            kind = "from_hf"
+        }
         return {
             "kind": kind,
             "runtime_id": page.runtimeId,
-            "source_model_id": page.sourceId,
+            "source_model_id": page.useFromHF() ? ((page.hfPreview && page.hfPreview.reused_model_id) || "") : page.sourceId,
+            "hf_repo": page.useFromHF() ? String(page.hfRepo || "").trim() : "",
             "ftype": page.ftype,
             "output_name": page.outputName,
             "threads": page.threads,
@@ -283,9 +440,10 @@ Item {
             "draft_model_id": page.draftModelId,
             "quantize_draft": page.quantizeDraft,
             "draft_ftype": page.draftFType,
-            "adaptive_preset": page.adaptivePreset,
-            "target_bpw": 0,
-            "target_bytes": 0,
+            "adaptive_preset": "",
+            "effort": page.dynamicEnabled ? page.effort : "",
+            "quant_tier": page.dynamicEnabled ? page.quantTier : "",
+            "target_bytes": (page.dynamicEnabled && page.quantTier === "custom") ? page.dynamicTargetBytesValue() : 0,
             "acknowledge_requantize": page.ackRequantize,
             "acknowledge_experimental": page.ackExperimental,
             "unload_first": page.unloadFirst
@@ -297,8 +455,23 @@ Item {
     }
 
     function runPreview() {
-        if (page.sourceId === "") {
-            page.preview = null
+        if (page.sourceId === "" || page.hfIntent()) {
+            if (page.hfIntent()) {
+                page.preview = null
+                page.adaptivePlan = null
+                page.companions = []
+                page.checkHFRepo()
+            } else {
+                page.preview = null
+                page.adaptivePlan = null
+            }
+            if (page.runtimeId !== "") {
+                api.get("/api/v1/quantize/types?runtime_id=" + encodeURIComponent(page.runtimeId), function(st, data) {
+                    if (st !== 200 || !data) return
+                    page.types = data.types || []
+                    page.tools = data.tools || {}
+                })
+            }
             return
         }
         api.post("/api/v1/quantize/preview", requestBody(), function(st, data) {
@@ -308,6 +481,7 @@ Item {
             }
             page.errorText = ""
             page.preview = data.preview || null
+            page.adaptivePlan = data.adaptive || null
             page.companions = data.companions || []
             page.types = data.types || []
             page.tools = data.tools || {}
@@ -346,34 +520,136 @@ Item {
         })
     }
 
+    function hfIntent() {
+        return String(page.hfRepo || "").trim() !== ""
+    }
+
+    function useFromHF() {
+        return page.hfIntent() && page.hfPreview && page.hfPreview.compatible
+    }
+
+    function sourceModeLabel() {
+        if (page.useFromHF()) {
+            var repo = String(page.hfRepo || "").trim()
+            if (page.hfPreview && page.hfPreview.reused_model_id)
+                return "Using Hugging Face " + repo + " — already in the library, skip convert"
+            return "Using Hugging Face " + repo + " — convert to GGUF, then quantize. Library model ignored."
+        }
+        if (page.hfIntent())
+            return "Hugging Face repo is set. This job will not use the library model. Check the repo to continue, or clear the field."
+        var m = page.sourceModel()
+        if (m)
+            return "Using library model " + (m.alias || m.id)
+        return "Pick a library model, or paste a Hugging Face repo."
+    }
+
+    function clearHFRepo() {
+        page.hfRepo = ""
+        page.hfPreview = null
+        page.hfError = ""
+        hfField.text = ""
+        page.schedulePreview()
+    }
+
+    function checkHFRepo() {
+        var repo = String(page.hfRepo || "").trim()
+        if (repo === "") {
+            page.hfError = "Paste an author/model id"
+            page.hfPreview = null
+            return
+        }
+        previewTimer.stop()
+        page.hfChecking = true
+        page.hfError = ""
+        var tier = page.dynamicEnabled ? page.quantTier : ""
+        var targetBytes = (page.dynamicEnabled && page.quantTier === "custom") ? page.dynamicTargetBytesValue() : 0
+        var url = "/api/v1/quantize/from-hf/preview?repo=" + encodeURIComponent(repo)
+            + "&dynamic=" + (page.dynamicEnabled ? "true" : "false")
+            + "&effort=" + encodeURIComponent(page.dynamicEnabled ? page.effort : "")
+            + "&quant_tier=" + encodeURIComponent(tier)
+            + "&target_bytes=" + encodeURIComponent(String(targetBytes))
+            + "&generate_imatrix=" + (page.generateIMatrix ? "true" : "false")
+        api.get(url, function(st, data) {
+            page.hfChecking = false
+            if (st !== 200 || !data) {
+                page.hfPreview = null
+                page.hfError = (data && (data.detail || data.error)) || ("HTTP " + st)
+                return
+            }
+            page.hfPreview = data
+            if (!data.compatible)
+                page.hfError = data.reason || "Not convertible"
+            else {
+                page.hfError = ""
+                api.put("/api/v1/settings/quantize.hf_repo", { "value": repo }, function() {})
+            }
+        })
+    }
+
+    function hfStatusText() {
+        var p = page.hfPreview
+        if (!p) return ""
+        var bits = []
+        if (p.compatible) bits.push("Compatible")
+        if (p.architecture) bits.push(p.architecture)
+        if (p.weight_dtype) bits.push(p.weight_dtype)
+        if (p.snapshot_bytes) bits.push("download " + AppTheme.bytes(p.snapshot_bytes))
+        if (p.estimated_gguf_bytes) bits.push("GGUF ~" + AppTheme.bytes(p.estimated_gguf_bytes))
+        if (p.disk_peak_bytes) bits.push("disk peak ~" + AppTheme.bytes(p.disk_peak_bytes))
+        if (p.reused_model_id)
+            bits.push("library already has " + (p.reused_alias || "BF16/F16") + " — skip download")
+        return bits.join(" · ")
+    }
+
     function startDisabledReason() {
-        if (page.sourceId === "") return "Pick a source model"
+        if (page.hfIntent()) {
+            if (page.hfChecking) return "Checking Hugging Face repo…"
+            if (!page.hfPreview) return "Check the Hugging Face repo first"
+            if (!page.hfPreview.compatible) return page.hfPreview.reason || page.hfError || "Repo is not convertible"
+        } else if (page.sourceId === "") {
+            return "Pick a source model"
+        }
         if (!page.quantizePresent()) return "This runtime has no llama-quantize next to llama-server"
         var p = page.preview
-        if (p && p.blockers && p.blockers.length) return p.blockers[0]
-        if (p && !p.high_precision_source && (!page.allowRequantize || !page.ackRequantize))
-            return "Requantize is blocked until you enable it in Advanced"
+        if (!page.useFromHF()) {
+            if (p && p.blockers && p.blockers.length) return p.blockers[0]
+            if (p && !p.high_precision_source && (!page.allowRequantize || !page.ackRequantize))
+                return "Requantize is blocked until you enable it in Advanced"
+        }
         var meta = page.ftypeMeta(page.ftype)
         if (meta && meta.experimental && !page.ackExperimental)
             return "Experimental type — confirm in Advanced"
         var needIM = (p && p.imatrix_required) || page.isIQ(page.ftype)
-        if (needIM && !page.generateIMatrix && page.imatrixId === "")
+        if (page.dynamicEnabled) needIM = true
+        if (page.dynamicEnabled && page.quantTier === "custom" && page.dynamicTargetBytesValue() <= 0)
+            return "Enter a positive target byte budget for Custom"
+        if (needIM && !page.generateIMatrix && page.imatrixId === "" && !page.useFromHF())
             return "This type needs an importance matrix"
         if (needIM && page.generateIMatrix && !page.imatrixPresent())
             return "This runtime has no llama-imatrix"
-        if (p && !p.ram_ok && !page.ackRAM)
+        if (p && !p.ram_ok && !page.ackRAM && !page.useFromHF())
             return "Not enough free RAM — confirm in Advanced to continue anyway"
+        if (page.dynamicEnabled && !page.hasFlag("--tensor-type-file") && !page.hasFlag("--tensor-type"))
+            return "This runtime cannot write per-tensor types"
         return ""
     }
 
     Timer { id: previewTimer; interval: 250; onTriggered: page.runPreview() }
+    Timer { id: jobThrottle; interval: 800; onTriggered: page.reloadJobs() }
 
     Connections {
         target: page.events
         function onEventReceived(name, payload) {
-            if (name === "quant.progress" || name === "quant.state_changed")
+            if (name === "quant.progress") {
+                page.applyJobProgress(payload)
+                if (!jobThrottle.running)
+                    jobThrottle.start()
+            } else if (name === "quant.state_changed") {
+                page.applyJobProgress(payload)
                 page.reloadJobs()
-            if (name === "library.scanned" || name === "library.model_imported")
+            }
+            if (name === "library.scanned" || name === "library.model_imported"
+                    || name === "library.model_updated")
                 page.reload()
         }
     }
@@ -441,14 +717,27 @@ Item {
 
             SectionCard {
                 title: "Source"
-                subtitle: "Prefer F16, BF16, or F32. Requantizing a smaller type loses quality."
+                subtitle: page.hfIntent()
+                           ? "Hugging Face repo takes priority over the library combo."
+                           : "A library F16/BF16/F32, or a Hugging Face safetensors repo to convert first."
                 Layout.fillWidth: true
+                Label {
+                    text: page.sourceModeLabel()
+                    color: page.useFromHF() ? AppTheme.success
+                         : page.hfIntent() ? AppTheme.warning
+                         : AppTheme.text
+                    font.weight: Font.DemiBold
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
                 FormField {
                     Layout.fillWidth: true
-                    label: "Model"
+                    label: page.hfIntent() ? "Library model (ignored)" : "Library model"
+                    supported: !page.hfIntent()
                     AppComboBox {
                         Layout.fillWidth: true
                         width: parent.width
+                        enabled: !page.hfIntent()
                         model: page.sourceChoices()
                         textRole: "label"
                         currentIndex: {
@@ -458,6 +747,7 @@ Item {
                             return 0
                         }
                         onActivated: function(i) {
+                            if (page.hfIntent()) return
                             var choices = page.sourceChoices()
                             if (i < 0 || i >= choices.length) return
                             page.sourceId = choices[i].id
@@ -466,11 +756,72 @@ Item {
                         }
                     }
                 }
+                FormField {
+                    Layout.fillWidth: true
+                    label: "Hugging Face repo"
+                    hint: page.hfIntent()
+                          ? "Clear this field to quantize the library model instead."
+                          : "Paste author/model to convert BF16/F16 safetensors, then quantize. Example: Blackfrost-AI/Muse-Glimmer-30B-Abliterated-BF16"
+                    RowLayout {
+                        Layout.fillWidth: true
+                        width: parent.width
+                        AppTextField {
+                            id: hfField
+                            Layout.fillWidth: true
+                            placeholderText: "author/model"
+                            text: page.hfRepo
+                            onTextEdited: {
+                                page.hfRepo = text
+                                page.hfPreview = null
+                                page.hfError = ""
+                                page.schedulePreview()
+                            }
+                            Keys.onReturnPressed: page.checkHFRepo()
+                        }
+                        AppButton {
+                            text: page.hfChecking ? "Checking…" : "Check repo"
+                            enabled: !page.hfChecking && page.hfIntent()
+                            onClicked: page.checkHFRepo()
+                        }
+                        AppButton {
+                            text: "Clear"
+                            flat: true
+                            visible: page.hfIntent()
+                            onClicked: page.clearHFRepo()
+                        }
+                    }
+                }
+                Label {
+                    visible: page.hfStatusText() !== "" && page.hfError === ""
+                    text: page.hfStatusText()
+                    color: page.hfPreview && page.hfPreview.compatible ? AppTheme.success : AppTheme.textDim
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                    font.pixelSize: AppTheme.fontSmall
+                }
+                Label {
+                    visible: page.hfError !== ""
+                    text: page.hfError
+                    color: AppTheme.danger
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                    font.pixelSize: AppTheme.fontSmall
+                }
+                Repeater {
+                    model: (page.hfPreview && page.hfPreview.warnings) || []
+                    Label {
+                        text: modelData
+                        color: AppTheme.warning
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                        font.pixelSize: AppTheme.fontSmall
+                    }
+                }
                 AppCheckBox {
                     text: "Hide Q8 and below"
                     checked: page.hideQ8AndBelow
                     ToolTip.visible: hovered
-                    ToolTip.text: "Show only F32, F16, and BF16 sources. Q8, K-quants, IQ, and Unsloth UD files are hidden."
+                    ToolTip.text: "Show only F32, F16, and BF16 sources. Q8, K-quants, IQ, Unsloth UD, and OpenInfer OID files are hidden."
                     onToggled: {
                         page.hideQ8AndBelow = checked
                         if (checked) {
@@ -492,7 +843,7 @@ Item {
                     font.pixelSize: AppTheme.fontSmall
                 }
                 Label {
-                    visible: !!page.sourceModel()
+                    visible: !!page.sourceModel() && !page.hfIntent()
                     text: {
                         var m = page.sourceModel()
                         if (!m) return ""
@@ -505,7 +856,7 @@ Item {
             }
 
             SectionCard {
-                visible: page.companions.length > 0
+                visible: page.companions.length > 0 && !page.hfIntent()
                 title: "Related files"
                 Layout.fillWidth: true
                 Repeater {
@@ -674,7 +1025,11 @@ Item {
                     text: "Generate a new imatrix first (then quantize)"
                     checked: page.generateIMatrix
                     enabled: page.imatrixPresent()
-                    onToggled: { page.generateIMatrix = checked; if (checked) page.imatrixId = "" }
+                    onToggled: {
+                        page.generateIMatrix = checked
+                        if (checked) page.imatrixId = ""
+                        page.schedulePreview()
+                    }
                 }
                 FormField {
                     visible: !page.generateIMatrix
@@ -711,7 +1066,7 @@ Item {
                         visible: page.generateIMatrix
                         label: "Calibration"
                         AppComboBox {
-                            model: ["quick", "standard", "thorough"]
+                            model: ["quick", "standard", "thorough", "research"]
                             currentIndex: Math.max(0, model.indexOf(page.calibrationPreset))
                             onActivated: function(i) { page.calibrationPreset = model[i] }
                         }
@@ -740,9 +1095,18 @@ Item {
             }
 
             ColumnLayout {
+                id: advancedSection
                 visible: advancedToggle.checked
                 Layout.fillWidth: true
                 spacing: AppTheme.gap
+                opacity: 1
+                onVisibleChanged: {
+                    if (visible) {
+                        opacity = 0
+                        Qt.callLater(function() { advancedSection.opacity = 1 })
+                    }
+                }
+                Behavior on opacity { NumberAnimation { duration: AppTheme.motion; easing.type: Easing.OutCubic } }
 
                 SectionCard {
                     title: "Options"
@@ -882,43 +1246,140 @@ Item {
                         checked: page.parseSpecial
                         onToggled: page.parseSpecial = checked
                     }
+                    AppCheckBox {
+                        text: "Include output tensor in the importance matrix"
+                        checked: page.processOutput
+                        onToggled: page.processOutput = checked
+                    }
                 }
 
                 SectionCard {
-                    title: "OpenInfer Adaptive"
-                    subtitle: "Mixed precision from tensor-name heuristics and optional imatrix statistics."
+                    title: "OpenInfer Dynamic"
+                    subtitle: "Model-specific activation evidence places bits under a compression budget. Effort controls how thoroughly the assignment is measured before publish; the size goal controls compression. Every effort, including Fast, validates the quantized model against the source before publishing."
                     Layout.fillWidth: true
                     RowLayout {
+                        Label {
+                            text: "Effort"
+                            color: AppTheme.textDim
+                        }
                         Repeater {
                             model: [
-                                { "id": "quality", "label": "Adaptive Quality" },
-                                { "id": "balanced", "label": "Adaptive Balanced" },
-                                { "id": "compact", "label": "Adaptive Compact" }
+                                { "id": "fast", "label": "Fast" },
+                                { "id": "profiled", "label": "Profiled" },
+                                { "id": "deep", "label": "Deep" }
                             ]
                             delegate: AppButton {
                                 text: modelData.label
-                                primary: page.adaptivePreset === modelData.id
+                                primary: page.dynamicEnabled && page.effort === modelData.id
+                                enabled: !!(page.tools && page.tools.perplexity && page.tools.perplexity.present)
                                 onClicked: {
-                                    page.adaptivePreset = modelData.id
+                                    page.dynamicEnabled = true
+                                    page.effort = modelData.id
                                     page.quality = "adaptive"
                                     page.generateIMatrix = true
+                                    page.parseSpecial = true
+                                    page.processOutput = true
+                                    page.calibrationPreset = modelData.id === "fast" ? "quick" : "research"
                                     page.schedulePreview()
                                 }
+                                ToolTip.visible: hovered
+                                ToolTip.text: enabled ? page.effortHint(modelData.id)
+                                    : "OpenInfer Dynamic requires llama-perplexity beside this runtime."
                             }
                         }
                         AppButton {
                             text: "Off"
                             flat: true
-                            visible: page.adaptivePreset !== ""
-                            onClicked: { page.adaptivePreset = ""; page.quality = "custom"; page.schedulePreview() }
+                            visible: page.dynamicEnabled
+                            onClicked: { page.dynamicEnabled = false; page.adaptivePlan = null; page.quality = "custom"; page.schedulePreview() }
                         }
                     }
                     Label {
-                        visible: !page.hasFlag("--tensor-type-file")
-                        text: "This runtime’s llama-quantize does not advertise --tensor-type-file, so Adaptive cannot run."
+                        visible: page.dynamicEnabled
+                        text: page.effortHint(page.effort)
+                            + (page.effort === "profiled" ? " (default)" : "")
+                        color: AppTheme.textDim
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                        font.pixelSize: AppTheme.fontSmall
+                    }
+                    FormField {
+                        visible: page.dynamicEnabled
+                        Layout.fillWidth: true
+                        label: "Compression target"
+                        hint: page.tierHint(page.quantTier)
+                        ColumnLayout {
+                            width: parent.width
+                            spacing: AppTheme.gap
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Repeater {
+                                    model: [
+                                        { "id": "q5", "label": "Q5" },
+                                        { "id": "q4", "label": "Q4" },
+                                        { "id": "q3", "label": "Q3" },
+                                        { "id": "q2", "label": "Q2" },
+                                        { "id": "custom", "label": "Custom" }
+                                    ]
+                                    delegate: AppButton {
+                                        text: modelData.label
+                                        primary: page.quantTier === modelData.id
+                                        onClicked: {
+                                            page.quantTier = modelData.id
+                                            page.schedulePreview()
+                                        }
+                                    }
+                                }
+                            }
+                            AppTextField {
+                                visible: page.quantTier === "custom"
+                                Layout.fillWidth: true
+                                placeholderText: "Bytes, e.g. 4294967296"
+                                text: page.dynamicTargetBytesText
+                                inputMethodHints: Qt.ImhDigitsOnly
+                                onTextEdited: {
+                                    page.dynamicTargetBytesText = text
+                                    page.schedulePreview()
+                                }
+                            }
+                        }
+                    }
+                    Label {
+                        visible: page.dynamicEnabled && page.adaptivePlan
+                        text: {
+                            var p = page.adaptivePlan
+                            if (!p) return ""
+                            var mix = p.mix || {}
+                            var parts = []
+                            for (var k in mix)
+                                parts.push(mix[k] + "× " + String(k).toUpperCase())
+                            parts.sort()
+                            var extra = parts.length ? " · " + parts.join(", ") : ""
+                            var budget = p.budget_exceeded
+                                       ? " · minimum legal mix is " + AppTheme.bytes(p.over_budget_bytes) + " over target"
+                                       : ""
+                            return (p.display || p.label) + " · ~" + AppTheme.bytes(p.estimated_bytes) + budget + extra
+                        }
+                        color: AppTheme.textDim
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                        font.pixelSize: AppTheme.fontSmall
+                    }
+                    Label {
+                        visible: !page.hasFlag("--tensor-type-file") && !page.hasFlag("--tensor-type")
+                        text: "This runtime’s llama-quantize does not advertise per-tensor overrides, so OpenInfer Dynamic cannot run."
                         color: AppTheme.warning
                         wrapMode: Text.WordWrap
                         Layout.fillWidth: true
+                    }
+                    Label {
+                        visible: page.dynamicEnabled && page.effort === "deep"
+                        text: "Deep verification uses a disjoint held-out corpus and temporary baseline logits. It increases time and temporary disk use, not final GGUF size."
+                        color: AppTheme.warning
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                        font.pixelSize: AppTheme.fontSmall
                     }
                 }
             }
@@ -933,7 +1394,7 @@ Item {
                     visible: page.startDisabledReason() !== ""
                 }
                 AppButton {
-                    text: page.jobSubmitting ? "Starting…" : "Start"
+                    text: page.jobSubmitting ? "Starting…" : (page.hfIntent() ? "Convert & quantize" : "Start")
                     primary: true
                     enabled: !page.jobSubmitting && page.startDisabledReason() === ""
                     onClicked: page.startJob()
@@ -980,16 +1441,95 @@ Item {
                                     Layout.fillWidth: true
                                 }
                                 Label {
-                                    text: modelData.stage || modelData.state
+                                    text: {
+                                        if (modelData.state === "queued") return "Queued"
+                                        var live = page.liveProgress[modelData.id]
+                                        var stage = (live && live.stage) || modelData.stage || modelData.state
+                                        var label = page.stageLabel(modelData.kind, stage)
+                                        if (modelData.state === "paused")
+                                            return stage && stage !== "paused" ? ("Paused · " + label) : "Paused"
+                                        if (modelData.state === "pausing")
+                                            return "Pausing…"
+                                        if (modelData.state === "canceling") return "Canceling…"
+                                        var p = page.jobProgressValue(modelData, "stage_progress", "stage_progress", 0)
+                                        return modelData.state === "running" ? (label + " · " + Math.round(p * 100) + "%") : label
+                                    }
                                     color: AppTheme.textDim
                                     font.pixelSize: AppTheme.fontSmall
                                 }
                             }
                             AppProgressBar {
+                                visible: modelData.state !== "queued"
                                 Layout.fillWidth: true
                                 Layout.preferredHeight: 8
                                 from: 0; to: 1
-                                value: modelData.progress || 0
+                                value: {
+                                    var live = page.liveProgress[modelData.id]
+                                    if (live && typeof live.progress === "number")
+                                        return live.progress
+                                    return modelData.progress || 0
+                                }
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label {
+                                    text: {
+                                        var p = page.jobProgressValue(modelData, "progress", "progress", 0)
+                                        return "Overall " + Math.round(p * 100) + "%"
+                                    }
+                                    color: AppTheme.textDim
+                                    font.pixelSize: AppTheme.fontSmall
+                                }
+                                Item { Layout.fillWidth: true }
+                                Label {
+                                    visible: modelData.state === "running"
+                                        && page.jobProgressValue(modelData, "eta_seconds", "eta_seconds", 0) > 0
+                                    text: "Estimated finish in " + page.durationText(
+                                        page.jobProgressValue(modelData, "eta_seconds", "eta_seconds", 0))
+                                    color: AppTheme.accent
+                                    font.pixelSize: AppTheme.fontSmall
+                                }
+                            }
+                            AppProgressBar {
+                                visible: modelData.state !== "queued"
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 5
+                                from: 0; to: 1
+                                value: page.jobProgressValue(modelData, "stage_progress", "stage_progress", 0)
+                            }
+                            RowLayout {
+                                visible: modelData.state !== "queued"
+                                Layout.fillWidth: true
+                                Label {
+                                    text: {
+                                        var current = page.jobProgressValue(modelData, "progress_current", "current", 0)
+                                        var total = page.jobProgressValue(modelData, "progress_total", "total", 0)
+                                        var estimated = page.jobProgressValue(modelData, "estimated", "estimated", false)
+                                        var text = "Stage " + Math.round(page.jobProgressValue(modelData, "stage_progress", "stage_progress", 0) * 100) + "%"
+                                        if (total > 0) text += " · " + current + " / " + total
+                                        if (estimated) text += " · estimated"
+                                        return text
+                                    }
+                                    color: AppTheme.textDim
+                                    font.pixelSize: AppTheme.fontSmall
+                                }
+                                Item { Layout.fillWidth: true }
+                                Label {
+                                    visible: modelData.state === "running"
+                                        && page.jobProgressValue(modelData, "stage_eta_seconds", "stage_eta_seconds", 0) > 0
+                                    text: page.durationText(page.jobProgressValue(modelData, "stage_eta_seconds", "stage_eta_seconds", 0)) + " left in stage"
+                                    color: AppTheme.textDim
+                                    font.pixelSize: AppTheme.fontSmall
+                                }
+                            }
+                            Label {
+                                visible: modelData.state === "running"
+                                    && String(page.jobProgressValue(modelData, "progress_message", "message", "")) !== ""
+                                text: String(page.jobProgressValue(modelData, "progress_message", "message", ""))
+                                color: AppTheme.textDim
+                                font.pixelSize: AppTheme.fontSmall
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
                             }
                             Label {
                                 visible: !!(modelData.state === "complete" && modelData.result && modelData.result.alias)
@@ -999,24 +1539,87 @@ Item {
                                 Layout.fillWidth: true
                             }
                             Label {
-                                visible: !!(modelData.error && modelData.error !== "")
-                                text: modelData.error || ""
-                                color: AppTheme.danger
+                                visible: !!(modelData.state === "complete" && modelData.result
+                                    && modelData.result.gates_pass === false)
+                                text: "Quality check exceeded a limit. The model was still added to your library."
+                                color: AppTheme.warning
+                                font.weight: Font.DemiBold
                                 wrapMode: Text.WordWrap
                                 Layout.fillWidth: true
+                            }
+                            Label {
+                                visible: !!(modelData.state === "complete" && modelData.result
+                                    && (modelData.result.effort || modelData.result.gates))
+                                text: {
+                                    var r = modelData.result || {}
+                                    var parts = []
+                                    if (r.effort) parts.push("Effort " + r.effort)
+                                    var gates = page.gateText(r)
+                                    if (gates !== "") parts.push(gates)
+                                    return parts.join(" · ")
+                                }
+                                color: (modelData.result && modelData.result.gates_pass === false)
+                                    ? AppTheme.warning : AppTheme.textDim
+                                wrapMode: Text.WordWrap
+                                Layout.fillWidth: true
+                                font.pixelSize: AppTheme.fontSmall
+                            }
+                            Repeater {
+                                model: (modelData.result && modelData.result.warnings) || []
+                                delegate: Label {
+                                    text: "• " + modelData
+                                    color: AppTheme.warning
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                    font.pixelSize: AppTheme.fontSmall
+                                }
+                            }
+                            Label {
+                                visible: {
+                                    var err = modelData.error || (modelData.result && modelData.result.error) || ""
+                                    return err !== ""
+                                }
+                                text: {
+                                    var err = modelData.error || (modelData.result && modelData.result.error) || ""
+                                    return err
+                                }
+                                color: AppTheme.danger
+                                font.weight: Font.DemiBold
+                                wrapMode: Text.WordWrap
+                                Layout.fillWidth: true
+                            }
+                            Label {
+                                visible: modelData.state === "paused"
+                                text: "GPU is free. Resume this job when you want it to continue from the last checkpoint."
+                                color: AppTheme.warning
+                                wrapMode: Text.WordWrap
+                                Layout.fillWidth: true
+                                font.pixelSize: AppTheme.fontSmall
                             }
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 6
                                 Item { Layout.fillWidth: true }
                                 AppButton {
-                                    visible: ["queued", "running", "canceling"].indexOf(modelData.state) >= 0
+                                    visible: ["queued", "running"].indexOf(modelData.state) >= 0
+                                    text: "Pause"
+                                    flat: true
+                                    onClicked: page.api.post("/api/v1/quantize/jobs/" + modelData.id + "/pause", {}, function() { page.reloadJobs() })
+                                }
+                                AppButton {
+                                    visible: modelData.state === "paused"
+                                    text: "Resume"
+                                    flat: true
+                                    onClicked: page.api.post("/api/v1/quantize/jobs/" + modelData.id + "/resume", {}, function() { page.reloadJobs() })
+                                }
+                                AppButton {
+                                    visible: ["queued", "running", "canceling", "pausing", "paused"].indexOf(modelData.state) >= 0
                                     text: "Cancel"
                                     flat: true
                                     onClicked: page.api.post("/api/v1/quantize/jobs/" + modelData.id + "/cancel", {}, function() { page.reloadJobs() })
                                 }
                                 AppButton {
-                                    visible: ["complete", "failed", "canceled"].indexOf(modelData.state) >= 0
+                                    visible: ["complete", "failed", "canceled", "paused"].indexOf(modelData.state) >= 0
                                     text: "Remove"
                                     flat: true
                                     onClicked: page.api.del("/api/v1/quantize/jobs/" + modelData.id, function() { page.reloadJobs() })
