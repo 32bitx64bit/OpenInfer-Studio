@@ -1,6 +1,7 @@
 package instances
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -12,60 +13,67 @@ import (
 // LoadSettings is the user-facing model-load configuration.
 // Numeric zero values select automatic defaults unless noted.
 type LoadSettings struct {
-	ContextLength   int     `json:"context_length"`  // 0 = model default
-	GPUOffload      string  `json:"gpu_offload"`     // auto|all|none|custom
-	GPULayers       int     `json:"gpu_layers"`      // used when GPUOffload == custom
-	Threads         int     `json:"threads"`         // 0 = auto
-	FlashAttention  string  `json:"flash_attention"` // auto|on|off
-	Parallel        int     `json:"parallel"`        // 0 = default 1
-	BatchSize       int     `json:"batch_size"`
-	UBatchSize      int     `json:"ubatch_size"`
-	CacheTypeK      string  `json:"cache_type_k"` // "" = default
-	CacheTypeV      string  `json:"cache_type_v"`
-	NoMmap          bool    `json:"no_mmap"`
-	MLock           bool    `json:"mlock"`
-	NUMA            string  `json:"numa"`
-	MainGPU         int     `json:"main_gpu"` // -1 = unset
-	Device          string  `json:"device"`
-	SplitMode       string  `json:"split_mode"`
-	TensorSplit     string  `json:"tensor_split"`
-	ContBatching    *bool   `json:"cont_batching"`
-	CacheReuse      int     `json:"cache_reuse"`
-	ThreadsBatch    int     `json:"threads_batch"` // 0 = same as --threads
-	Prio            int     `json:"prio"`          // -2 = unset; -1..3 = llama --prio
-	Poll            int     `json:"poll"`          // -1 = unset; 0..100 = --poll
-	CPUMoe          bool    `json:"cpu_moe"`
-	NCPUMoe         int     `json:"n_cpu_moe"`  // 0 = unset
-	KVOffload       string  `json:"kv_offload"` // ""|on|off → --kv-offload / --no-kv-offload
-	OpOffload       string  `json:"op_offload"` // ""|on|off → --op-offload / --no-op-offload
-	KVUnified       string  `json:"kv_unified"` // ""|on|off → --kv-unified / --no-kv-unified
-	SWAFull         bool    `json:"swa_full"`
-	Fit             string  `json:"fit"` // ""|on|off → --fit
-	NoWarmup        bool    `json:"no_warmup"`
-	RopeScaling     string  `json:"rope_scaling"`
-	RopeFreqBase    float64 `json:"rope_freq_base"`
-	RopeFreqScale   float64 `json:"rope_freq_scale"`
-	SleepIdleSec    int     `json:"sleep_idle_seconds"`
-	Alias           string  `json:"alias"`
-	MediaPath       string  `json:"media_path"`
-	ChatTemplate    string  `json:"chat_template"`
-	Jinja           *bool   `json:"jinja"`
-	NoMmproj        bool    `json:"no_mmproj"` // skip paired multimodal projector
-	NoMmprojOffload bool    `json:"no_mmproj_offload"`
-	LoraPath        string  `json:"lora_path"`
-	LoraScale       float64 `json:"lora_scale"`
-	DraftModel      string  `json:"draft_model"` // path to draft GGUF
-	DraftMax        int     `json:"draft_max"`   // max draft tokens (0 = runtime default)
-	DraftMin        int     `json:"draft_min"`   // min draft tokens (0 = runtime default)
-	SpecType        string  `json:"spec_type"`   // e.g. draft-simple; empty = auto when draft set
+	ContextLength  int     `json:"context_length"`  // 0 = model default
+	GPUOffload     string  `json:"gpu_offload"`     // auto|all|none|custom
+	GPULayers      int     `json:"gpu_layers"`      // used when GPUOffload == custom
+	Threads        int     `json:"threads"`         // 0 = auto
+	FlashAttention string  `json:"flash_attention"` // auto|on|off
+	Parallel       int     `json:"parallel"`        // 0 = default 1
+	BatchSize      int     `json:"batch_size"`
+	UBatchSize     int     `json:"ubatch_size"`
+	CacheTypeK     string  `json:"cache_type_k"` // "" = default
+	CacheTypeV     string  `json:"cache_type_v"`
+	NoMmap         bool    `json:"no_mmap"`
+	MLock          bool    `json:"mlock"`
+	NUMA           string  `json:"numa"`
+	MainGPU        int     `json:"main_gpu"` // -1 = unset
+	Device         string  `json:"device"`
+	SplitMode      string  `json:"split_mode"`
+	TensorSplit    string  `json:"tensor_split"`
+	ContBatching   *bool   `json:"cont_batching"`
+	CacheReuse     int     `json:"cache_reuse"`
+	ThreadsBatch   int     `json:"threads_batch"` // 0 = same as --threads
+	Prio           int     `json:"prio"`          // -2 = unset; -1..3 = llama --prio
+	Poll           int     `json:"poll"`          // -1 = unset; 0..100 = --poll
+	CPUMoe         bool    `json:"cpu_moe"`
+	NCPUMoe        int     `json:"n_cpu_moe"`  // 0 = unset
+	KVOffload      string  `json:"kv_offload"` // ""|on|off → --kv-offload / --no-kv-offload
+	OpOffload      string  `json:"op_offload"` // ""|on|off → --op-offload / --no-op-offload
+	KVUnified      string  `json:"kv_unified"` // ""|on|off → --kv-unified / --no-kv-unified
+	SWAFull        bool    `json:"swa_full"`
+	Fit            string  `json:"fit"` // ""|on|off → --fit
+	NoWarmup       bool    `json:"no_warmup"`
+	RopeScaling    string  `json:"rope_scaling"`
+	RopeFreqBase   float64 `json:"rope_freq_base"`
+	RopeFreqScale  float64 `json:"rope_freq_scale"`
+	SleepIdleSec   int     `json:"sleep_idle_seconds"`
+	Alias          string  `json:"alias"`
+	MediaPath      string  `json:"media_path"`
+	ChatTemplate   string  `json:"chat_template"`
+	// ChatTemplateKwargs is passed as --chat-template-kwargs (JSON object).
+	// Muse Glimmer uses {"reasoning_strength":"low"|"medium"|"high"|"xhigh"}.
+	ChatTemplateKwargs string  `json:"chat_template_kwargs"`
+	Jinja              *bool   `json:"jinja"`
+	NoMmproj           bool    `json:"no_mmproj"` // skip paired multimodal projector
+	NoMmprojOffload    bool    `json:"no_mmproj_offload"`
+	LoraPath           string  `json:"lora_path"`
+	LoraScale          float64 `json:"lora_scale"`
+	DraftModel         string  `json:"draft_model"` // path to draft GGUF
+	DraftMax           int     `json:"draft_max"`   // max draft tokens (0 = runtime default)
+	DraftMin           int     `json:"draft_min"`   // min draft tokens (0 = runtime default)
+	SpecType           string  `json:"spec_type"`   // e.g. draft-simple; empty = auto when draft set
 	// Embedding enables --embedding (dedicated embedder / reranker use case).
 	// Nil = unset (defaults applied for detected embedders); false disables.
 	Embedding *bool `json:"embedding"`
 	// Pooling is --pooling none|mean|cls|last|rank; empty = model / runtime default.
-	Pooling         string            `json:"pooling"`
-	ReasoningFormat string            `json:"reasoning_format"`
-	RawArgs         string            `json:"raw_args"`      // expert: space-separated, validated, never shell
-	EnvOverrides    map[string]string `json:"env_overrides"` // allowlisted keys only
+	Pooling         string `json:"pooling"`
+	ReasoningFormat string `json:"reasoning_format"`
+	// ReasoningPreserve keeps prior-turn reasoning in the chat template
+	// (--reasoning-preserve). Nil = unset (defaults on when the GGUF
+	// template supports it); false disables.
+	ReasoningPreserve *bool             `json:"reasoning_preserve"`
+	RawArgs           string            `json:"raw_args"`      // expert: space-separated, validated, never shell
+	EnvOverrides      map[string]string `json:"env_overrides"` // allowlisted keys only
 
 	// RuntimeID selects a specific installed llama-server build for this load.
 	// Empty = model pin, else global preferred. Not a llama-server flag.
@@ -357,8 +365,29 @@ func BuildArgs(s LoadSettings, modelPath, projectorPath string,
 	if s.ChatTemplate != "" {
 		add("--chat-template", s.ChatTemplate)
 	}
+	kwargs := s.ChatTemplateKwargs
+	preserveFlag := runtimes.SupportsFlag(caps, help, "--reasoning-preserve")
+	if s.ReasoningPreserve != nil && !preserveFlag {
+		kwargs = mergeChatTemplateKwargs(kwargs, preserveReasoningKwargs(*s.ReasoningPreserve))
+	}
+	if kwargs != "" {
+		add("--chat-template-kwargs", kwargs)
+	}
 	if s.Jinja != nil && *s.Jinja {
 		add("--jinja")
+	}
+	if s.ReasoningPreserve != nil {
+		if *s.ReasoningPreserve {
+			if preserveFlag {
+				add("--reasoning-preserve")
+				res = append(res, Resolution{"Preserve reasoning", "template default", "on"})
+			} else if kwargs != s.ChatTemplateKwargs {
+				res = append(res, Resolution{"Preserve reasoning", "template default", "on (chat-template-kwargs)"})
+			}
+		} else if runtimes.SupportsFlag(caps, help, "--no-reasoning-preserve") {
+			add("--no-reasoning-preserve")
+			res = append(res, Resolution{"Preserve reasoning", "template default", "off"})
+		}
 	}
 	if s.NoMmprojOffload && !s.NoMmproj {
 		add("--no-mmproj-offload")
@@ -487,6 +516,69 @@ func resolveSpecType(s LoadSettings) string {
 		}
 	}
 	return string(gguf.InferSpecType(s.SpecType, s.DraftModel, draftSpec))
+}
+
+// ApplyTemplateDefaults fills Jinja, Muse Glimmer chat-template kwargs, and
+// reasoning-preserve when the client omitted them. Glimmer requires --jinja
+// even without an mmproj: OID quants are written to a new folder and lose
+// the projector pairing that previously flipped Jinja on. Without Jinja,
+// stop tokens and reasoning_content split break and chat looks like it
+// never streamed. Thinking models (reasoning_effort / enable_thinking / …)
+// also force Jinja so per-request chat_template_kwargs actually reach the
+// template. Templates that can keep prior-turn reasoning default
+// --reasoning-preserve on (the llama.cpp log hint).
+func ApplyTemplateDefaults(s *LoadSettings, arch string, multimodal, draft, embedding bool, reasoning gguf.Reasoning) {
+	if s == nil || draft || embedding {
+		return
+	}
+	if !reasoning.Controllable() && !reasoning.CanPreserve {
+		reasoning = gguf.DetectReasoning("", arch)
+	}
+	if reasoning.CanPreserve && s.ReasoningPreserve == nil {
+		t := true
+		s.ReasoningPreserve = &t
+	}
+	glimmer := gguf.IsMuseGlimmerChat(arch)
+	preserveOn := s.ReasoningPreserve != nil && *s.ReasoningPreserve
+	forceJinja := glimmer || reasoning.Controllable() || preserveOn
+	needJinja := gguf.NeedsJinja(arch, multimodal) || reasoning.Controllable() || preserveOn
+	if needJinja && (s.Jinja == nil || forceJinja) {
+		t := true
+		s.Jinja = &t
+	}
+	if glimmer && strings.TrimSpace(s.ChatTemplateKwargs) == "" {
+		s.ChatTemplateKwargs = gguf.GlimmerChatTemplateKwargs
+	}
+}
+
+func mergeChatTemplateKwargs(existing string, extra map[string]any) string {
+	if len(extra) == 0 {
+		return existing
+	}
+	out := map[string]any{}
+	if strings.TrimSpace(existing) != "" {
+		if err := json.Unmarshal([]byte(existing), &out); err != nil {
+			out = map[string]any{}
+		}
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return existing
+	}
+	return string(b)
+}
+
+func preserveReasoningKwargs(on bool) map[string]any {
+	return map[string]any{
+		"preserve_reasoning":        on,
+		"preserve_thinking":         on,
+		"clear_thinking":            !on,
+		"truncate_history_thinking": !on,
+		"drop_thinking":             !on,
+	}
 }
 
 // quoteCommand renders the argument vector for the preview pane. It is

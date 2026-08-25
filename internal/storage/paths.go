@@ -12,26 +12,89 @@ import (
 // ValidateInside resolves p (which may be relative to root) and requires the
 // result to stay inside root after symlink resolution of the root. It rejects
 // traversal such as "../../etc/passwd".
+//
+// The destination often does not exist yet (quantize output, imports). Root is
+// EvalSymlink'd (macOS /var → /private/var, Windows 8.3 names); p must be
+// resolved the same way or a nested path looks like it escaped.
 func ValidateInside(root, p string) (string, error) {
 	if p == "" {
 		return "", fmt.Errorf("empty path")
 	}
-	absRoot, err := filepath.Abs(root)
+	absRoot, err := absResolved(root)
 	if err != nil {
 		return "", err
-	}
-	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
-		absRoot = resolved
 	}
 	abs := p
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(absRoot, p)
 	}
-	clean := filepath.Clean(abs)
-	if clean != absRoot && !strings.HasPrefix(clean, absRoot+string(os.PathSeparator)) {
+	clean, err := filepath.Abs(filepath.Clean(abs))
+	if err != nil {
+		return "", err
+	}
+	resolved, err := resolveExisting(clean)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(canonical(absRoot), canonical(resolved))
+	if err != nil || !relInside(rel) {
 		return "", fmt.Errorf("path %q escapes managed root %q", p, root)
 	}
 	return clean, nil
+}
+
+func relInside(rel string) bool {
+	if rel == "." {
+		return true
+	}
+	rel = filepath.ToSlash(rel)
+	return rel != ".." && !strings.HasPrefix(rel, "../")
+}
+
+// canonical strips Windows \\?\ prefixes so Rel can compare EvalSymlinks output
+// with Abs paths.
+func canonical(p string) string {
+	p = filepath.Clean(p)
+	switch {
+	case strings.HasPrefix(p, `\\?\UNC\`):
+		return `\\` + p[len(`\\?\UNC\`):]
+	case strings.HasPrefix(p, `\\?\`):
+		return p[len(`\\?\`):]
+	}
+	return p
+}
+
+func absResolved(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved, nil
+	}
+	return abs, nil
+}
+
+// resolveExisting EvalSymlinks the longest existing prefix of p and reattaches
+// missing trailing components (the output file may not exist yet).
+func resolveExisting(p string) (string, error) {
+	p = filepath.Clean(p)
+	cur := p
+	var missing []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return resolved, nil
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p, nil
+		}
+		missing = append(missing, filepath.Base(cur))
+		cur = parent
+	}
 }
 
 // SafeJoin joins elements to root and validates containment in one call.

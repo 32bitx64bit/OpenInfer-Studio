@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openinfer/openinfer-studio/internal/gguf"
 	"github.com/openinfer/openinfer-studio/internal/reasoning"
 )
 
@@ -333,7 +334,20 @@ func (s *Server) resolveModel(r *http.Request, body []byte) (Endpoint, []byte, e
 	if err != nil {
 		return Endpoint{}, body, err
 	}
-	return ep, body, nil
+	return ep, gguf.PatchJSONReasoning(body, s.reasoningFor(id)), nil
+}
+
+func (s *Server) reasoningFor(modelID string) gguf.Reasoning {
+	if s.db == nil || modelID == "" {
+		return gguf.Reasoning{}
+	}
+	var arch, meta string
+	err := s.db.QueryRow(`SELECT architecture, COALESCE(metadata_json,'') FROM models WHERE id=?`, modelID).
+		Scan(&arch, &meta)
+	if err != nil {
+		return gguf.Reasoning{}
+	}
+	return gguf.ReasoningFromMetadata(json.RawMessage(meta), arch)
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {

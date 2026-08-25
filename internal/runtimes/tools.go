@@ -1,10 +1,15 @@
 package runtimes
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -17,14 +22,16 @@ type ToolInfo struct {
 	Flags   []string `json:"flags,omitempty"`
 }
 
-// ToolsSnapshot is the persisted inventory of quantize/imatrix/split tools.
+// ToolsSnapshot is the persisted inventory of llama.cpp sibling tools.
 type ToolsSnapshot struct {
-	Quantize  ToolInfo `json:"quantize"`
-	IMatrix   ToolInfo `json:"imatrix"`
-	GGUFSplit ToolInfo `json:"gguf_split"`
+	Quantize   ToolInfo `json:"quantize"`
+	IMatrix    ToolInfo `json:"imatrix"`
+	Perplexity ToolInfo `json:"perplexity"`
+	GGUFSplit  ToolInfo `json:"gguf_split"`
 }
 
 var toolFlagRe = regexp.MustCompile(`(?:^|[\s,\[|])(-{1,2}[a-zA-Z][a-zA-Z0-9\-]*)`)
+var quantizeSizeRe = regexp.MustCompile(`(?i)quant size\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*(bytes?|[kmgt]i?b)`)
 
 // Tools returns (and caches on disk as tools.json) sibling-tool info for a runtime.
 func (m *Manager) Tools(id string) (ToolsSnapshot, error) {
@@ -42,9 +49,10 @@ func (m *Manager) Tools(id string) (ToolsSnapshot, error) {
 
 func probeTools(serverExe string) ToolsSnapshot {
 	return ToolsSnapshot{
-		Quantize:  probeOne(serverExe, "llama-quantize"),
-		IMatrix:   probeOne(serverExe, "llama-imatrix"),
-		GGUFSplit: probeOne(serverExe, "llama-gguf-split"),
+		Quantize:   probeOne(serverExe, "llama-quantize"),
+		IMatrix:    probeOne(serverExe, "llama-imatrix"),
+		Perplexity: probeOne(serverExe, "llama-perplexity"),
+		GGUFSplit:  probeOne(serverExe, "llama-gguf-split"),
 	}
 }
 
@@ -92,4 +100,62 @@ func ToolHasFlag(flags []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// RunTool captures a probed sibling tool's output using the same runtime
+// library path setup as the server probes.
+func RunTool(ctx context.Context, tool ToolInfo, args []string) (string, error) {
+	if !tool.Present || tool.Path == "" {
+		return "", fmt.Errorf("%s is not available", tool.Name)
+	}
+	cmd := exec.CommandContext(ctx, tool.Path, args...)
+	cmd.Dir = filepath.Dir(tool.Path)
+	cmd.Env = append(os.Environ(), LibPathEnv(tool.Path)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("%s: %w", tool.Name, err)
+	}
+	return string(out), nil
+}
+
+// ParseQuantizeSize extracts llama-quantize's final dry-run size. New and
+// patched builds may report bytes; released builds commonly report MiB.
+func ParseQuantizeSize(output string) (int64, bool) {
+	matches := quantizeSizeRe.FindAllStringSubmatch(output, -1)
+	if len(matches) == 0 {
+		return 0, false
+	}
+	m := matches[len(matches)-1]
+	if len(m) != 3 {
+		return 0, false
+	}
+	n, err := strconv.ParseFloat(m[1], 64)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	switch strings.ToLower(m[2]) {
+	case "byte", "bytes":
+	case "kb":
+		n *= 1e3
+	case "kib":
+		n *= 1 << 10
+	case "mb":
+		n *= 1e6
+	case "mib":
+		n *= 1 << 20
+	case "gb":
+		n *= 1e9
+	case "gib":
+		n *= 1 << 30
+	case "tb":
+		n *= 1e12
+	case "tib":
+		n *= 1 << 40
+	default:
+		return 0, false
+	}
+	if n > math.MaxInt64 {
+		return 0, false
+	}
+	return int64(math.Round(n)), true
 }

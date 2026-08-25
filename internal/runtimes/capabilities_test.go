@@ -39,6 +39,33 @@ func TestParseCapabilities(t *testing.T) {
 	}
 }
 
+func TestParseCapabilitiesReasoningPreserve(t *testing.T) {
+	help := fakeHelp + `
+         --reasoning-preserve, --no-reasoning-preserve
+         -rea, --reasoning [on|off|auto]
+`
+	caps := ParseCapabilities(help)
+	want := []string{"reasoning-preserve", "no-reasoning-preserve", "reasoning"}
+	for _, w := range want {
+		found := false
+		for _, c := range caps {
+			if c == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("capability %q not parsed from %q", w, caps)
+		}
+	}
+	if !SupportsFlag(caps, help, "--reasoning-preserve") {
+		t.Error("--reasoning-preserve should be supported")
+	}
+	if !SupportsFlag(caps, help, "--no-reasoning-preserve") {
+		t.Error("--no-reasoning-preserve should be supported")
+	}
+}
+
 func TestSupportsFlag(t *testing.T) {
 	caps := ParseCapabilities(fakeHelp)
 	if !SupportsFlag(caps, fakeHelp, "--ctx-size") {

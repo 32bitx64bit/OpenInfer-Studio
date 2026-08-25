@@ -18,6 +18,8 @@ func TestDeriveAlias(t *testing.T) {
 		// Empty name → strip trailing quant from file.
 		{"/m/repo/q4/MyModel-Q4_K_M.gguf", "", "Q4_K_M", "MyModel"},
 		{"/m/Qwen3-8B-UD-Q4_K_XL.gguf", "", "UD-Q4_K_XL", "Qwen3-8B"},
+		{"/m/Qwen3-8B-OID-Q4_K_XL.gguf", "", "OID-Q4_K_XL", "Qwen3-8B"},
+		{"/m/Qwen3-8B-OID-IQ3_XXS_XL.gguf", "", "OID-IQ3_XXS_XL", "Qwen3-8B"},
 		// Fall back to managed repo folder when filename is useless.
 		{
 			"/models/bartowski--Cool-Model-GGUF/q4/a.gguf",
@@ -26,12 +28,12 @@ func TestDeriveAlias(t *testing.T) {
 			"Cool Model",
 		},
 		{"/m/x.gguf", "ab", "", "x"},
-		// Local quantize/import output: source name + quant level.
+		// Local convert from an HF repo id stored as general.name.
 		{
-			"/home/u/.local/share/openinfer-studio/models/local--Muse-Glimmer-30B-Assistant-Q4_K_M/files/Muse-Glimmer-30B-Assistant-Q4_K_M.gguf",
-			"Muse Glimmer 30B Assistant",
-			"Q4_K_M",
-			"Muse Glimmer 30B Assistant Q4_K_M",
+			"/home/u/.local/share/openinfer-studio/models/local--Blackfrost-AI-Muse-Glimmer-30B-Abliterated-BF16-BF16/files/Blackfrost-AI-Muse-Glimmer-30B-Abliterated-BF16-BF16.gguf",
+			"Blackfrost-AI/Muse-Glimmer-30B-Abliterated-BF16",
+			"BF16",
+			"Muse-Glimmer-30B-Abliterated BF16",
 		},
 	}
 	for _, tc := range cases {
@@ -50,6 +52,10 @@ func TestQuantizedAlias(t *testing.T) {
 		{"Cool-Model-Q8_0", "Q4_K_S", "Cool-Model Q4_K_S"},
 		{"MiniCPM V 4_6", "Q6_K", "MiniCPM V 4_6 Q6_K"},
 		{"Name", "", "Name"},
+		{"Muse Glimmer 30B Assistant", "OID-Q4_K_XL", "Muse Glimmer 30B Assistant OID-Q4_K_XL"},
+		{"Muse Glimmer 30B Assistant Q4_K_M", "OID-Q4_K_XL", "Muse Glimmer 30B Assistant OID-Q4_K_XL"},
+		{"Name", "OID-IQ3_XXS_XL", "Name OID-IQ3_XXS_XL"},
+		{"Name OID-IQ3_XXS_XL", "OID-Q4_K_XL", "Name OID-Q4_K_XL"},
 	}
 	for _, tc := range cases {
 		got := QuantizedAlias(tc.name, tc.ftype)
@@ -65,5 +71,11 @@ func TestGoodAlias(t *testing.T) {
 	}
 	if !goodAlias("Gemma 4") || !goodAlias("MiniCPM V 4_6") {
 		t.Fatal("real names must be accepted")
+	}
+	if goodAlias("Blackfrost-AI/Muse-Glimmer-30B-Abliterated-BF16") {
+		t.Fatal("HF repo ids must not be used as display names")
+	}
+	if got := DisplayNameFromRepo("Blackfrost-AI/Muse-Glimmer-30B-Abliterated-BF16"); got != "Muse-Glimmer-30B-Abliterated" {
+		t.Fatalf("DisplayNameFromRepo = %q", got)
 	}
 }

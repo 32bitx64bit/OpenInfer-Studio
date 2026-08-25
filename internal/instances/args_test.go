@@ -3,6 +3,8 @@ package instances
 import (
 	"strings"
 	"testing"
+
+	"github.com/openinfer/openinfer-studio/internal/gguf"
 )
 
 const testHelp = `
@@ -157,6 +159,141 @@ func TestQuoteCommand(t *testing.T) {
 	}
 	if !strings.Contains(q, "--ctx-size 4096") {
 		t.Errorf("simple args should stay bare: %q", q)
+	}
+}
+
+func TestApplyTemplateDefaultsGlimmer(t *testing.T) {
+	s := DefaultSettings()
+	ApplyTemplateDefaults(&s, "muse-glimmer", false, false, false, gguf.Reasoning{})
+	if s.Jinja == nil || !*s.Jinja {
+		t.Fatal("Muse Glimmer must enable --jinja even without a projector")
+	}
+	if s.ChatTemplateKwargs != gguf.GlimmerChatTemplateKwargs {
+		t.Fatalf("kwargs = %q", s.ChatTemplateKwargs)
+	}
+	// Explicit kwargs win; jinja stays forced on.
+	s.ChatTemplateKwargs = `{"reasoning_strength":"high"}`
+	off := false
+	s.Jinja = &off
+	ApplyTemplateDefaults(&s, "muse-glimmer", false, false, false, gguf.Reasoning{})
+	if s.Jinja == nil || !*s.Jinja {
+		t.Fatal("Glimmer jinja stays on even if a preset stored false")
+	}
+	if s.ChatTemplateKwargs != `{"reasoning_strength":"high"}` {
+		t.Fatalf("explicit kwargs overwritten: %q", s.ChatTemplateKwargs)
+	}
+	s = DefaultSettings()
+	ApplyTemplateDefaults(&s, "muse-glimmer-assistant", false, true, false, gguf.Reasoning{})
+	if s.Jinja != nil {
+		t.Fatal("draft models must not get jinja defaults")
+	}
+}
+
+func TestApplyTemplateDefaultsReasoningJinja(t *testing.T) {
+	s := DefaultSettings()
+	r := gguf.Reasoning{Style: gguf.EnableThinking, Efforts: []string{"off", "on"}, Default: "on", CanDisable: true}
+	ApplyTemplateDefaults(&s, "qwen3", false, false, false, r)
+	if s.Jinja == nil || !*s.Jinja {
+		t.Fatal("thinking templates need --jinja so chat_template_kwargs apply")
+	}
+	off := false
+	s.Jinja = &off
+	ApplyTemplateDefaults(&s, "qwen3", false, false, false, r)
+	if s.Jinja == nil || !*s.Jinja {
+		t.Fatal("thinking models keep jinja on even if a preset stored false")
+	}
+}
+
+func TestApplyTemplateDefaultsPreserveReasoning(t *testing.T) {
+	s := DefaultSettings()
+	r := gguf.Reasoning{Style: gguf.EnableThinking, Efforts: []string{"off", "on"}, Default: "on", CanDisable: true, CanPreserve: true}
+	ApplyTemplateDefaults(&s, "qwen3", false, false, false, r)
+	if s.ReasoningPreserve == nil || !*s.ReasoningPreserve {
+		t.Fatal("supported templates must default --reasoning-preserve on")
+	}
+	if s.Jinja == nil || !*s.Jinja {
+		t.Fatal("preserve requires --jinja")
+	}
+	off := false
+	s.ReasoningPreserve = &off
+	ApplyTemplateDefaults(&s, "qwen3", false, false, false, r)
+	if s.ReasoningPreserve == nil || *s.ReasoningPreserve {
+		t.Fatal("explicit off must stick")
+	}
+
+	s = DefaultSettings()
+	ApplyTemplateDefaults(&s, "llama", false, false, false, gguf.Reasoning{})
+	if s.ReasoningPreserve != nil {
+		t.Fatal("unsupported templates must not enable preserve")
+	}
+}
+
+func TestBuildArgsChatTemplateKwargs(t *testing.T) {
+	help := testHelp + "\n  --jinja\n  --chat-template-kwargs JSON\n"
+	caps := append(testCaps(), "jinja", "chat-template-kwargs")
+	s := DefaultSettings()
+	ApplyTemplateDefaults(&s, "muse-glimmer", false, false, false, gguf.Reasoning{})
+	br := BuildArgs(s, "/m.gguf", "", caps, help, "127.0.0.1", 1, "k")
+	joined := strings.Join(br.Args, " ")
+	if !strings.Contains(joined, "--jinja") {
+		t.Fatalf("missing jinja: %s", joined)
+	}
+	if !strings.Contains(joined, `--chat-template-kwargs {"reasoning_strength":"low"}`) {
+		t.Fatalf("missing kwargs: %s", joined)
+	}
+}
+
+func TestBuildArgsReasoningPreserve(t *testing.T) {
+	help := testHelp + "\n  --jinja\n  --reasoning-preserve, --no-reasoning-preserve\n"
+	caps := append(testCaps(), "jinja", "reasoning-preserve", "no-reasoning-preserve")
+	s := DefaultSettings()
+	r := gguf.Reasoning{CanPreserve: true}
+	ApplyTemplateDefaults(&s, "qwen3", false, false, false, r)
+	br := BuildArgs(s, "/m.gguf", "", caps, help, "127.0.0.1", 1, "k")
+	if !argPresent(br.Args, "--reasoning-preserve") {
+		t.Fatalf("missing --reasoning-preserve: %v", br.Args)
+	}
+	if argPresent(br.Args, "--no-reasoning-preserve") {
+		t.Fatalf("off spelling leaked: %v", br.Args)
+	}
+
+	off := false
+	s.ReasoningPreserve = &off
+	br = BuildArgs(s, "/m.gguf", "", caps, help, "127.0.0.1", 1, "k")
+	if !argPresent(br.Args, "--no-reasoning-preserve") {
+		t.Fatalf("missing --no-reasoning-preserve: %v", br.Args)
+	}
+	if argPresent(br.Args, "--reasoning-preserve") {
+		t.Fatalf("on spelling leaked: %v", br.Args)
+	}
+}
+
+func argPresent(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+
+func TestBuildArgsReasoningPreserveKwargsFallback(t *testing.T) {
+	help := testHelp + "\n  --jinja\n  --chat-template-kwargs JSON\n"
+	caps := append(testCaps(), "jinja", "chat-template-kwargs")
+	s := DefaultSettings()
+	s.ChatTemplateKwargs = `{"reasoning_strength":"low"}`
+	on := true
+	s.ReasoningPreserve = &on
+	br := BuildArgs(s, "/m.gguf", "", caps, help, "127.0.0.1", 1, "k")
+	joined := strings.Join(br.Args, " ")
+	if strings.Contains(joined, "--reasoning-preserve") {
+		t.Fatalf("flag must not be passed when unsupported: %s", joined)
+	}
+	if !strings.Contains(joined, `"preserve_thinking":true`) {
+		t.Fatalf("kwargs fallback missing preserve_thinking: %s", joined)
+	}
+	if !strings.Contains(joined, `"reasoning_strength":"low"`) {
+		t.Fatalf("existing kwargs dropped: %s", joined)
 	}
 }
 

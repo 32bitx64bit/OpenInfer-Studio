@@ -5,6 +5,7 @@ package models
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,13 +22,16 @@ import (
 
 var now = func() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 
+// ErrEmptyDisplayName is returned when a PATCH tries to clear the library name.
+var ErrEmptyDisplayName = errors.New("display name cannot be empty")
+
 // Filename quant / split patterns used when deriving a display alias.
 var (
-	aliasQuantRe = regexp.MustCompile(`(?i)[.\-_]((?:UD-)?(?:IQ[1-4]_[A-Z0-9]+|Q[1-8]_[A-Z0-9_]+(?:_[SMXL])?|F16|F32|BF16|TQ[12]_0|MXFP4|Q4_0))`)
+	aliasQuantRe = regexp.MustCompile(`(?i)[.\-_]((?:(?:UD|OID)-)?(?:IQ[1-4](?:_[A-Z0-9]+)+|Q[1-8]_[A-Z0-9_]+(?:_[SMXL])?|F16|F32|BF16|TQ[12]_0|MXFP4|Q4_0))`)
 	aliasSplitRe = regexp.MustCompile(`(?i)-(\d{5})-of-(\d{5})$`)
 	// Trailing quant on a display name, including a space separator
 	// ("Muse Glimmer 30B Assistant Q4_K_M").
-	trailingQuantRe = regexp.MustCompile(`(?i)[.\-_\s]+(?:UD-)?(?:IQ[1-4]_[A-Z0-9]+|Q[1-8]_[A-Z0-9_]+(?:_[SMXL])?|F16|F32|BF16|TQ[12]_0|MXFP4|Q4_0)$`)
+	trailingQuantRe = regexp.MustCompile(`(?i)[.\-_\s]+(?:(?:UD|OID)-)?(?:IQ[1-4](?:_[A-Z0-9]+)+|Q[1-8]_[A-Z0-9_]+(?:_[SMXL])?|F16|F32|BF16|TQ[12]_0|MXFP4|Q4_0)$`)
 )
 
 // goodAlias reports whether a GGUF general.name (or existing DB alias) is
@@ -38,11 +42,25 @@ func goodAlias(s string) bool {
 	if len(s) < 4 {
 		return false
 	}
+	if strings.Contains(s, "/") {
+		// Hugging Face repo ids (author/name) are not display names.
+		return false
+	}
 	switch strings.ToLower(s) {
 	case "model", "gguf", "untitled", "unknown", "none":
 		return false
 	}
 	return true
+}
+
+// DisplayNameFromRepo turns a Hugging Face id into a library title
+// ("Blackfrost-AI/Muse-Glimmer-30B-Abliterated-BF16" → "Muse-Glimmer-30B-Abliterated").
+func DisplayNameFromRepo(repo string) string {
+	repo = strings.TrimSpace(repo)
+	if i := strings.LastIndex(repo, "/"); i >= 0 {
+		repo = repo[i+1:]
+	}
+	return StripTrailingQuant(repo)
 }
 
 // StripTrailingQuant removes a filename/display-name quant suffix so a new
@@ -100,6 +118,10 @@ func deriveAlias(primaryPath, ggufName, quantization string) string {
 }
 
 func deriveAliasBase(primaryPath, ggufName string) string {
+	ggufName = strings.TrimSpace(ggufName)
+	if i := strings.LastIndex(ggufName, "/"); i >= 0 && i+1 < len(ggufName) {
+		ggufName = ggufName[i+1:]
+	}
 	if goodAlias(ggufName) {
 		return strings.TrimSpace(ggufName)
 	}
@@ -294,7 +316,7 @@ func (l *Library) Scan() (int, error) {
 		md.ApplySpeculativeFlags(primary)
 		md.ApplyEmbeddingFlags(primary)
 		md.ApplyDiffusionFlags(primary)
-		if q := gguf.UnslothDynamicQuant(primary, md.Name); q != "" {
+		if q := gguf.OverlayDynamicQuant(primary, md.Name, ""); q != "" {
 			md.Quantization = q
 		}
 		var total int64
@@ -351,7 +373,7 @@ func (l *Library) Scan() (int, error) {
 			hasVision, hasAudio, multimodal = false, false, false
 			proj = ""
 		}
-		metaJSON, _ := json.Marshal(map[string]any{
+		meta := map[string]any{
 			"name": md.Name, "tokenizer": md.Tokenizer,
 			"multimodal": multimodal, "has_vision": hasVision, "has_audio": hasAudio,
 			"speculative_draft":    md.SpeculativeDraft,
@@ -374,7 +396,11 @@ func (l *Library) Scan() (int, error) {
 			"ssm_state_size": md.SSMStateSize, "ssm_inner_size": md.SSMInnerSize,
 			"embedding_length": md.Embedding,
 			"tensor_errors":    tensorIssues,
-		})
+		}
+		if md.Reasoning.Controllable() || md.Reasoning.CanPreserve {
+			meta["reasoning"] = md.Reasoning
+		}
+		metaJSON, _ := json.Marshal(meta)
 		id := stableID(primary)
 		alias := deriveAlias(primary, md.Name, md.Quantization)
 		_, err = l.db.Exec(`INSERT INTO models
@@ -390,6 +416,8 @@ func (l *Library) Scan() (int, error) {
 			 alias=CASE
 			   WHEN length(trim(models.alias)) < 4
 			     OR lower(trim(models.alias)) IN ('model','gguf','untitled','unknown','none')
+			   THEN excluded.alias
+			   WHEN instr(models.alias, '/') > 0
 			   THEN excluded.alias
 			   WHEN trim(models.alias) = trim(COALESCE(json_extract(models.metadata_json, '$.name'), ''))
 			   THEN excluded.alias
@@ -517,7 +545,13 @@ func (l *Library) Update(id string, alias *string, favorite *bool, notes *string
 	if err != nil {
 		return err
 	}
-	if alias == nil {
+	if alias != nil {
+		a := strings.TrimSpace(*alias)
+		if a == "" {
+			return ErrEmptyDisplayName
+		}
+		alias = &a
+	} else {
 		alias = &m.Alias
 	}
 	fav := m.Favorite
@@ -540,7 +574,15 @@ func (l *Library) Update(id string, alias *string, favorite *bool, notes *string
 	_, err = l.db.Exec(`UPDATE models SET alias=?, favorite=?, notes=?, pinned_runtime=?,
 		pinned_backend=?, updated_at=? WHERE id=?`,
 		*alias, fi, *notes, *pinnedRuntime, *pinnedBackend, now(), id)
-	return err
+	if err != nil {
+		return err
+	}
+	if l.events != nil {
+		l.events.Publish("library.model_updated", map[string]any{
+			"id": id, "alias": *alias,
+		})
+	}
+	return nil
 }
 
 // AdoptQuantized stamps a freshly quantized GGUF in the library: display
@@ -756,6 +798,64 @@ func (l *Library) idForPath(path string) string {
 		}
 	}
 	return ""
+}
+
+// SetSourceRepo stamps the Hugging Face id (or local/…) after Scan, which
+// otherwise leaves source_repo empty on upsert.
+func (l *Library) SetSourceRepo(id, repo string) error {
+	if id == "" {
+		return fmt.Errorf("missing model id")
+	}
+	_, err := l.db.Exec(`UPDATE models SET source_repo=?, updated_at=? WHERE id=?`, repo, now(), id)
+	return err
+}
+
+// SetAlias overwrites the display name after convert/import.
+func (l *Library) SetAlias(id, alias string) error {
+	id = strings.TrimSpace(id)
+	alias = strings.TrimSpace(alias)
+	if id == "" || alias == "" {
+		return fmt.Errorf("missing model id or alias")
+	}
+	_, err := l.db.Exec(`UPDATE models SET alias=?, updated_at=? WHERE id=?`, alias, now(), id)
+	return err
+}
+
+// HighPrecisionFromRepo returns a library F32/F16/BF16 (else Q8) whose
+// source_repo matches the Hugging Face id. Files whose tokenizer length,
+// vocab_size, and embedding/output rows disagree are skipped so from-HF
+// reconverts instead of feeding llama.cpp a GGUF it will reject.
+func (l *Library) HighPrecisionFromRepo(repo string) *Model {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return nil
+	}
+	all, err := l.List()
+	if err != nil {
+		return nil
+	}
+	var q8 *Model
+	for i := range all {
+		m := &all[i]
+		if m.SourceRepo != repo {
+			continue
+		}
+		q := strings.ToUpper(strings.TrimSpace(m.Quantization))
+		q = strings.TrimPrefix(q, "UD-")
+		q = strings.TrimPrefix(q, "OID-")
+		switch q {
+		case "F32", "F16", "BF16":
+			if gguf.CheckVocabLayout(m.PrimaryPath) != nil {
+				continue
+			}
+			return m
+		case "Q8_0", "":
+			if q8 == nil && gguf.CheckVocabLayout(m.PrimaryPath) == nil {
+				q8 = m
+			}
+		}
+	}
+	return q8
 }
 
 // importBundle returns the selected GGUF plus same-directory split shards and

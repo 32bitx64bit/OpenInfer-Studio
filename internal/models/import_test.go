@@ -179,3 +179,124 @@ func TestScanRefreshesUncustomizedLocalAlias(t *testing.T) {
 		t.Fatalf("alias = %q, want source name + quant", m.Alias)
 	}
 }
+
+func TestUpdateRejectsEmptyDisplayName(t *testing.T) {
+	lib := testLibrary(t)
+	srcDir := t.TempDir()
+	src := writeTestGGUF(t, srcDir, "Cool-Model-Q4_K_M.gguf", "Cool Model")
+	id, err := lib.ImportFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := "   "
+	if err := lib.Update(id, &empty, nil, nil, nil, nil); err != ErrEmptyDisplayName {
+		t.Fatalf("Update empty alias: %v, want ErrEmptyDisplayName", err)
+	}
+	m, err := lib.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(m.Alias) == "" {
+		t.Fatal("empty PATCH must not clear the display name")
+	}
+}
+
+func TestScanKeepsCustomDisplayName(t *testing.T) {
+	lib := testLibrary(t)
+	destDir := filepath.Join(lib.managed, "local--Assistant-Q4_K_M", "files")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := writeTestGGUF(t, destDir, "Assistant-Q4_K_M.gguf", "Muse Glimmer 30B Assistant")
+	id, err := lib.ImportFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	custom := "My 27B Q3"
+	if err := lib.Update(id, &custom, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	m, err := lib.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Alias != custom {
+		t.Fatalf("alias = %q, want custom display name kept across scan", m.Alias)
+	}
+}
+
+func writeVocabLayoutGGUF(t *testing.T, dir, name string, fileType uint32, tokens []string, embd, vocabRows uint64) string {
+	t.Helper()
+	var b bytes.Buffer
+	w32 := func(v uint32) { binary.Write(&b, binary.LittleEndian, v) }
+	w64 := func(v uint64) { binary.Write(&b, binary.LittleEndian, v) }
+	wstr := func(s string) { w64(uint64(len(s))); b.WriteString(s) }
+	const (
+		tUint32 = 4
+		tString = 8
+		tArray  = 9
+	)
+	binary.Write(&b, binary.LittleEndian, uint32(0x46554747))
+	w32(3)
+	w64(1)
+	w64(4)
+	wstr("general.architecture")
+	w32(tString)
+	wstr("llama")
+	wstr("general.file_type")
+	w32(tUint32)
+	w32(fileType)
+	wstr("llama.embedding_length")
+	w32(tUint32)
+	w32(uint32(embd))
+	wstr("tokenizer.ggml.tokens")
+	w32(tArray)
+	w32(tString)
+	w64(uint64(len(tokens)))
+	for _, s := range tokens {
+		wstr(s)
+	}
+	wstr("token_embd.weight")
+	w32(2)
+	w64(embd)
+	w64(vocabRows)
+	w32(0)
+	w64(0)
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, b.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestHighPrecisionFromRepoSkipsInconsistentVocab(t *testing.T) {
+	lib := testLibrary(t)
+	srcDir := t.TempDir()
+	src := writeVocabLayoutGGUF(t, srcDir, "pad-F16.gguf", 1, []string{"a", "b", "c", "d"}, 8, 6)
+	id, err := lib.ImportFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.SetSourceRepo(id, "org/padded-embed"); err != nil {
+		t.Fatal(err)
+	}
+	if got := lib.HighPrecisionFromRepo("org/padded-embed"); got != nil {
+		t.Fatalf("inconsistent vocab GGUF must not be reused, got %s", got.PrimaryPath)
+	}
+
+	ok := writeVocabLayoutGGUF(t, srcDir, "ok-F16.gguf", 1, []string{"a", "b", "c", "d"}, 8, 4)
+	okID, err := lib.ImportFile(ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.SetSourceRepo(okID, "org/aligned-embed"); err != nil {
+		t.Fatal(err)
+	}
+	found := lib.HighPrecisionFromRepo("org/aligned-embed")
+	if found == nil || found.ID != okID {
+		t.Fatalf("aligned GGUF should be reused, got %+v", found)
+	}
+}

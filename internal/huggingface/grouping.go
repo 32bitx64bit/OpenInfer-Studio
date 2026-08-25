@@ -48,7 +48,7 @@ type FileGroup struct {
 
 var (
 	// name-Q4_K_M.gguf, name.IQ4_XS.gguf, name.q8_0.gguf
-	quantRe = regexp.MustCompile(`(?i)[.\-_]((?:IQ[1-4]_[A-Z0-9]+|Q[1-8]_[A-Z0-9_]+(?:_[SMXL])?|F16|F32|BF16|TQ[12]_0|MXFP4))`)
+	quantRe = regexp.MustCompile(`(?i)[.\-_]((?:IQ[1-4](?:_[A-Z0-9]+)+|Q[1-8]_[A-Z0-9_]+(?:_[SMXL])?|F16|F32|BF16|TQ[12]_0|MXFP4))`)
 	// name-00001-of-00003.gguf
 	splitRe = regexp.MustCompile(`(?i)-(\d{5})-of-(\d{5})\.gguf$`)
 	// mmproj-model-f16.gguf, model.mmproj-Q8_0.gguf
@@ -86,6 +86,9 @@ func fileSpecType(path string) string {
 // basename has no token, fall back to a parent directory that is itself
 // a known quant label (e.g. Q4_K_M/model.gguf).
 func quantOf(path string) string {
+	if q := gguf.OpenInferDynamicQuant(path, ""); q != "" {
+		return q
+	}
 	if q := gguf.UnslothDynamicQuant(path, ""); q != "" {
 		return q
 	}
@@ -105,6 +108,11 @@ func quantOf(path string) string {
 		}
 		folder = strings.ToUpper(folder)
 		if rest, ok := strings.CutPrefix(folder, "UD-"); ok {
+			if _, known := quantRanks[rest]; known {
+				return folder
+			}
+		}
+		if rest, ok := strings.CutPrefix(folder, "OID-"); ok {
 			if _, known := quantRanks[rest]; known {
 				return folder
 			}
@@ -548,7 +556,7 @@ func mtpVariantHint(path string) string {
 var quantRanks = map[string]int{
 	"IQ1_S": 1, "IQ1_M": 2,
 	"IQ2_XXS": 3, "IQ2_XS": 4, "Q2_K_S": 5, "Q2_K": 6, "Q2_K_L": 7, "Q2_K_XL": 8, "IQ2_S": 9, "IQ2_M": 10,
-	"IQ3_XXS": 11, "IQ3_XS": 12, "Q3_K_S": 13, "IQ3_S": 14, "IQ3_M": 15,
+	"IQ3_XXS": 11, "IQ3_XXS_XL": 11, "IQ3_XS": 12, "Q3_K_S": 13, "IQ3_S": 14, "IQ3_M": 15,
 	"Q3_K_M": 16, "Q3_K_L": 17, "Q3_K_XL": 18,
 	"IQ4_NL": 19, "IQ4_XS": 20, "Q4_0": 21, "Q4_K_S": 22, "Q4_K_M": 23, "Q4_K_L": 24, "Q4_K_XL": 25, "Q4_1": 26,
 	"Q5_0": 27, "Q5_K_S": 28, "Q5_K_M": 29, "Q5_K_L": 30, "Q5_K_XL": 31, "Q5_1": 32,
@@ -561,6 +569,7 @@ var quantRanks = map[string]int{
 // size-derived estimate between Q8_0 and F16.
 func quantRank(g FileGroup) int {
 	q := strings.TrimPrefix(g.Quant, "UD-")
+	q = strings.TrimPrefix(q, "OID-")
 	if r, ok := quantRanks[q]; ok {
 		return r
 	}

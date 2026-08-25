@@ -105,6 +105,17 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("huggingface: HTTP %d: %s", e.Status, e.Message)
 }
 
+func (e *APIError) HTTPStatus() int {
+	switch e.Status {
+	case http.StatusNotFound:
+		return http.StatusNotFound
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return http.StatusForbidden
+	default:
+		return http.StatusBadGateway
+	}
+}
+
 // SearchResult is one row of the Discover page.
 type SearchResult struct {
 	ID          string    `json:"id"`
@@ -138,7 +149,14 @@ type hfModel struct {
 	Siblings      []struct {
 		RFileName string `json:"rfilename"`
 	} `json:"siblings"`
-	CardData map[string]any `json:"cardData"`
+	CardData    map[string]any `json:"cardData"`
+	SHA         string         `json:"sha"`
+	Safetensors *hfSafetensors `json:"safetensors"`
+}
+
+type hfSafetensors struct {
+	Parameters map[string]int64 `json:"parameters"`
+	Total      int64            `json:"total"`
 }
 
 // Search queries GGUF model repositories.
@@ -195,17 +213,19 @@ type FileEntry struct {
 
 // RepoInfo is the repository detail payload.
 type RepoInfo struct {
-	ID          string         `json:"id"`
-	Author      string         `json:"author"`
-	Downloads   int64          `json:"downloads"`
-	Likes       int64          `json:"likes"`
-	Tags        []string       `json:"tags"`
-	Gated       any            `json:"gated"`
-	PipelineTag string         `json:"pipeline_tag,omitempty"`
-	Card        string         `json:"card"`
-	CardData    map[string]any `json:"card_data"`
-	Files       []FileEntry    `json:"files"`
-	SHA         string         `json:"sha"`
+	ID                    string           `json:"id"`
+	Author                string           `json:"author"`
+	Downloads             int64            `json:"downloads"`
+	Likes                 int64            `json:"likes"`
+	Tags                  []string         `json:"tags"`
+	Gated                 any              `json:"gated"`
+	PipelineTag           string           `json:"pipeline_tag,omitempty"`
+	Card                  string           `json:"card"`
+	CardData              map[string]any   `json:"card_data"`
+	Files                 []FileEntry      `json:"files"`
+	SHA                   string           `json:"sha"`
+	SafetensorsParameters map[string]int64 `json:"safetensors_parameters,omitempty"`
+	SafetensorsTotal      int64            `json:"safetensors_total,omitempty"`
 }
 
 // Repo fetches repository metadata, the recursive file tree and the model
@@ -236,6 +256,11 @@ func (c *Client) Repo(ctx context.Context, repo string) (*RepoInfo, error) {
 	info := &RepoInfo{
 		ID: m.ID, Author: m.Author, Downloads: m.Downloads, Likes: m.Likes,
 		Tags: m.Tags, Gated: m.Gated, CardData: m.CardData, PipelineTag: m.PipelineTag,
+		SHA: m.SHA,
+	}
+	if m.Safetensors != nil {
+		info.SafetensorsParameters = m.Safetensors.Parameters
+		info.SafetensorsTotal = m.Safetensors.Total
 	}
 	for _, f := range tree {
 		if f.Type == "directory" {
@@ -270,4 +295,45 @@ func (c *Client) DownloadURL(repo, path string) string {
 	// ?download=true nudges the Hub toward a direct CDN response suitable
 	// for multi-connection Range downloads.
 	return fmt.Sprintf("%s/%s/resolve/main/%s?download=true", c.base, repo, path)
+}
+
+// FetchFile downloads a small repository file (config.json, tokenizer, …).
+func (c *Client) FetchFile(ctx context.Context, repo, path string, max int64) ([]byte, error) {
+	if max <= 0 || max > maxBody {
+		max = maxBody
+	}
+	u := fmt.Sprintf("%s/%s/resolve/main/%s", c.base, repo, path)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.RLock()
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	c.mu.RUnlock()
+	req.Header.Set("User-Agent", "openinfer-studio/0.1")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("huggingface fetch %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, &APIError{Status: resp.StatusCode,
+			Message: "authentication required or repository gated; grant access on Hugging Face and configure a token"}
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, &APIError{Status: resp.StatusCode, Message: path + " not found"}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, &APIError{Status: resp.StatusCode, Message: string(body[:min(len(body), 512)])}
+	}
+	if int64(len(body)) > max {
+		return nil, fmt.Errorf("huggingface: %s exceeds %d bytes", path, max)
+	}
+	return body, nil
 }

@@ -30,6 +30,7 @@ const (
 	ClassDraftModel         FailureClass = "draft-model"
 	ClassRuntimeCrash       FailureClass = "runtime-crash"
 	ClassTimeout            FailureClass = "timeout"
+	ClassTensorShape        FailureClass = "tensor-shape"
 )
 
 // Classification explains a failure conservatively.
@@ -50,6 +51,9 @@ var rules = []rule{
 	{ClassUnsupportedArch, regexp.MustCompile(`(?i)(unknown model architecture|unsupported architecture|architecture.*not supported)`),
 		"The runtime does not support this model architecture.",
 		"Update to a newer llama.cpp runtime, or try a different build."},
+	{ClassTensorShape, regexp.MustCompile(`(?i)(check_tensor_dims|has wrong shape)`),
+		"A GGUF tensor has the wrong shape for this architecture (often vocab size vs embedding rows).",
+		"Reconvert from the Hugging Face weights so embedding rows, output rows, and tokenizer length agree. Or use a GGUF built for this llama.cpp version."},
 	{ClassRuntimeTooOld, regexp.MustCompile(`(?i)(requires newer|gguf version.*not supported|unsupported gguf version)`),
 		"This model uses a GGUF format newer than the selected runtime understands.",
 		"Install the latest llama.cpp runtime and pin it to this model."},

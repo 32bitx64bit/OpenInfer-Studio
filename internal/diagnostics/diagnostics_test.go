@@ -43,6 +43,7 @@ func TestClassify(t *testing.T) {
 		{"std::bad_alloc", 1, ClassInsufficientRAM},
 		{"failed to find a memory slot for batch of size 66", -1, ClassRuntimeCrash},
 		{"slot operator(): failed to decode mtmd chunk, idx = 4127, res = 1", -1, ClassRuntimeCrash},
+		{"check_tensor_dims: tensor 'token_embd.weight' has wrong shape; expected   5120, 248077, got   5120, 248320,      1,      1", 1, ClassTensorShape},
 		{"completely novel error nobody has seen", 1, ClassUnknown},
 	}
 	for _, c := range cases {
