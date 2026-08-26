@@ -61,6 +61,13 @@ Item {
     signal browseModels()
     signal quantizeModel(string modelId)
 
+    function openRename(m) {
+        if (!m) return
+        renameDialog.targetModel = m
+        renameField.text = m.alias || ""
+        renameDialog.open()
+    }
+
     function copyText(text) {
         if (!text) return
         copyArea.text = text
@@ -71,18 +78,36 @@ Item {
     }
 
     function openLoad(modelId) {
-        for (var i = 0; i < page.models.length; i++) {
-            if (page.models[i].id === modelId) {
-                loadDialog.openFor(page.models[i])
-                return
+        function find() {
+            for (var i = 0; i < page.models.length; i++) {
+                if (page.models[i].id === modelId) return page.models[i]
             }
+            return null
         }
-        page.reload()
+        var m = find()
+        if (m) {
+            loadDialog.openFor(m)
+            return
+        }
+        api.get("/api/v1/models", function(st, data) {
+            if (st === 200) page.models = (data && data.models) || []
+            m = find()
+            if (m) loadDialog.openFor(m)
+        })
     }
 
     function reload() {
         api.get("/api/v1/models", function(st, data) {
-            if (st === 200) page.models = (data && data.models) || []
+            if (st !== 200) return
+            page.models = (data && data.models) || []
+            if (page.selected) {
+                for (var i = 0; i < page.models.length; i++) {
+                    if (page.models[i].id === page.selected.id) {
+                        page.selected = page.models[i]
+                        break
+                    }
+                }
+            }
         })
         api.get("/api/v1/instances", function(st, data) {
             if (st !== 200) return
@@ -108,7 +133,7 @@ Item {
                 p[payload.model_id] = payload
                 page.liveActivity = p
             } else if (name === "instance.state_changed" || name === "instance.updated"
-                || name === "library.scanned") {
+                || name === "library.scanned" || name === "library.model_updated") {
                 page.reload()
             }
         }
@@ -128,6 +153,8 @@ Item {
         return page.models.filter(function(m) {
             if (f === "") return true
             if (m.alias.toLowerCase().indexOf(f) >= 0) return true
+            if ((m.source_repo || "").toLowerCase().indexOf(f) >= 0) return true
+            if ((m.primary_path || "").toLowerCase().indexOf(f) >= 0) return true
             if (m.quantization.toLowerCase().indexOf(f) >= 0) return true
             if (m.architecture.toLowerCase().indexOf(f) >= 0) return true
             var mt = page.mtpTag(m).toLowerCase()
@@ -140,6 +167,7 @@ Item {
             }
             if (f === "reranker" && m.metadata && m.metadata.is_reranker) return true
             if (f === "ud" && AppTheme.isUnslothDynamicQuant(m.quantization)) return true
+            if (f === "oid" && AppTheme.isOpenInferDynamicQuant(m.quantization)) return true
             return false
         })
     }
@@ -200,6 +228,18 @@ Item {
                 clip: true
                 spacing: 8
                 model: page.filteredModels()
+                add: Transition {
+                    ParallelAnimation {
+                        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                        NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                    }
+                }
+                displaced: Transition {
+                    NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                }
+                addDisplaced: Transition {
+                    NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                }
 
                 EmptyState {
                     visible: page.models.length === 0
@@ -312,6 +352,7 @@ Item {
                                 text: page.statusText(modelData.id)
                                 color: AppTheme.stateColor(page.instances[modelData.id] ? page.instances[modelData.id].state : "")
                                 font.pixelSize: AppTheme.fontSmall
+                                Behavior on color { ColorAnimation { duration: AppTheme.motion } }
                             }
                             AppButton {
                                 visible: page.instances[modelData.id] !== undefined
@@ -344,6 +385,10 @@ Item {
                                 onClicked: modelMenu.popup()
                                 Menu {
                                     id: modelMenu
+                                    MenuItem {
+                                        text: "Rename…"
+                                        onTriggered: page.openRename(modelData)
+                                    }
                                     MenuItem {
                                         text: modelData.favorite ? "Unfavorite" : "Favorite"
                                         onTriggered: page.api.patch("/api/v1/models/" + modelData.id,
@@ -393,6 +438,12 @@ Item {
             width: 400
             height: page.height
             interactive: false
+            enter: Transition {
+                NumberAnimation { property: "position"; duration: AppTheme.motionSlow; easing.type: Easing.OutCubic }
+            }
+            exit: Transition {
+                NumberAnimation { property: "position"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+            }
             background: Rectangle { color: AppTheme.bg; border.color: AppTheme.border }
             ColumnLayout {
                 anchors.fill: parent
@@ -407,12 +458,23 @@ Item {
                 }
                 FormField {
                     Layout.fillWidth: true
-                    label: "Alias"; hint: "Display and API name."
+                    label: "Display name"
+                    hint: "Shown on My library. Load uses this as the default API name unless you override it."
                     AppTextField {
                         width: parent.width
                         text: page.selected ? page.selected.alias : ""
-                        onEditingFinished: page.api.patch("/api/v1/models/" + page.selected.id,
-                            { "alias": text }, function() { page.reload() })
+                        onEditingFinished: {
+                            var name = text.trim()
+                            if (!page.selected || !name) {
+                                text = page.selected ? page.selected.alias : ""
+                                return
+                            }
+                            page.api.patch("/api/v1/models/" + page.selected.id,
+                                { "alias": name }, function(st, data) {
+                                    if (st === 200) page.reload()
+                                    else page.errorText = (data && (data.detail || data.error)) || "rename failed"
+                                })
+                        }
                     }
                 }
                 FormField {
@@ -469,8 +531,42 @@ Item {
         }
     }
 
+    AppDialog {
+        id: renameDialog
+        property var targetModel: null
+        parent: Overlay.overlay
+        title: "Rename model"
+        modal: true
+        standardButtons: Dialog.Save | Dialog.Cancel
+        AppTextField {
+            id: renameField
+            width: 360
+            placeholderText: "Display name on My library"
+        }
+        onOpened: {
+            renameField.forceActiveFocus()
+            renameField.selectAll()
+        }
+        onAccepted: {
+            var m = renameDialog.targetModel
+            var name = renameField.text.trim()
+            if (!m || !name) return
+            page.errorText = ""
+            page.api.patch("/api/v1/models/" + m.id, { "alias": name }, function(st, data) {
+                if (st === 200) {
+                    page.reload()
+                    var win = page.Window.window
+                    if (win && win.toast) win.toast("Renamed", "success")
+                    return
+                }
+                page.errorText = (data && (data.detail || data.error)) || "rename failed"
+            })
+        }
+    }
+
     LoadConfigDialog {
         id: loadDialog
+        parent: Overlay.overlay
         api: page.api
         onLoaded: page.reload()
     }

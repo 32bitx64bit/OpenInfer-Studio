@@ -24,6 +24,10 @@ Dialog {
     height: Math.min(720, parent ? parent.height - 48 : 720)
     anchors.centerIn: parent
     padding: AppTheme.padSmall
+    transformOrigin: Item.Center
+    enter: DialogEnter {}
+    exit: DialogExit {}
+    Overlay.modal: Rectangle { color: AppTheme.overlay }
 
     background: Rectangle {
         color: AppTheme.bg
@@ -52,6 +56,7 @@ Dialog {
         "swa_full": false, "fit": "", "no_warmup": false,
         "rope_scaling": "", "alias": "", "raw_args": "",
         "jinja": false, "no_mmproj": false, "no_mmproj_offload": false,
+        "reasoning_preserve": null,
         "draft_model": "", "draft_max": 0, "draft_min": 0, "spec_type": "",
         "embedding": false, "pooling": "",
         "runtime_id": "",
@@ -84,6 +89,41 @@ Dialog {
         return !!(meta.multimodal || meta.has_audio || meta.has_vision)
     }
 
+    // Muse Glimmer needs --jinja even as a text-only OID quant (no mmproj).
+    // Thinking models need it so per-request chat_template_kwargs (reasoning
+    // effort / enable_thinking) actually reach the template.
+    function needsJinja(m) {
+        if (!m) return false
+        var meta = m.metadata || {}
+        if (meta.speculative_draft || meta.is_embedding || meta.is_reranker) return false
+        if (root.isMultimodal(m)) return true
+        if (meta.reasoning && meta.reasoning.style) return true
+        if (meta.reasoning && meta.reasoning.can_preserve) return true
+        var arch = String(m.architecture || "").toLowerCase()
+        if (arch.indexOf("assistant") >= 0) return false
+        return arch.indexOf("muse-glimmer") >= 0
+            || arch.indexOf("muse_glimmer") >= 0
+            || arch.indexOf("museglimmer") >= 0
+    }
+
+    function canPreserveReasoning(m) {
+        if (!m) return false
+        var meta = m.metadata || {}
+        if (meta.speculative_draft || meta.is_embedding || meta.is_reranker) return false
+        return !!(meta.reasoning && meta.reasoning.can_preserve)
+    }
+
+    function isMuseGlimmerChat(m) {
+        if (!m) return false
+        var meta = m.metadata || {}
+        if (meta.speculative_draft) return false
+        var arch = String(m.architecture || "").toLowerCase()
+        if (arch.indexOf("assistant") >= 0) return false
+        return arch.indexOf("muse-glimmer") >= 0
+            || arch.indexOf("muse_glimmer") >= 0
+            || arch.indexOf("museglimmer") >= 0
+    }
+
     function defaultPooling(meta) {
         if (!meta) return ""
         if (meta.is_reranker) return "rank"
@@ -111,7 +151,9 @@ Dialog {
             "kv_offload": "", "op_offload": "", "kv_unified": "",
             "swa_full": false, "fit": "", "no_warmup": false,
             "rope_scaling": "", "alias": m.alias || "", "raw_args": "",
-            "jinja": embedder ? false : root.isMultimodal(m),
+            "jinja": embedder ? false : root.needsJinja(m),
+            "chat_template_kwargs": root.isMuseGlimmerChat(m) ? "{\"reasoning_strength\":\"low\"}" : "",
+            "reasoning_preserve": (!embedder && root.canPreserveReasoning(m)) ? true : null,
             "no_mmproj": false, "no_mmproj_offload": false,
             "draft_model": "",
             "draft_max": defaultMTP ? 2 : 0,
@@ -153,9 +195,16 @@ Dialog {
                     if (root.presets[j].is_default) { root.applyPreset(root.presets[j]); break }
                 }
             }
-            // Presets may omit jinja; keep multimodal default if still unset.
-            if (root.settings.jinja === undefined || root.settings.jinja === null) {
-                root.setSetting("jinja", root.isMultimodal(m))
+            // Presets may omit jinja; Glimmer and multimodal still need it.
+            if (root.settings.jinja === undefined || root.settings.jinja === null || (root.needsJinja(m) && !root.settings.jinja)) {
+                root.setSetting("jinja", root.needsJinja(m))
+            }
+            if (root.isMuseGlimmerChat(m) && !root.settings.chat_template_kwargs) {
+                root.setSetting("chat_template_kwargs", "{\"reasoning_strength\":\"low\"}")
+            }
+            if (root.canPreserveReasoning(m) && (root.settings.reasoning_preserve === undefined
+                    || root.settings.reasoning_preserve === null)) {
+                root.setSetting("reasoning_preserve", true)
             }
             // Embedder defaults when presets omit embedding/pooling.
             if (embedder) {
@@ -863,11 +912,23 @@ Dialog {
                     Layout.fillWidth: true
                     visible: !root.isEmbedding
                     label: "Jinja chat template"
-                    hint: "Required by many multimodal (vision/audio) models. Enabled by default when a projector is paired."
+                    hint: "Required by Muse Glimmer and many multimodal models. Enabled by default for those architectures, including text-only Glimmer quants."
                     argName: "--jinja"
                     AppSwitch {
                         checked: !!root.settings.jinja
                         onToggled: root.setSetting("jinja", checked)
+                    }
+                }
+
+                FormField {
+                    Layout.fillWidth: true
+                    visible: !root.isEmbedding && root.canPreserveReasoning(root.model)
+                    label: "Preserve reasoning"
+                    hint: "Keep earlier turns' thinking in context so the model can continue from it. Uses extra tokens; disable to save context. Enabled by default when the chat template supports it."
+                    argName: "--reasoning-preserve"
+                    AppSwitch {
+                        checked: !!root.settings.reasoning_preserve
+                        onToggled: root.setSetting("reasoning_preserve", checked)
                     }
                 }
 
@@ -892,9 +953,18 @@ Dialog {
                     font.weight: Font.DemiBold
                 }
                 ColumnLayout {
+                    id: advancedSection
                     Layout.fillWidth: true
                     visible: advancedToggle.checked
                     spacing: AppTheme.gap
+                    opacity: 1
+                    onVisibleChanged: {
+                        if (visible) {
+                            opacity = 0
+                            Qt.callLater(function() { advancedSection.opacity = 1 })
+                        }
+                    }
+                    Behavior on opacity { NumberAnimation { duration: AppTheme.motion; easing.type: Easing.OutCubic } }
 
                     FormField {
                         Layout.fillWidth: true
@@ -958,7 +1028,7 @@ Dialog {
                     FormField {
                         Layout.fillWidth: true
                         label: "Model alias"; argName: "--alias"
-                        hint: "Name exposed through the API."
+                        hint: "API name for this session only. Does not change the name on My library."
                         AppTextField {
                             id: aliasField
                             width: 320
@@ -975,9 +1045,18 @@ Dialog {
                     font.weight: Font.DemiBold
                 }
                 ColumnLayout {
+                    id: expertSection
                     Layout.fillWidth: true
                     visible: expertToggle.checked
                     spacing: AppTheme.gap
+                    opacity: 1
+                    onVisibleChanged: {
+                        if (visible) {
+                            opacity = 0
+                            Qt.callLater(function() { expertSection.opacity = 1 })
+                        }
+                    }
+                    Behavior on opacity { NumberAnimation { duration: AppTheme.motion; easing.type: Easing.OutCubic } }
 
                     Label {
                         Layout.fillWidth: true
@@ -1393,6 +1472,10 @@ Dialog {
         modal: true
         anchors.centerIn: root.parent
         standardButtons: Dialog.Save | Dialog.Cancel
+        transformOrigin: Item.Center
+        enter: DialogEnter {}
+        exit: DialogExit {}
+        Overlay.modal: Rectangle { color: AppTheme.overlay }
         background: Rectangle {
             color: AppTheme.bg
             border.color: AppTheme.border

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/openinfer/openinfer-studio/internal/database"
+	"github.com/openinfer/openinfer-studio/internal/gguf"
 	"github.com/openinfer/openinfer-studio/migrations"
 )
 
@@ -107,7 +108,7 @@ func TestParamsMerge(t *testing.T) {
 	body := map[string]any{"model": "x"}
 	temp := 0.5
 	maxTok := 100
-	applyParams(body, GenParams{Temperature: &temp, MaxTokens: &maxTok, Stop: []string{"END"}})
+	applyParams(body, GenParams{Temperature: &temp, MaxTokens: &maxTok, Stop: []string{"END"}}, gguf.Reasoning{})
 	if body["temperature"] != 0.5 || body["max_tokens"] != 100 {
 		t.Errorf("params not applied: %+v", body)
 	}
@@ -141,9 +142,50 @@ func TestMergeGenParamsUsesSavedDefaultsAndRequestOverrides(t *testing.T) {
 
 func TestJSONSchemaParam(t *testing.T) {
 	body := map[string]any{}
-	applyParams(body, GenParams{JSONSchema: `{"type":"object"}`})
+	applyParams(body, GenParams{JSONSchema: `{"type":"object"}`}, gguf.Reasoning{})
 	rf, ok := body["response_format"].(map[string]any)
 	if !ok || rf["type"] != "json_schema" {
 		t.Errorf("response_format malformed: %+v", body)
+	}
+}
+
+func TestMergeReasoningEffort(t *testing.T) {
+	merged := mergeGenParams(
+		GenParams{ReasoningEffort: "medium"},
+		GenParams{ReasoningEffort: "off"},
+	)
+	if merged.ReasoningEffort != "off" {
+		t.Fatalf("got %q", merged.ReasoningEffort)
+	}
+	merged = mergeGenParams(GenParams{ReasoningEffort: "high"}, GenParams{})
+	if merged.ReasoningEffort != "high" {
+		t.Fatalf("omitted override dropped saved effort: %q", merged.ReasoningEffort)
+	}
+}
+
+func TestApplyReasoningEffortParams(t *testing.T) {
+	qwen := gguf.DetectReasoning(
+		`{%- if enable_thinking is defined and enable_thinking is false %}{% endif %}`,
+		"qwen3",
+	)
+	body := map[string]any{}
+	applyParams(body, GenParams{ReasoningEffort: "off"}, qwen)
+	kw, _ := body["chat_template_kwargs"].(map[string]any)
+	if kw["enable_thinking"] != false {
+		t.Fatalf("kwargs = %v", body["chat_template_kwargs"])
+	}
+
+	glim := gguf.DetectReasoning("", "muse-glimmer")
+	body = map[string]any{}
+	applyParams(body, GenParams{
+		ChatTemplateKwargs: `{"reasoning_strength":"low"}`,
+		ReasoningEffort:    "xhigh",
+	}, glim)
+	kw, _ = body["chat_template_kwargs"].(map[string]any)
+	if kw["reasoning_strength"] != "xhigh" {
+		t.Fatalf("merged kwargs = %v", kw)
+	}
+	if _, ok := body["reasoning_effort"]; ok {
+		t.Fatal("glimmer must not send top-level reasoning_effort")
 	}
 }

@@ -85,6 +85,32 @@ func TestBuildOAIMessagesTextOnly(t *testing.T) {
 	}
 }
 
+func TestBuildOAIMessagesIncludesReasoning(t *testing.T) {
+	s := testService(t)
+	c, _ := s.CreateConversation("m", "", "")
+	um, _ := s.addMessage(c.ID, "", "user", "hi")
+	am, _ := s.addMessage(c.ID, um.ID, "assistant", "yo")
+	_, err := s.db.Exec(`UPDATE conversation_messages SET reasoning=? WHERE id=?`, "because 2+2", am.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain, _ := s.chain(am.ID)
+	// chain() re-reads from DB, so reasoning is populated.
+	msgs, err := s.buildOAIMessages(*c, chain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("got %d", len(msgs))
+	}
+	if msgs[1].ReasoningContent != "because 2+2" {
+		t.Fatalf("reasoning_content = %#v", msgs[1].ReasoningContent)
+	}
+	if msgs[0].ReasoningContent != "" {
+		t.Fatalf("user must not carry reasoning_content: %#v", msgs[0])
+	}
+}
+
 func TestResolveAudioBytesRejectsBadFormat(t *testing.T) {
 	_, _, _, err := resolveAudioBytes(&AudioInput{Data: base64.StdEncoding.EncodeToString([]byte("x")), Format: "exe"})
 	if err == nil {

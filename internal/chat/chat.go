@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/openinfer/openinfer-studio/internal/gguf"
 	"github.com/openinfer/openinfer-studio/internal/reasoning"
 )
 
@@ -69,6 +70,10 @@ type GenParams struct {
 	JSONSchema         string   `json:"json_schema,omitempty"`
 	Grammar            string   `json:"grammar,omitempty"`
 	ChatTemplateKwargs string   `json:"chat_template_kwargs,omitempty"`
+	// ReasoningEffort is a template-native level ("low"/"medium"/"high"/…)
+	// or "off" when the model can disable thinking. Translated to
+	// chat_template_kwargs for llama-server.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // mergeGenParams applies explicit request settings over persisted conversation
@@ -120,6 +125,9 @@ func mergeGenParams(saved, overrides GenParams) GenParams {
 	}
 	if overrides.ChatTemplateKwargs != "" {
 		out.ChatTemplateKwargs = overrides.ChatTemplateKwargs
+	}
+	if overrides.ReasoningEffort != "" {
+		out.ReasoningEffort = overrides.ReasoningEffort
 	}
 	return out
 }
@@ -388,6 +396,17 @@ func (s *Service) Generate(ctx context.Context, convID, parentID, userContent st
 		}
 	}
 	params = mergeGenParams(savedParams, params)
+	var modelArch, metaJSON string
+	_ = s.db.QueryRow(`SELECT architecture, COALESCE(metadata_json,'') FROM models WHERE id=?`, conv.ModelID).
+		Scan(&modelArch, &metaJSON)
+	reasonCtrl := gguf.ReasoningFromMetadata(json.RawMessage(metaJSON), modelArch)
+	if params.ReasoningEffort != "" && reasonCtrl.Controllable() && !reasonCtrl.Allows(params.ReasoningEffort) {
+		return "", fmt.Errorf("unsupported reasoning_effort %q (supported: %s)",
+			params.ReasoningEffort, strings.Join(reasonCtrl.Efforts, ", "))
+	}
+	if gguf.IsMuseGlimmerChat(modelArch) && strings.TrimSpace(params.ChatTemplateKwargs) == "" && params.ReasoningEffort == "" {
+		params.ChatTemplateKwargs = gguf.GlimmerChatTemplateKwargs
+	}
 
 	// Branch point: explicit parent (edit/regenerate) or latest leaf.
 	if parentID == "" && (userContent != "" || audio != nil) {
@@ -440,7 +459,7 @@ func (s *Service) Generate(ctx context.Context, convID, parentID, userContent st
 	go func() {
 		defer cancel()
 		defer delete(s.cancels, convID)
-		stats, err := s.stream(ctx, conv, ep, chain, am.ID, params)
+		stats, err := s.stream(ctx, conv, ep, chain, am.ID, params, reasonCtrl)
 		if err != nil {
 			_, _ = s.db.Exec(`UPDATE conversation_messages SET error=? WHERE id=?`, err.Error(), am.ID)
 			s.events.Publish("chat.token", TokenEvent{ConvID: convID, MessageID: am.ID, Done: true, Error: err.Error()})
@@ -473,7 +492,7 @@ type Stats struct {
 
 // stream posts the chat completion request and consumes SSE.
 func (s *Service) stream(ctx context.Context, conv Conversation, ep Endpoint,
-	chain []Message, assistantID string, params GenParams) (*Stats, error) {
+	chain []Message, assistantID string, params GenParams, reasonCtrl gguf.Reasoning) (*Stats, error) {
 
 	msgs, err := s.buildOAIMessages(conv, chain)
 	if err != nil {
@@ -490,7 +509,7 @@ func (s *Service) stream(ctx context.Context, conv Conversation, ep Endpoint,
 	if stream {
 		body["stream_options"] = map[string]any{"include_usage": true}
 	}
-	applyParams(body, params)
+	applyParams(body, params, reasonCtrl)
 
 	payload, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ep.URL+"/v1/chat/completions", bytes.NewReader(payload))
@@ -722,26 +741,36 @@ func (s *Service) nonStreamingResponse(resp *http.Response, convID, assistantID 
 }
 
 type oaiMessage struct {
-	Role    string `json:"role"`
-	Content any    `json:"content"`
+	Role             string `json:"role"`
+	Content          any    `json:"content"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 // buildOAIMessages constructs OpenAI-compatible messages, expanding audio
-// attachments into input_audio content parts when present.
+// attachments into input_audio content parts when present. Prior-turn
+// reasoning is sent as reasoning_content so --reasoning-preserve (and
+// templates that keep the last thought block) can put it back in the prompt.
 func (s *Service) buildOAIMessages(conv Conversation, chain []Message) ([]oaiMessage, error) {
 	msgs := []oaiMessage{}
 	if conv.System != "" {
 		msgs = append(msgs, oaiMessage{Role: "system", Content: conv.System})
 	}
 	for _, m := range chain {
-		if m.Error != "" || (m.Role == "assistant" && m.Content == "") {
+		if m.Error != "" {
+			continue
+		}
+		if m.Role == "assistant" && m.Content == "" && m.Reasoning == "" {
 			continue
 		}
 		content, err := s.messageContent(m)
 		if err != nil {
 			return nil, err
 		}
-		msgs = append(msgs, oaiMessage{Role: m.Role, Content: content})
+		msg := oaiMessage{Role: m.Role, Content: content}
+		if m.Role == "assistant" && m.Reasoning != "" {
+			msg.ReasoningContent = m.Reasoning
+		}
+		msgs = append(msgs, msg)
 	}
 	return msgs, nil
 }
@@ -870,7 +899,7 @@ func resolveAudioBytes(audio *AudioInput) (raw []byte, format, name string, err 
 }
 
 // applyParams merges validated generation params into the request body.
-func applyParams(body map[string]any, p GenParams) {
+func applyParams(body map[string]any, p GenParams, reasonCtrl gguf.Reasoning) {
 	if p.Temperature != nil {
 		body["temperature"] = *p.Temperature
 	}
@@ -917,6 +946,14 @@ func applyParams(body map[string]any, p GenParams) {
 		body["grammar"] = p.Grammar
 	}
 	if p.ChatTemplateKwargs != "" {
-		body["chat_template_kwargs"] = json.RawMessage(p.ChatTemplateKwargs)
+		var kwargs map[string]any
+		if err := json.Unmarshal([]byte(p.ChatTemplateKwargs), &kwargs); err == nil {
+			body["chat_template_kwargs"] = kwargs
+		} else {
+			body["chat_template_kwargs"] = json.RawMessage(p.ChatTemplateKwargs)
+		}
+	}
+	if p.ReasoningEffort != "" {
+		gguf.ApplyToRequest(body, reasonCtrl, p.ReasoningEffort)
 	}
 }

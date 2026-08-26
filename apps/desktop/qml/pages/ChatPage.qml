@@ -29,13 +29,23 @@ Item {
     property string errorText: ""
     property var expandedReasoning: ({})   // messageId → bool
     property bool _pinningChat: false
+    property int _chatSwitchGen: 0
+    property var _pendingChatLoad: null
     property string pendingAudioPath: ""
     property string pendingAudioName: ""
     property bool conversationsLoading: false
     property bool messagesLoading: false
     property bool showArchived: false
+    property int selectedModelIndex: -1
     signal openLibrary()
     signal configureModel(string modelId)
+
+    // Combo in the window header binds this so it refreshes with the library.
+    readonly property var headerModels: {
+        var _ = page.library
+        var __ = page.experimentalAudio
+        return page.chatModels()
+    }
 
     function modelState() {
         if (!page.currentConv) return "Choose a model"
@@ -46,7 +56,7 @@ Item {
     }
 
     Shortcut { sequence: "Ctrl+N"; onActivated: page.newConversation() }
-    Shortcut { sequence: "Ctrl+,"; onActivated: paramsDrawer.open() }
+    Shortcut { sequence: "Ctrl+,"; onActivated: page.openChatSettings() }
     Shortcut {
         sequence: "Escape"
         enabled: page.generating
@@ -110,12 +120,85 @@ Item {
         return page.experimentalAudio && page.modelSupportsAudio()
     }
 
+    function isMuseGlimmerChatModel(m) {
+        if (!m) return false
+        var arch = String(m.architecture || "").toLowerCase()
+        if (!arch || arch.indexOf("assistant") >= 0) return false
+        return arch.indexOf("muse-glimmer") >= 0
+            || arch.indexOf("muse_glimmer") >= 0
+            || arch.indexOf("museglimmer") >= 0
+    }
+    function reasoningControl() {
+        var m = page.currentModel()
+        if (!m) return null
+        var r = m.metadata && m.metadata.reasoning ? m.metadata.reasoning : null
+        if (r && r.style && r.efforts && r.efforts.length > 0)
+            return r
+        if (page.isMuseGlimmerChatModel(m)) {
+            return {
+                "style": "reasoning_strength",
+                "efforts": ["low", "medium", "high", "xhigh"],
+                "default_effort": "low",
+                "can_disable": false
+            }
+        }
+        return null
+    }
+    function reasoningLabel(value) {
+        switch (String(value || "").toLowerCase()) {
+        case "off": case "none": return "Off"
+        case "on": return "On"
+        case "minimal": return "Minimal"
+        case "low": return "Low"
+        case "medium": return "Medium"
+        case "high": return "High"
+        case "xhigh": return "Extra high"
+        case "max": return "Max"
+        default: return value ? String(value) : ""
+        }
+    }
+    function reasoningCanDisable() {
+        var r = page.reasoningControl()
+        return !!(r && r.can_disable)
+    }
+    function reasoningOptions() {
+        var r = page.reasoningControl()
+        if (!r) return []
+        var out = []
+        for (var i = 0; i < r.efforts.length; i++) {
+            out.push({ "value": r.efforts[i], "label": page.reasoningLabel(r.efforts[i]) })
+        }
+        return out
+    }
+    function reasoningIndex() {
+        var opts = page.reasoningOptions()
+        var cur = (paramsDrawer.params && paramsDrawer.params.reasoning_effort) || ""
+        for (var i = 0; i < opts.length; i++) {
+            if (opts[i].value === cur) return i
+        }
+        return 0
+    }
+    function syncReasoningEffort() {
+        var r = page.reasoningControl()
+        if (!r) return
+        var cur = paramsDrawer.params ? paramsDrawer.params.reasoning_effort : ""
+        var ok = false
+        for (var i = 0; i < r.efforts.length; i++) {
+            if (r.efforts[i] === cur) { ok = true; break }
+        }
+        if (!ok)
+            paramsDrawer.updateParam("reasoning_effort", r.default_effort || r.efforts[0])
+    }
+
     function reasoningExpanded(id) { return !!page.expandedReasoning[id] }
-    function toggleReasoning(id) {
+    function setReasoningExpanded(id, on) {
         var m = {}
         for (var k in page.expandedReasoning) m[k] = page.expandedReasoning[k]
-        m[id] = !m[id]
+        m[id] = !!on
         page.expandedReasoning = m
+    }
+    function toggleReasoning(id) {
+        page.setReasoningExpanded(id, !page.reasoningExpanded(id))
     }
     function reasoningPreview(text) {
         if (!text) return ""
@@ -137,35 +220,111 @@ Item {
         })
     }
 
+    function applyChatLoad(st, data) {
+        page.messagesLoading = false
+        if (st !== 200) {
+            page.messages = []
+            page.chain = []
+            return
+        }
+        page.messages = (data && data.messages) || []
+        page.chain = page.buildChain(page.latestLeaf())
+        chatList.stickToEnd = true
+        page.pinChatToEnd()
+    }
+
+    function finishChatSwitch() {
+        var pending = page._pendingChatLoad
+        if (!pending || !pending.ready || pending.gen !== page._chatSwitchGen)
+            return
+        if (chatFadeOut.running)
+            return
+        page._pendingChatLoad = null
+        page.applyChatLoad(pending.st, pending.data)
+        chatFadeIn.start()
+    }
+
     function openConversation(c) {
+        var same = page.currentConv && c && page.currentConv.id === c.id
+        var gen = ++page._chatSwitchGen
         page.currentConv = c
         page.errorText = ""
         page.messagesLoading = true
+        page.lastStats = same ? page.lastStats : null
         paramsDrawer.loadForConversation(c)
         page.syncModelSelector()
+        if (same) {
+            api.get("/api/v1/chat/" + c.id + "/messages", function(st, data) {
+                if (gen !== page._chatSwitchGen) return
+                page.applyChatLoad(st, data)
+            })
+            return
+        }
+        page._pendingChatLoad = { "gen": gen, "st": 0, "data": null, "ready": false }
+        chatFadeIn.stop()
+        if (!chatFadeOut.running)
+            chatFadeOut.start()
         api.get("/api/v1/chat/" + c.id + "/messages", function(st, data) {
-            page.messagesLoading = false
-            if (st !== 200) return
-            page.messages = (data && data.messages) || []
-            page.chain = page.buildChain(page.latestLeaf())
-            chatList.stickToEnd = true
-            page.pinChatToEnd()
+            if (gen !== page._chatSwitchGen) return
+            page._pendingChatLoad = { "gen": gen, "st": st, "data": data, "ready": true }
+            page.finishChatSwitch()
         })
     }
 
     // Keep the selector aligned with the conversation's actual model,
     // including after the library reloads (which resets the combo).
+    function currentModelId() {
+        var models = page.chatModels()
+        return page.selectedModelIndex >= 0 && models.length > page.selectedModelIndex
+            ? models[page.selectedModelIndex].id : ""
+    }
+
+    function setConversationModel(i) {
+        var models = page.chatModels()
+        if (!models.length || i < 0 || i >= models.length)
+            return
+        page.selectedModelIndex = i
+        var mid = models[i].id
+        if (page.currentConv && page.currentConv.model_id !== mid) {
+            page.api.patch("/api/v1/chat/" + page.currentConv.id,
+                { "model_id": mid }, function(st) {
+                    if (st === 200) {
+                        page.currentConv.model_id = mid
+                        page.currentConvChanged()
+                        page.syncReasoningEffort()
+                        page.reload()
+                    }
+                })
+        }
+        page.configureModel(mid)
+    }
+
+    function openChatSettings() {
+        if (page.currentConv)
+            paramsDrawer.loadForConversation(page.currentConv)
+        paramsDrawer.open()
+    }
+    function openParams() { page.openChatSettings() }
+    function openSystemPrompt() { page.openChatSettings() }
+
     function syncModelSelector() {
         var models = page.chatModels()
         if (!page.currentConv || models.length === 0) return
         for (var i = 0; i < models.length; i++) {
             if (models[i].id === page.currentConv.model_id) {
-                if (modelSelector.currentIndex !== i) modelSelector.currentIndex = i
+                if (page.selectedModelIndex !== i) page.selectedModelIndex = i
                 return
             }
         }
     }
-    onLibraryChanged: syncModelSelector()
+    onLibraryChanged: {
+        syncModelSelector()
+        page.syncReasoningEffort()
+    }
+    onHeaderModelsChanged: {
+        if (page.selectedModelIndex < 0 && page.headerModels.length > 0)
+            page.selectedModelIndex = 0
+    }
 
     function latestLeaf() {
         var hasChild = {}
@@ -199,7 +358,7 @@ Item {
     }
 
     function newConversation() {
-        var mid = modelSelector.currentModelId()
+        var mid = page.currentModelId()
         if (!mid) {
             page.errorText = "Choose a local model before creating a chat. Browse models to download or import one."
             return
@@ -295,6 +454,9 @@ Item {
         input.text = ""
         page.errorText = ""
         page.generating = true
+        page.streamingId = ""
+        page.streamContent = ""
+        page.streamReasoning = ""
         var body = { "content": text, "params": paramsDrawer.params }
         if (hasAudio) {
             body.audio = {
@@ -309,10 +471,18 @@ Item {
 
     // Append the assistant message to the visible chain immediately so
     // tokens stream into it in place — no separate floating bubble.
+    // Do not wipe streamContent: chat.token can arrive before HTTP 202.
     function beginStreamingMessage(messageId) {
         page.streamingId = messageId
-        page.streamContent = ""
-        page.streamReasoning = ""
+        var exists = false
+        for (var i = 0; i < page.messages.length; i++) {
+            if (page.messages[i].id === messageId) { exists = true; break }
+        }
+        if (exists) {
+            chatList.stickToEnd = true
+            page.pinChatToEnd()
+            return
+        }
         var msg = {
             "id": messageId, "conv_id": page.currentConv.id,
             "parent_id": page.chain.length ? page.chain[page.chain.length - 1].id : "",
@@ -332,6 +502,9 @@ Item {
     function regenerate(assistantMsg) {
         if (!page.currentConv || page.generating) return
         page.generating = true
+        page.streamingId = ""
+        page.streamContent = ""
+        page.streamReasoning = ""
         page.startWhenModelReady(
             { "parent_id": assistantMsg.parent_id, "content": "", "params": paramsDrawer.params })
     }
@@ -358,6 +531,8 @@ Item {
                     if (payload.reasoning_delta) page.streamReasoning += payload.reasoning_delta
                     if (followTimer.running === false) followTimer.start()
                 }
+                if ((payload.reasoning_delta || payload.reasoning_snapshot) && page.streamingId)
+                    page.setReasoningExpanded(page.streamingId, true)
                 if (payload.done) {
                     page.generating = false
                     page.lastStats = payload.stats || null
@@ -375,6 +550,9 @@ Item {
                     modelWaitTimer.restart()
                 }
             }
+            if (name === "library.model_updated" || name === "library.scanned") {
+                page.reload()
+            }
         }
     }
 
@@ -383,13 +561,23 @@ Item {
         interval: 150
         onTriggered: {
             if (!page.currentConv) return
+            var sid = page.streamingId
+            var sc = page.streamContent
+            var sr = page.streamReasoning
+            var keepStream = page.generating && sid !== ""
             page.api.get("/api/v1/chat/" + page.currentConv.id + "/messages", function(st, data) {
                 if (st !== 200) return
                 page.messages = (data && data.messages) || []
                 page.chain = page.buildChain(page.latestLeaf())
-                page.streamingId = ""
-                page.streamContent = ""
-                page.streamReasoning = ""
+                if (keepStream && page.generating) {
+                    page.streamingId = sid
+                    page.streamContent = sc
+                    page.streamReasoning = sr
+                } else {
+                    page.streamingId = ""
+                    page.streamContent = ""
+                    page.streamReasoning = ""
+                }
                 chatList.stickToEnd = true
                 page.pinChatToEnd()
             })
@@ -438,6 +626,42 @@ Item {
         onTriggered: page.pinChatToEnd()
     }
 
+    ParallelAnimation {
+        id: chatFadeOut
+        onStopped: page.finishChatSwitch()
+        NumberAnimation {
+            target: chatPane
+            property: "opacity"
+            to: 0
+            duration: AppTheme.motion
+            easing.type: Easing.OutCubic
+        }
+        NumberAnimation {
+            target: chatPaneShift
+            property: "y"
+            to: 8
+            duration: AppTheme.motion
+            easing.type: Easing.OutCubic
+        }
+    }
+    ParallelAnimation {
+        id: chatFadeIn
+        NumberAnimation {
+            target: chatPane
+            property: "opacity"
+            to: 1
+            duration: AppTheme.motion
+            easing.type: Easing.OutCubic
+        }
+        NumberAnimation {
+            target: chatPaneShift
+            property: "y"
+            to: 0
+            duration: AppTheme.motion
+            easing.type: Easing.OutCubic
+        }
+    }
+
     RowLayout {
         anchors.fill: parent
         spacing: 0
@@ -480,6 +704,12 @@ Item {
                         return convSearch.text === "" ||
                             c.title.toLowerCase().indexOf(convSearch.text.toLowerCase()) >= 0
                     })
+                    add: Transition {
+                        NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                    }
+                    displaced: Transition {
+                        NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                    }
                     delegate: ItemDelegate {
                         width: ListView.view.width
                         height: 40
@@ -530,97 +760,21 @@ Item {
             Layout.fillHeight: true
             spacing: 0
 
-            // Toolbar: model selector, params, stats
-            Rectangle {
-                Layout.fillWidth: true
-                height: 44
-                color: AppTheme.bgAlt
-                border.color: AppTheme.border
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.margins: 8
-                    spacing: 10
-                    Label { text: "Model"; color: AppTheme.textDim }
-                    AppComboBox {
-                        id: modelSelector
-                        Layout.preferredWidth: 280
-                        model: page.chatModels()
-                        textRole: "alias"
-                        function currentModelId() {
-                            var models = page.chatModels()
-                            return currentIndex >= 0 && models.length ? models[currentIndex].id : ""
-                        }
-                        onActivated: function(i) {
-                            var models = page.chatModels()
-                            if (!page.currentConv || !models.length) return
-                            var mid = models[i].id
-                            page.api.patch("/api/v1/chat/" + page.currentConv.id,
-                                { "model_id": mid }, function(st) {
-                                    if (st === 200) {
-                                        // Update the local copy immediately:
-                                        // generation reads currentConv.model_id.
-                                        page.currentConv.model_id = mid
-                                        page.currentConvChanged()
-                                        page.reload()
-                                    }
-                                })
-                        }
-                        Component.onCompleted: {
-                            if (page.currentConv) {
-                                var models = page.chatModels()
-                                for (var i = 0; i < models.length; i++)
-                                    if (models[i].id === page.currentConv.model_id) { currentIndex = i; break }
-                            }
-                        }
-                        delegate: ItemDelegate {
-                            width: modelSelector.width
-                            contentItem: Row {
-                                spacing: 6
-                                Text { text: modelData.alias; color: AppTheme.text }
-                                Text { text: modelData.quantization; color: AppTheme.textFaint; font.pixelSize: AppTheme.fontSmall }
-                            }
-                        }
-                    }
-                    Tag {
-                        text: page.loadingModel ? "Loading…" : page.modelState()
-                        tone: page.loadingModel ? AppTheme.info
-                            : page.modelState() === "Ready" ? AppTheme.success : AppTheme.warning
-                    }
-                    AppButton {
-                        text: "Configure"
-                        onClicked: paramsDrawer.open()
-                    }
-                    AppButton {
-                        text: "System prompt"
-                        enabled: page.currentConv !== null
-                        onClicked: systemPromptDialog.openFor(page.currentConv)
-                    }
-                    AppButton {
-                        visible: page.currentConv !== null && page.modelState() !== "Ready"
-                        text: "Model settings"
-                        onClicked: {
-                            if (page.currentConv) page.configureModel(page.currentConv.model_id)
-                        }
-                    }
-                    Item { Layout.fillWidth: true }
-                    Label {
-                        visible: page.lastStats !== null
-                        text: page.lastStats
-                            ? (page.lastStats.tokens_per_second || 0).toFixed(1) + " tok/s"
-                              + " · TTFT " + (page.lastStats.ttft_seconds || 0).toFixed(2) + "s"
-                              + " · " + (page.lastStats.prompt_tokens || 0) + "+" + (page.lastStats.completion_tokens || 0) + " tok"
-                            : ""
-                        color: AppTheme.textDim
-                        font.pixelSize: AppTheme.fontSmall
-                    }
-                }
-            }
-
             // Messages
-            ListView {
-                id: chatList
+            Item {
+                id: chatPane
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                clip: true
+                opacity: 1
+                transform: Translate {
+                    id: chatPaneShift
+                    y: 0
+                }
+
+            ListView {
+                id: chatList
+                anchors.fill: parent
                 clip: true
                 spacing: 10
                 topMargin: 12
@@ -673,6 +827,10 @@ Item {
                 onHeightChanged: if (stickToEnd || page.generating) page.pinChatToEnd()
                 onMovementEnded: stickToEnd = atLastMessage()
 
+                add: Transition {
+                    NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+                }
+
                 EmptyState {
                     visible: page.chain.length === 0
                     anchors.centerIn: parent
@@ -688,15 +846,23 @@ Item {
                     }
                 }
 
-                delegate: ColumnLayout {
-                    width: chatList.width - 48
-                    x: 24
-                    spacing: 2
+                delegate: Item {
+                    id: msgWrap
+                    width: chatList.width
+                    implicitHeight: msgCol.implicitHeight
+                    height: implicitHeight
+                    property int colWidth: Math.min(760, Math.max(280, chatList.width - 48))
+                    onHeightChanged: if (ListView.view) ListView.view.forceLayout()
+
+                    ColumnLayout {
+                        id: msgCol
+                        width: msgWrap.colWidth
+                        x: Math.max(0, (msgWrap.width - width) / 2)
+                        spacing: 2
 
                     // Sender row: name + branch indicator + actions
                     RowLayout {
                         Layout.fillWidth: true
-                        layoutDirection: modelData.role === "user" ? Qt.RightToLeft : Qt.LeftToRight
                         Label {
                             text: modelData.role === "user" ? "You" : (page.currentConv ? modelName() : "Assistant")
                             function modelName() {
@@ -732,10 +898,9 @@ Item {
                         }
                     }
 
-                    // Bubble row: user right-aligned with avatar, assistant left.
+                    // Bubble row
                     RowLayout {
                         Layout.fillWidth: true
-                        layoutDirection: modelData.role === "user" ? Qt.RightToLeft : Qt.LeftToRight
                         spacing: 8
 
                         // Avatar
@@ -748,8 +913,8 @@ Item {
                             SequentialAnimation on opacity {
                                 running: modelData.id === page.streamingId
                                 loops: Animation.Infinite
-                                NumberAnimation { to: 0.45; duration: 700 }
-                                NumberAnimation { to: 1.0; duration: 700 }
+                                NumberAnimation { to: 0.45; duration: AppTheme.motionPulse }
+                                NumberAnimation { to: 1.0; duration: AppTheme.motionPulse }
                             }
                             Text {
                                 anchors.centerIn: parent
@@ -769,7 +934,7 @@ Item {
                         // Bubble
                         Rectangle {
                             Layout.fillWidth: true
-                            Layout.maximumWidth: chatList.width - 110
+                            Layout.preferredHeight: bubbleCol.implicitHeight + 20
                             Layout.minimumHeight: bubbleCol.implicitHeight + 20
                             radius: AppTheme.radius
                             color: modelData.role === "user" ? Qt.alpha(AppTheme.accent, 0.14) : AppTheme.surface
@@ -794,8 +959,10 @@ Item {
                                     Rectangle {
                                         Layout.fillWidth: true
                                         height: 1
-                                        visible: page.reasoningExpanded(modelData.id)
+                                        visible: page.reasoningExpanded(modelData.id) || opacity > 0.01
+                                        opacity: page.reasoningExpanded(modelData.id) ? 1 : 0
                                         color: AppTheme.border
+                                        Behavior on opacity { NumberAnimation { duration: AppTheme.motion; easing.type: Easing.OutCubic } }
                                     }
                                     RowLayout {
                                         id: reasoningHeader
@@ -825,18 +992,22 @@ Item {
                                     }
                                     Label {
                                         Layout.fillWidth: true
-                                        visible: page.reasoningExpanded(modelData.id)
+                                        visible: page.reasoningExpanded(modelData.id) || opacity > 0.01
+                                        opacity: page.reasoningExpanded(modelData.id) ? 1 : 0
                                         text: (modelData.id === page.streamingId
                                             ? page.streamReasoning : modelData.reasoning) || ""
                                         wrapMode: Text.WordWrap
                                         color: AppTheme.textDim
                                         font.pixelSize: AppTheme.fontSmall
+                                        Behavior on opacity { NumberAnimation { duration: AppTheme.motion; easing.type: Easing.OutCubic } }
                                     }
                                     Label {
-                                        visible: page.reasoningExpanded(modelData.id)
+                                        visible: page.reasoningExpanded(modelData.id) || opacity > 0.01
+                                        opacity: page.reasoningExpanded(modelData.id) ? 1 : 0
                                         text: "▴ Collapse reasoning"
                                         color: AppTheme.textFaint
                                         font.pixelSize: AppTheme.fontSmall
+                                        Behavior on opacity { NumberAnimation { duration: AppTheme.motion; easing.type: Easing.OutCubic } }
                                         HoverHandler { cursorShape: Qt.PointingHandCursor }
                                         TapHandler {
                                             onTapped: {
@@ -880,6 +1051,8 @@ Item {
                         }
                     }
                 }
+                }
+            }
             }
 
             // Error bar
@@ -915,8 +1088,8 @@ Item {
                     id: composerCol
                     // Size from content upward — do not anchors.fill, or the
                     // bar's preferredHeight and this column fight each other.
-                    width: parent.width - 20
-                    x: 10
+                    width: Math.min(760, parent.width - 20)
+                    x: Math.max(10, (parent.width - width) / 2)
                     y: 10
                     spacing: 8
 
@@ -935,6 +1108,37 @@ Item {
                             flat: true
                             onClicked: { page.pendingAudioPath = ""; page.pendingAudioName = "" }
                         }
+                    }
+                    RowLayout {
+                        visible: page.reasoningOptions().length > 0
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Label {
+                            text: "Reasoning"
+                            color: AppTheme.textDim
+                            font.pixelSize: AppTheme.fontSmall
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+                        AppComboBox {
+                            id: composerReasoning
+                            Layout.preferredWidth: 140
+                            Layout.alignment: Qt.AlignVCenter
+                            enabled: page.currentConv !== null && !page.generating
+                            model: page.reasoningOptions()
+                            textRole: "label"
+                            currentIndex: page.reasoningIndex()
+                            onActivated: function(i) {
+                                var opts = page.reasoningOptions()
+                                if (i >= 0 && i < opts.length)
+                                    paramsDrawer.updateParam("reasoning_effort", opts[i].value)
+                            }
+                            ToolTip.visible: reasoningTip.hovered
+                            ToolTip.text: page.reasoningCanDisable()
+                                ? "How much the model thinks before answering. Off skips the thinking channel when this template allows it."
+                                : "How much the model thinks before answering. This template always reasons; pick a lower effort for faster replies."
+                            HoverHandler { id: reasoningTip }
+                        }
+                        Item { Layout.fillWidth: true }
                     }
                     RowLayout {
                         Layout.fillWidth: true
@@ -1056,14 +1260,21 @@ Item {
         }
     }
 
-    // Generation parameters drawer
+    // Chat settings: system prompt + sampling, one drawer.
     Drawer {
         id: paramsDrawer
         edge: Qt.RightEdge
-        width: 340
+        width: 380
         height: page.height
+        enter: Transition {
+            NumberAnimation { property: "position"; duration: AppTheme.motionSlow; easing.type: Easing.OutCubic }
+        }
+        exit: Transition {
+            NumberAnimation { property: "position"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
+        }
         background: Rectangle { color: AppTheme.bg; border.color: AppTheme.border }
 
+        property bool loadingPrompt: false
         property var params: ({
             "temperature": 0.7, "top_p": 0.95, "top_k": 40, "min_p": 0.05,
             "repeat_penalty": 1.1, "max_tokens": 2048
@@ -1076,6 +1287,10 @@ Item {
             }
             var saved = conversation && conversation.params ? conversation.params : {}
             params = Object.assign({}, defaults, saved)
+            loadingPrompt = true
+            systemPromptArea.text = conversation ? (conversation.system || "") : ""
+            loadingPrompt = false
+            page.syncReasoningEffort()
         }
         function updateParam(key, value) {
             var next = Object.assign({}, params)
@@ -1084,47 +1299,99 @@ Item {
             saveParamsTimer.restart()
         }
 
-        ColumnLayout {
+        Flickable {
             anchors.fill: parent
             anchors.margins: AppTheme.pad
-            spacing: AppTheme.gap
-            Label { text: "Generation parameters"; font.pixelSize: AppTheme.fontTitle; color: AppTheme.text }
+            clip: true
+            contentWidth: width
+            contentHeight: settingsCol.implicitHeight
+            boundsBehavior: Flickable.StopAtBounds
+            ColumnLayout {
+                id: settingsCol
+                width: parent.width
+                spacing: AppTheme.gap
+                Label { text: "Chat settings"; font.pixelSize: AppTheme.fontTitle; color: AppTheme.text }
 
-            Repeater {
-                model: [
-                    { "key": "temperature", "label": "Temperature", "hint": "Sampling randomness. 0 = deterministic.", "min": 0.0, "max": 2.0, "step": 0.05 },
-                    { "key": "top_p", "label": "Top-p", "hint": "Nucleus sampling threshold.", "min": 0.0, "max": 1.0, "step": 0.01 },
-                    { "key": "top_k", "label": "Top-k", "hint": "Candidate pool size. 0 disables.", "min": 0, "max": 200, "step": 1 },
-                    { "key": "min_p", "label": "Min-p", "hint": "Minimum token probability relative to the best token.", "min": 0.0, "max": 1.0, "step": 0.01 },
-                    { "key": "repeat_penalty", "label": "Repeat penalty", "hint": "Penalize repeated tokens. 1.0 = off.", "min": 0.5, "max": 2.0, "step": 0.05 },
-                    { "key": "max_tokens", "label": "Max output tokens", "hint": "Generation cap for one response.", "min": 16, "max": 65536, "step": 16 }
-                ]
-                delegate: FormField {
+                FormField {
+                    visible: page.reasoningOptions().length > 0
                     Layout.fillWidth: true
-                    label: modelData.label
-                    hint: modelData.hint
-                    Row {
-                        spacing: 8
-                        AppSlider {
-                            id: slider
-                            width: 180
-                            from: modelData.min; to: modelData.max; stepSize: modelData.step
-                            value: paramsDrawer.params[modelData.key]
-                            onMoved: paramsDrawer.updateParam(modelData.key, value)
-                        }
-                        Label {
-                            text: Number(slider.value).toFixed(modelData.step < 1 ? 2 : 0)
-                            color: AppTheme.textDim
-                            width: 48
+                    label: "Reasoning effort"
+                    hint: page.reasoningCanDisable()
+                        ? "Levels come from this model's chat template. Off disables thinking when the template supports it."
+                        : "Levels come from this model's chat template. Thinking cannot be turned off for this model."
+                    AppComboBox {
+                        width: parent.width
+                        enabled: page.currentConv !== null
+                        model: page.reasoningOptions()
+                        textRole: "label"
+                        currentIndex: page.reasoningIndex()
+                        onActivated: function(i) {
+                            var opts = page.reasoningOptions()
+                            if (i >= 0 && i < opts.length)
+                                paramsDrawer.updateParam("reasoning_effort", opts[i].value)
                         }
                     }
                 }
-            }
-            Item { Layout.fillHeight: true }
-            Label {
-                text: page.currentConv ? "Saved automatically for this chat." : "Create a chat to save parameters."
-                color: AppTheme.textFaint
-                font.pixelSize: AppTheme.fontSmall
+
+                FormField {
+                    id: systemPromptField
+                    Layout.fillWidth: true
+                    label: "System prompt"
+                    hint: "Behavior and context this chat should keep for every response."
+                    AppTextArea {
+                        id: systemPromptArea
+                        width: systemPromptField.width
+                        height: 140
+                        wrapMode: TextArea.Wrap
+                        selectByMouse: true
+                        placeholderText: "You are a helpful local assistant…"
+                        enabled: page.currentConv !== null
+                        onTextChanged: if (!paramsDrawer.loadingPrompt) saveSystemTimer.restart()
+                    }
+                }
+
+                Label {
+                    text: "Sampling"
+                    color: AppTheme.text
+                    font.weight: Font.DemiBold
+                    Layout.topMargin: 4
+                }
+
+                Repeater {
+                    model: [
+                        { "key": "temperature", "label": "Temperature", "hint": "Sampling randomness. 0 = deterministic.", "min": 0.0, "max": 2.0, "step": 0.05 },
+                        { "key": "top_p", "label": "Top-p", "hint": "Nucleus sampling threshold.", "min": 0.0, "max": 1.0, "step": 0.01 },
+                        { "key": "top_k", "label": "Top-k", "hint": "Candidate pool size. 0 disables.", "min": 0, "max": 200, "step": 1 },
+                        { "key": "min_p", "label": "Min-p", "hint": "Minimum token probability relative to the best token.", "min": 0.0, "max": 1.0, "step": 0.01 },
+                        { "key": "repeat_penalty", "label": "Repeat penalty", "hint": "Penalize repeated tokens. 1.0 = off.", "min": 0.5, "max": 2.0, "step": 0.05 },
+                        { "key": "max_tokens", "label": "Max output tokens", "hint": "Generation cap for one response.", "min": 16, "max": 65536, "step": 16 }
+                    ]
+                    delegate: FormField {
+                        Layout.fillWidth: true
+                        label: modelData.label
+                        hint: modelData.hint
+                        Row {
+                            spacing: 8
+                            AppSlider {
+                                id: slider
+                                width: 180
+                                from: modelData.min; to: modelData.max; stepSize: modelData.step
+                                value: paramsDrawer.params[modelData.key]
+                                onMoved: paramsDrawer.updateParam(modelData.key, value)
+                            }
+                            Label {
+                                text: Number(slider.value).toFixed(modelData.step < 1 ? 2 : 0)
+                                color: AppTheme.textDim
+                                width: 48
+                            }
+                        }
+                    }
+                }
+                Label {
+                    text: page.currentConv ? "Saved automatically for this chat." : "Create a chat to save settings."
+                    color: AppTheme.textFaint
+                    font.pixelSize: AppTheme.fontSmall
+                }
             }
         }
     }
@@ -1140,46 +1407,19 @@ Item {
                 })
         }
     }
-
-    AppDialog {
-        id: systemPromptDialog
-        property var targetConv: null
-        title: "System prompt"
-        modal: true
-        anchors.centerIn: page
-        width: Math.min(560, page.width - 48)
-        standardButtons: Dialog.Save | Dialog.Cancel
-        function openFor(conversation) {
-            targetConv = conversation
-            systemPromptArea.text = conversation ? (conversation.system || "") : ""
-            open()
+    Timer {
+        id: saveSystemTimer
+        interval: 400
+        onTriggered: {
+            if (!page.currentConv) return
+            page.api.patch("/api/v1/chat/" + page.currentConv.id,
+                { "system": systemPromptArea.text }, function(st) {
+                    if (st === 200) {
+                        page.currentConv.system = systemPromptArea.text
+                        page.currentConvChanged()
+                    }
+                })
         }
-        ColumnLayout {
-            width: parent.width
-            spacing: AppTheme.gapTight
-            Label {
-                Layout.fillWidth: true
-                text: "Set the behavior and context this chat should keep for every response."
-                color: AppTheme.textDim
-                wrapMode: Text.WordWrap
-            }
-            AppTextArea {
-                id: systemPromptArea
-                Layout.fillWidth: true
-                Layout.preferredHeight: 180
-                wrapMode: TextArea.Wrap
-                selectByMouse: true
-                placeholderText: "You are a helpful local assistant…"
-            }
-        }
-        onAccepted: if (targetConv) page.api.patch("/api/v1/chat/" + targetConv.id,
-            { "system": systemPromptArea.text }, function(st) {
-                if (st === 200) {
-                    targetConv.system = systemPromptArea.text
-                    page.currentConvChanged()
-                    page.reload()
-                }
-            })
     }
 
     // Rename dialog
