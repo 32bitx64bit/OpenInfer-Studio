@@ -12,9 +12,12 @@ TextField {
     rightPadding: 12
     topPadding: 8
     bottomPadding: 8
+    implicitWidth: 240
     implicitHeight: 36
 
     background: Rectangle {
+        implicitWidth: 240
+        implicitHeight: 36
         radius: AppTheme.radiusSmall
         color: AppTheme.surface
         border.width: 1

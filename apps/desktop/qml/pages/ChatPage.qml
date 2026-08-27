@@ -1429,8 +1429,13 @@ Item {
         title: "Rename chat"
         modal: true
         anchors.centerIn: page
+        width: 360
         standardButtons: Dialog.Save | Dialog.Cancel
-        AppTextField { id: renameField; width: 300; text: renameDialog.targetConv ? renameDialog.targetConv.title : "" }
+        AppTextField {
+            id: renameField
+            width: renameDialog.availableWidth
+            text: renameDialog.targetConv ? renameDialog.targetConv.title : ""
+        }
         onAccepted: if (targetConv) page.api.patch("/api/v1/chat/" + targetConv.id,
             { "title": renameField.text }, function() { page.reload() })
     }

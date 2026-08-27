@@ -537,10 +537,11 @@ Item {
         parent: Overlay.overlay
         title: "Rename model"
         modal: true
+        width: 420
         standardButtons: Dialog.Save | Dialog.Cancel
         AppTextField {
             id: renameField
-            width: 360
+            width: renameDialog.availableWidth
             placeholderText: "Display name on My library"
         }
         onOpened: {
