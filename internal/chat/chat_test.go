@@ -189,3 +189,99 @@ func TestApplyReasoningEffortParams(t *testing.T) {
 		t.Fatal("glimmer must not send top-level reasoning_effort")
 	}
 }
+
+func TestMergeReasoningBudget(t *testing.T) {
+	saved := 2048
+	override := 512
+	merged := mergeGenParams(
+		GenParams{ReasoningBudget: &saved},
+		GenParams{ReasoningBudget: &override},
+	)
+	if merged.ReasoningBudget == nil || *merged.ReasoningBudget != override {
+		t.Fatalf("got %v, want override %d", merged.ReasoningBudget, override)
+	}
+	merged = mergeGenParams(GenParams{ReasoningBudget: &saved}, GenParams{})
+	if merged.ReasoningBudget == nil || *merged.ReasoningBudget != saved {
+		t.Fatalf("omitted override dropped saved budget: %v", merged.ReasoningBudget)
+	}
+	zero := 0
+	merged = mergeGenParams(GenParams{ReasoningBudget: &saved}, GenParams{ReasoningBudget: &zero})
+	if merged.ReasoningBudget == nil || *merged.ReasoningBudget != 0 {
+		t.Fatalf("zero budget must be preserved: %v", merged.ReasoningBudget)
+	}
+}
+
+func TestApplyReasoningBudgetParams(t *testing.T) {
+	n := 2048
+	body := map[string]any{}
+	applyParams(body, GenParams{ReasoningBudget: &n}, gguf.Reasoning{})
+	if body["reasoning_budget_tokens"] != 2048 {
+		t.Fatalf("reasoning_budget_tokens = %v", body["reasoning_budget_tokens"])
+	}
+	if body["thinking_budget_tokens"] != 2048 {
+		t.Fatalf("thinking_budget_tokens = %v", body["thinking_budget_tokens"])
+	}
+
+	off := 0
+	body = map[string]any{}
+	applyParams(body, GenParams{ReasoningBudget: &off}, gguf.Reasoning{})
+	if body["reasoning_budget_tokens"] != 0 || body["thinking_budget_tokens"] != 0 {
+		t.Fatalf("zero budget dropped: %+v", body)
+	}
+
+	unlimited := -1
+	body = map[string]any{}
+	applyParams(body, GenParams{ReasoningBudget: &unlimited}, gguf.Reasoning{})
+	if body["reasoning_budget_tokens"] != -1 {
+		t.Fatalf("unlimited = %v", body["reasoning_budget_tokens"])
+	}
+
+	body = map[string]any{}
+	applyParams(body, GenParams{}, gguf.Reasoning{})
+	if _, ok := body["reasoning_budget_tokens"]; ok {
+		t.Fatal("unset budget must not appear in the request")
+	}
+	if _, ok := body["thinking_budget_tokens"]; ok {
+		t.Fatal("unset thinking_budget_tokens leaked")
+	}
+}
+
+func TestNormalizeGenParamsLegacyMaxAndBudgetRoom(t *testing.T) {
+	legacy := 2048
+	p := GenParams{MaxTokens: &legacy}
+	normalizeGenParams(&p)
+	if p.MaxTokens == nil || *p.MaxTokens != defaultMaxTokens {
+		t.Fatalf("legacy 2048 max_tokens = %v, want %d", p.MaxTokens, defaultMaxTokens)
+	}
+
+	p = GenParams{}
+	normalizeGenParams(&p)
+	if p.MaxTokens == nil || *p.MaxTokens != defaultMaxTokens {
+		t.Fatalf("omitted max_tokens = %v, want %d", p.MaxTokens, defaultMaxTokens)
+	}
+
+	budget := 8192
+	maxTok := 8192
+	p = GenParams{MaxTokens: &maxTok, ReasoningBudget: &budget}
+	normalizeGenParams(&p)
+	if p.MaxTokens == nil || *p.MaxTokens != 8192+minAnswerTokens {
+		t.Fatalf("budget equal to max_tokens = %v, want %d so the answer still fits",
+			p.MaxTokens, 8192+minAnswerTokens)
+	}
+
+	budget = 2048
+	maxTok = 8192
+	p = GenParams{MaxTokens: &maxTok, ReasoningBudget: &budget}
+	normalizeGenParams(&p)
+	if p.MaxTokens == nil || *p.MaxTokens != 8192 {
+		t.Fatalf("roomy max_tokens overwritten: %v", p.MaxTokens)
+	}
+
+	unlimited := -1
+	maxTok = 2048
+	p = GenParams{MaxTokens: &maxTok, ReasoningBudget: &unlimited}
+	normalizeGenParams(&p)
+	if p.MaxTokens == nil || *p.MaxTokens != defaultMaxTokens {
+		t.Fatalf("unlimited budget should still lift legacy max: %v", p.MaxTokens)
+	}
+}

@@ -68,6 +68,11 @@ type LoadSettings struct {
 	// Pooling is --pooling none|mean|cls|last|rank; empty = model / runtime default.
 	Pooling         string `json:"pooling"`
 	ReasoningFormat string `json:"reasoning_format"`
+	// ReasoningBudget is an optional server-wide --reasoning-budget. Nil =
+	// unset so per-request chat params.reasoning_budget can take effect
+	// (older llama.cpp ignores the request body when this CLI flag is set).
+	// 0 disables thinking; -1 is unlimited.
+	ReasoningBudget *int `json:"reasoning_budget,omitempty"`
 	// ReasoningPreserve keeps prior-turn reasoning in the chat template
 	// (--reasoning-preserve). Nil = unset (defaults on when the GGUF
 	// template supports it); false disables.
@@ -461,6 +466,10 @@ func BuildArgs(s LoadSettings, modelPath, projectorPath string,
 	if s.ReasoningFormat != "" {
 		add("--reasoning-format", s.ReasoningFormat)
 	}
+	if s.ReasoningBudget != nil {
+		add("--reasoning-budget", strconv.Itoa(*s.ReasoningBudget))
+		res = append(res, Resolution{"Reasoning budget", "explicit", strconv.Itoa(*s.ReasoningBudget) + " tokens"})
+	}
 
 	// Expert raw arguments: the field is rejected wholesale if it contains
 	// shell metacharacters (execution never involves a shell, but this keeps
@@ -518,15 +527,18 @@ func resolveSpecType(s LoadSettings) string {
 	return string(gguf.InferSpecType(s.SpecType, s.DraftModel, draftSpec))
 }
 
-// ApplyTemplateDefaults fills Jinja, Muse Glimmer chat-template kwargs, and
-// reasoning-preserve when the client omitted them. Glimmer requires --jinja
-// even without an mmproj: OID quants are written to a new folder and lose
-// the projector pairing that previously flipped Jinja on. Without Jinja,
-// stop tokens and reasoning_content split break and chat looks like it
-// never streamed. Thinking models (reasoning_effort / enable_thinking / …)
-// also force Jinja so per-request chat_template_kwargs actually reach the
-// template. Templates that can keep prior-turn reasoning default
-// --reasoning-preserve on (the llama.cpp log hint).
+// ApplyTemplateDefaults fills Jinja, Muse Glimmer chat-template kwargs,
+// reasoning-preserve, and --reasoning-format auto when the client omitted
+// them. Glimmer requires --jinja even without an mmproj: OID quants are
+// written to a new folder and lose the projector pairing that previously
+// flipped Jinja on. Without Jinja, stop tokens and reasoning_content split
+// break and chat looks like it never streamed. Thinking models
+// (reasoning_effort / enable_thinking / …) also force Jinja so per-request
+// chat_template_kwargs actually reach the template. Templates that can keep
+// prior-turn reasoning default --reasoning-preserve on (the llama.cpp log
+// hint). Think-token caps live in chat params (reasoning_budget), not here:
+// a CLI --reasoning-budget would pin older llama.cpp and ignore per-request
+// overrides.
 func ApplyTemplateDefaults(s *LoadSettings, arch string, multimodal, draft, embedding bool, reasoning gguf.Reasoning) {
 	if s == nil || draft || embedding {
 		return
@@ -548,6 +560,10 @@ func ApplyTemplateDefaults(s *LoadSettings, arch string, multimodal, draft, embe
 	}
 	if glimmer && strings.TrimSpace(s.ChatTemplateKwargs) == "" {
 		s.ChatTemplateKwargs = gguf.GlimmerChatTemplateKwargs
+	}
+	thinking := glimmer || reasoning.Controllable()
+	if thinking && s.ReasoningFormat == "" {
+		s.ReasoningFormat = "auto"
 	}
 }
 

@@ -82,7 +82,8 @@ func classify(name string, linear map[int]struct{}) tensorRole {
 	case strings.Contains(n, "token_embd"), strings.Contains(n, "tok_embeddings"),
 		strings.Contains(n, "word_embd"):
 		return roleEmbed
-	case loc == "output.weight", n == "output.weight", n == "output":
+	case loc == "output.weight", n == "output.weight", n == "output",
+		strings.Contains(n, "lm_head"):
 		return roleOutput
 	}
 

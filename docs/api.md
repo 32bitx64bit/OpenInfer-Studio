@@ -275,7 +275,7 @@ interpolated from the runtime's reported seconds-per-pass between checkpoints.
 | PATCH `/chat/{id}` | title, model_id, system, archived, params |
 | DELETE `/chat/{id}` | delete |
 | GET `/chat/{id}/messages` | full message tree (branches included) |
-| POST `/chat/{id}/generate` | `{parent_id?, content?, params?, audio?}` → streams `chat.token`. `params.reasoning_effort` is a template-native level (`low`/`medium`/`high`/`xhigh`/…) or `off` when the model can disable thinking. Translated to llama.cpp `chat_template_kwargs` from GGUF chat-template detection (`metadata.reasoning`). `audio` requires Settings `experimental.audio_models=1` and a `has_audio` model (`{path\|data, format?, name?}`) |
+| POST `/chat/{id}/generate` | `{parent_id?, content?, params?, audio?}` → streams `chat.token`. `params.reasoning_effort` is a template-native level (`low`/`medium`/`high`/`xhigh`/…) or `off` when the model can disable thinking. Translated to llama.cpp `chat_template_kwargs` from GGUF chat-template detection (`metadata.reasoning`). `params.reasoning_budget` caps think tokens for that request (`-1` unlimited, `0` suppress thinking) and is forwarded as llama.cpp `reasoning_budget_tokens` / `thinking_budget_tokens` (no model reload). `audio` requires Settings `experimental.audio_models=1` and a `has_audio` model (`{path\|data, format?, name?}`) |
 | POST `/chat/{id}/stop` | cancel generation |
 
 Setting keys of note: `experimental.audio_models` (`"0"`/`"1"`, default off) gates audio discovery labels and chat audio attachments (stays experimental while upstream llama.cpp marks audio as such). `onboarding.completed` (`"0"`/`"1"`) tracks whether the first-run setup wizard has been finished or skipped.

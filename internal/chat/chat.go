@@ -74,6 +74,10 @@ type GenParams struct {
 	// or "off" when the model can disable thinking. Translated to
 	// chat_template_kwargs for llama-server.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// ReasoningBudget caps think tokens for this request (−1 unlimited, 0
+	// suppress thinking). Sent as llama.cpp reasoning_budget_tokens /
+	// thinking_budget_tokens so it can change without reloading the model.
+	ReasoningBudget *int `json:"reasoning_budget,omitempty"`
 }
 
 // mergeGenParams applies explicit request settings over persisted conversation
@@ -128,6 +132,9 @@ func mergeGenParams(saved, overrides GenParams) GenParams {
 	}
 	if overrides.ReasoningEffort != "" {
 		out.ReasoningEffort = overrides.ReasoningEffort
+	}
+	if overrides.ReasoningBudget != nil {
+		out.ReasoningBudget = overrides.ReasoningBudget
 	}
 	return out
 }
@@ -396,6 +403,7 @@ func (s *Service) Generate(ctx context.Context, convID, parentID, userContent st
 		}
 	}
 	params = mergeGenParams(savedParams, params)
+	normalizeGenParams(&params)
 	var modelArch, metaJSON string
 	_ = s.db.QueryRow(`SELECT architecture, COALESCE(metadata_json,'') FROM models WHERE id=?`, conv.ModelID).
 		Scan(&modelArch, &metaJSON)
@@ -403,6 +411,9 @@ func (s *Service) Generate(ctx context.Context, convID, parentID, userContent st
 	if params.ReasoningEffort != "" && reasonCtrl.Controllable() && !reasonCtrl.Allows(params.ReasoningEffort) {
 		return "", fmt.Errorf("unsupported reasoning_effort %q (supported: %s)",
 			params.ReasoningEffort, strings.Join(reasonCtrl.Efforts, ", "))
+	}
+	if params.ReasoningBudget != nil && (*params.ReasoningBudget < -1 || *params.ReasoningBudget > 1<<20) {
+		return "", fmt.Errorf("reasoning_budget out of range")
 	}
 	if gguf.IsMuseGlimmerChat(modelArch) && strings.TrimSpace(params.ChatTemplateKwargs) == "" && params.ReasoningEffort == "" {
 		params.ChatTemplateKwargs = gguf.GlimmerChatTemplateKwargs
@@ -488,6 +499,7 @@ type Stats struct {
 	TokensPerSecond  float64 `json:"tokens_per_second"`
 	PromptPerSecond  float64 `json:"prompt_per_second"`
 	TotalSeconds     float64 `json:"total_seconds"`
+	FinishReason     string  `json:"finish_reason,omitempty"`
 }
 
 // stream posts the chat completion request and consumes SSE.
@@ -600,6 +612,9 @@ func (s *Service) stream(ctx context.Context, conv Conversation, ep Endpoint,
 			continue
 		}
 		for _, ch := range chunk.Choices {
+			if ch.FinishReason != "" {
+				stats.FinishReason = ch.FinishReason
+			}
 			if ch.Delta.ReasoningContent != "" {
 				if !firstToken {
 					stats.TimeToFirstToken = time.Since(start).Seconds()
@@ -676,7 +691,8 @@ func (s *Service) nonStreamingResponse(resp *http.Response, convID, assistantID 
 	}
 	var full struct {
 		Choices []struct {
-			Message struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
 				Content          string `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
 			} `json:"message"`
@@ -717,6 +733,9 @@ func (s *Service) nonStreamingResponse(resp *http.Response, convID, assistantID 
 		content = taggedC
 	}
 	stats := &Stats{TotalSeconds: time.Since(start).Seconds()}
+	if len(full.Choices) > 0 {
+		stats.FinishReason = full.Choices[0].FinishReason
+	}
 	if full.Usage != nil {
 		stats.PromptTokens = full.Usage.PromptTokens
 		stats.CompletionTokens = full.Usage.CompletionTokens
@@ -898,6 +917,43 @@ func resolveAudioBytes(audio *AudioInput) (raw []byte, format, name string, err 
 	return raw, format, name, nil
 }
 
+const (
+	// defaultMaxTokens is the completion cap when the client omits one.
+	// Thinking counts toward this, so it has to be well above a typical
+	// think-token budget or the answer never starts.
+	defaultMaxTokens = 8192
+	// legacyMaxTokens is the old UI/API default. Treat it as unset so
+	// saved chats from before the 8192 bump still leave room for an answer.
+	legacyMaxTokens = 2048
+	// minAnswerTokens is reserved after a positive reasoning budget so
+	// llama.cpp's n_predict is not spent entirely inside <think>.
+	minAnswerTokens = 2048
+)
+
+func intPtr(n int) *int { return &n }
+
+// normalizeGenParams rewrites legacy/incoherent caps so a think-token budget
+// cannot consume the whole completion. llama.cpp counts reasoning toward
+// max_tokens; a budget >= max_tokens is the same as no budget.
+func normalizeGenParams(p *GenParams) {
+	if p == nil {
+		return
+	}
+	if p.MaxTokens != nil && *p.MaxTokens == legacyMaxTokens {
+		p.MaxTokens = intPtr(defaultMaxTokens)
+	}
+	if p.MaxTokens == nil {
+		p.MaxTokens = intPtr(defaultMaxTokens)
+	}
+	if p.ReasoningBudget == nil || *p.ReasoningBudget <= 0 {
+		return
+	}
+	need := *p.ReasoningBudget + minAnswerTokens
+	if *p.MaxTokens < need {
+		p.MaxTokens = intPtr(need)
+	}
+}
+
 // applyParams merges validated generation params into the request body.
 func applyParams(body map[string]any, p GenParams, reasonCtrl gguf.Reasoning) {
 	if p.Temperature != nil {
@@ -955,5 +1011,10 @@ func applyParams(body map[string]any, p GenParams, reasonCtrl gguf.Reasoning) {
 	}
 	if p.ReasoningEffort != "" {
 		gguf.ApplyToRequest(body, reasonCtrl, p.ReasoningEffort)
+	}
+	if p.ReasoningBudget != nil {
+		n := *p.ReasoningBudget
+		body["reasoning_budget_tokens"] = n
+		body["thinking_budget_tokens"] = n
 	}
 }

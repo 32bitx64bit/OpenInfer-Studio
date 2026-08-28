@@ -1277,24 +1277,41 @@ Item {
         property bool loadingPrompt: false
         property var params: ({
             "temperature": 0.7, "top_p": 0.95, "top_k": 40, "min_p": 0.05,
-            "repeat_penalty": 1.1, "max_tokens": 2048
+            "repeat_penalty": 1.1, "max_tokens": 8192, "reasoning_budget": 2048
         })
 
         function loadForConversation(conversation) {
             var defaults = {
                 "temperature": 0.7, "top_p": 0.95, "top_k": 40, "min_p": 0.05,
-                "repeat_penalty": 1.1, "max_tokens": 2048
+                "repeat_penalty": 1.1, "max_tokens": 8192, "reasoning_budget": 2048
             }
-            var saved = conversation && conversation.params ? conversation.params : {}
+            var saved = conversation && conversation.params ? Object.assign({}, conversation.params) : {}
+            // Previous default was 2048, which reasoning models spend entirely
+            // on thought so the answer never starts. Treat that as unset.
+            if (saved.max_tokens === 2048)
+                delete saved.max_tokens
             params = Object.assign({}, defaults, saved)
+            paramsDrawer.ensureAnswerRoom()
             loadingPrompt = true
             systemPromptArea.text = conversation ? (conversation.system || "") : ""
             loadingPrompt = false
             page.syncReasoningEffort()
         }
+        function ensureAnswerRoom() {
+            var budget = Number(params.reasoning_budget)
+            var maxTok = Number(params.max_tokens)
+            if (!(budget > 0)) return
+            if (!(maxTok > budget)) {
+                var next = Object.assign({}, params)
+                next.max_tokens = budget + 2048
+                params = next
+            }
+        }
         function updateParam(key, value) {
             var next = Object.assign({}, params)
             next[key] = value
+            if (key === "reasoning_budget" && value > 0 && Number(next.max_tokens) <= value)
+                next.max_tokens = value + 2048
             params = next
             saveParamsTimer.restart()
         }
@@ -1334,6 +1351,26 @@ Item {
                 }
 
                 FormField {
+                    id: reasoningBudgetField
+                    visible: page.reasoningOptions().length > 0
+                    Layout.fillWidth: true
+                    label: "Reasoning token budget"
+                    hint: "How long the model may think before it must start the answer. Thinking counts toward max output tokens and the loaded context; those are raised automatically when this budget would consume them. Takes effect on the next message."
+                    AppSpinBox {
+                        width: reasoningBudgetField.width
+                        from: 256
+                        to: 65536
+                        stepSize: 256
+                        editable: true
+                        enabled: page.currentConv !== null
+                        value: paramsDrawer.params.reasoning_budget > 0
+                            ? paramsDrawer.params.reasoning_budget
+                            : 2048
+                        onValueModified: paramsDrawer.updateParam("reasoning_budget", value)
+                    }
+                }
+
+                FormField {
                     id: systemPromptField
                     Layout.fillWidth: true
                     label: "System prompt"
@@ -1364,7 +1401,7 @@ Item {
                         { "key": "top_k", "label": "Top-k", "hint": "Candidate pool size. 0 disables.", "min": 0, "max": 200, "step": 1 },
                         { "key": "min_p", "label": "Min-p", "hint": "Minimum token probability relative to the best token.", "min": 0.0, "max": 1.0, "step": 0.01 },
                         { "key": "repeat_penalty", "label": "Repeat penalty", "hint": "Penalize repeated tokens. 1.0 = off.", "min": 0.5, "max": 2.0, "step": 0.05 },
-                        { "key": "max_tokens", "label": "Max output tokens", "hint": "Generation cap for one response.", "min": 16, "max": 65536, "step": 16 }
+                        { "key": "max_tokens", "label": "Max output tokens", "hint": "Generation cap for one response, including thinking. Must stay above the reasoning budget or the answer never starts. Also limited by the context size chosen when the model was loaded.", "min": 16, "max": 65536, "step": 16 }
                     ]
                     delegate: FormField {
                         Layout.fillWidth: true

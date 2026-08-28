@@ -11,6 +11,7 @@ func testBank() *core.TensorBank {
 		SourcePath: "/m.gguf",
 		Tensors: []core.TensorDesc{
 			{Name: "token_embd.weight", DType: core.DTypeF16, Shape: []uint64{256, 4}, Length: 2048, Elements: 1024},
+			{Name: "output.weight", DType: core.DTypeF16, Shape: []uint64{256, 4}, Length: 2048, Elements: 1024},
 			{Name: "blk.0.ffn_norm.weight", DType: core.DTypeF32, Shape: []uint64{4}, Length: 16, Elements: 4},
 			{Name: "blk.0.attn_q.weight", DType: core.DTypeF16, Shape: []uint64{256, 4}, Length: 2048, Elements: 1024},
 			{Name: "blk.0.attn_v.weight", DType: core.DTypeF16, Shape: []uint64{256, 4}, Length: 2048, Elements: 1024},
@@ -39,6 +40,9 @@ func TestNormsStructurallyPreservedNoFloor(t *testing.T) {
 	}
 	if _, ok := s.Floor("token_embd.weight"); ok {
 		t.Error("embedding received a hard floor; must be a soft prior")
+	}
+	if f, ok := s.Floor("output.weight"); !ok || f != core.DTypeQ6_K {
+		t.Errorf("output head floor = %v,%v want Q6_K", f, ok)
 	}
 	if _, ok := s.Floor("blk.0.attn_q.weight"); ok {
 		t.Error("attention received a hard floor; must be a soft prior")
@@ -112,6 +116,31 @@ func TestOnlyExplicitAndCalibrationAreHard(t *testing.T) {
 	// User-supplied embedding-kind anchor is demoted to a prior, not a floor.
 	if _, ok := s.Floor("token_embd.weight"); ok {
 		t.Error("embedding-kind anchor became a hard floor")
+	}
+}
+
+func TestOutputHeadFloorEasesAtLowBPW(t *testing.T) {
+	bank := testBank()
+	s, err := Derive(bank, nil, PolicyForBPW(3.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := s.Floor("output.weight"); !ok || f != core.DTypeQ5_K_T {
+		t.Errorf("3.5 bpw output floor = %v,%v want Q5_K", f, ok)
+	}
+	s, err = Derive(bank, nil, PolicyForBPW(2.0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := s.Floor("output.weight"); !ok || f != core.DTypeQ4_K_T {
+		t.Errorf("2.0 bpw output floor = %v,%v want Q4_K", f, ok)
+	}
+	s, err = Derive(bank, nil, PolicyForBPW(5.0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := s.Floor("output.weight"); !ok || f != core.DTypeQ6_K {
+		t.Errorf("5.0 bpw output floor = %v,%v want Q6_K", f, ok)
 	}
 }
 

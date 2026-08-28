@@ -171,6 +171,12 @@ func TestApplyTemplateDefaultsGlimmer(t *testing.T) {
 	if s.ChatTemplateKwargs != gguf.GlimmerChatTemplateKwargs {
 		t.Fatalf("kwargs = %q", s.ChatTemplateKwargs)
 	}
+	if s.ReasoningFormat != "auto" {
+		t.Fatalf("Glimmer reasoning-format = %q, want auto", s.ReasoningFormat)
+	}
+	if s.ReasoningBudget != nil {
+		t.Fatal("think-token budget is a chat setting, not an auto load flag")
+	}
 	// Explicit kwargs win; jinja stays forced on.
 	s.ChatTemplateKwargs = `{"reasoning_strength":"high"}`
 	off := false
@@ -195,6 +201,12 @@ func TestApplyTemplateDefaultsReasoningJinja(t *testing.T) {
 	ApplyTemplateDefaults(&s, "qwen3", false, false, false, r)
 	if s.Jinja == nil || !*s.Jinja {
 		t.Fatal("thinking templates need --jinja so chat_template_kwargs apply")
+	}
+	if s.ReasoningFormat != "auto" {
+		t.Fatalf("thinking models default reasoning-format %q, want auto", s.ReasoningFormat)
+	}
+	if s.ReasoningBudget != nil {
+		t.Fatal("think-token budget is a chat setting, not an auto load flag")
 	}
 	off := false
 	s.Jinja = &off
@@ -225,6 +237,9 @@ func TestApplyTemplateDefaultsPreserveReasoning(t *testing.T) {
 	ApplyTemplateDefaults(&s, "llama", false, false, false, gguf.Reasoning{})
 	if s.ReasoningPreserve != nil {
 		t.Fatal("unsupported templates must not enable preserve")
+	}
+	if s.ReasoningFormat != "" || s.ReasoningBudget != nil {
+		t.Fatal("plain models must not get reasoning-format or reasoning-budget")
 	}
 }
 
@@ -265,6 +280,34 @@ func TestBuildArgsReasoningPreserve(t *testing.T) {
 	}
 	if argPresent(br.Args, "--reasoning-preserve") {
 		t.Fatalf("on spelling leaked: %v", br.Args)
+	}
+}
+
+func TestBuildArgsReasoningBudgetAndFormat(t *testing.T) {
+	help := testHelp + "\n  --jinja\n  --reasoning-format FORMAT\n  --reasoning-budget N\n"
+	caps := append(testCaps(), "jinja", "reasoning-format", "reasoning-budget")
+	s := DefaultSettings()
+	r := gguf.Reasoning{Style: gguf.EnableThinking, Efforts: []string{"off", "on"}, Default: "on", CanDisable: true}
+	ApplyTemplateDefaults(&s, "qwen3", false, false, false, r)
+	br := BuildArgs(s, "/m.gguf", "", caps, help, "127.0.0.1", 1, "k")
+	joined := strings.Join(br.Args, " ")
+	if !strings.Contains(joined, "--reasoning-format auto") {
+		t.Fatalf("missing reasoning-format auto: %s", joined)
+	}
+	if strings.Contains(joined, "--reasoning-budget") {
+		t.Fatalf("auto CLI reasoning-budget would pin older servers: %s", joined)
+	}
+
+	n := 512
+	s.ReasoningBudget = &n
+	s.ReasoningFormat = "deepseek"
+	br = BuildArgs(s, "/m.gguf", "", caps, help, "127.0.0.1", 1, "k")
+	joined = strings.Join(br.Args, " ")
+	if !strings.Contains(joined, "--reasoning-format deepseek") {
+		t.Fatalf("explicit format overwritten: %s", joined)
+	}
+	if !strings.Contains(joined, "--reasoning-budget 512") {
+		t.Fatalf("explicit budget overwritten: %s", joined)
 	}
 }
 

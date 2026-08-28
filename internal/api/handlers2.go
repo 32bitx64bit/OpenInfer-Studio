@@ -213,6 +213,10 @@ func decodeSettings(w http.ResponseWriter, r *http.Request) (instances.LoadSetti
 		writeErr(w, 400, "cache_reuse out of range", nil)
 		return s, false
 	}
+	if s.ReasoningBudget != nil && (*s.ReasoningBudget < -1 || *s.ReasoningBudget > 1<<20) {
+		writeErr(w, 400, "reasoning_budget out of range", nil)
+		return s, false
+	}
 	if s.DraftMax < 0 || s.DraftMax > 256 {
 		writeErr(w, 400, "draft_max out of range", nil)
 		return s, false

@@ -9,11 +9,13 @@
 //     Quantizable linear-attn projections (ssm_out, attn_qkv, attn_gate)
 //     receive the same attention soft prior as softmax Q/K/V — convert
 //     layout, not a model-family special case.
-//   - Embeddings / output head receive a Q6_K soft prior. Attention
+//   - Embeddings receive a Q6_K soft prior. The output head (output.weight /
+//     lm_head) is a hard floor (Q6_K, easing to Q5_K/Q4_K at low target bpw)
+//     so token logits — especially EOS vs continue — stay sharp. Attention
 //     projections receive Q5_K; attention V gets an extra Q6_K ValuePrior.
 //     FFN down gets a separate DownPrior (Q6 historically; weaker Q4/Q5
 //     at low target bpw). Solvers fold priors into the loss landscape;
-//     they never hard-pin the tensor.
+//     they never hard-pin those tensors.
 //   - MoE routers (ffn_gate_inp) receive a hard floor. Explicit (user-pinned)
 //     and calibration-selected anchors are also hard floors.
 package anchor
@@ -49,6 +51,10 @@ type Policy struct {
 	ExpertDownWeight float64
 	// RouterFloor is the hard minimum dtype for MoE routers (ffn_gate_inp).
 	RouterFloor core.DType
+	// OutputFloor is the hard minimum dtype for the lm_head / output.weight.
+	// llama.cpp recipes keep this tensor high even at Q2; a soft prior is
+	// harvested on huge vocabs and the model then stops mid-generation.
+	OutputFloor core.DType
 	// Pattern sets; '*' is the only wildcard (see core.Anchor.Matches).
 	// AttentionPatterns default empty: softmax-attention priors are attached
 	// per tensor from GGUF roles so linear-attn names are not glob-matched.
@@ -72,6 +78,7 @@ func DefaultPolicy() Policy {
 		DownWeight:        1.0,
 		ExpertDownWeight:  1.0,
 		RouterFloor:       core.DTypeQ5_K_T,
+		OutputFloor:       core.DTypeQ6_K,
 		EmbeddingPatterns: []string{"*token_embd*", "*output*"},
 		AttentionPatterns: nil, // GGUF-derived softmax-attention names only
 		ValuePatterns:     nil, // GGUF-derived attn_v names only
@@ -87,7 +94,8 @@ func PolicyForBPW(bpw float64) Policy {
 }
 
 // ApplyTargetBPW returns a copy of p with FFN-down priors scaled to bpw.
-// Embeddings/output stay Q6_K; non-V attention stays Q5_K; V stays Q6_K.
+// Embeddings stay Q6_K; non-V attention stays Q5_K; V stays Q6_K.
+// The output-head floor eases Q6_K → Q5_K → Q4_K at tighter budgets.
 // Downs are never hard-pinned to Q6.
 func (p Policy) ApplyTargetBPW(bpw float64) Policy {
 	p = p.withDefaults()
@@ -106,6 +114,11 @@ func (p Policy) ApplyTargetBPW(bpw float64) Policy {
 		p.DownPrior = core.DTypeQ4_K_T
 		p.DownWeight = 0.25
 		p.ExpertDownWeight = 0.12
+		if bpw <= 2.5 {
+			p.OutputFloor = core.DTypeQ4_K_T
+		} else {
+			p.OutputFloor = core.DTypeQ5_K_T
+		}
 	default:
 		p.DownPrior = core.DTypeQ5_K_T
 		p.DownWeight = 0.35
@@ -146,6 +159,9 @@ func (p Policy) withDefaults() Policy {
 	if p.RouterFloor == "" {
 		p.RouterFloor = d.RouterFloor
 	}
+	if p.OutputFloor == "" {
+		p.OutputFloor = d.OutputFloor
+	}
 	if p.EmbeddingPatterns == nil {
 		p.EmbeddingPatterns = d.EmbeddingPatterns
 	}
@@ -176,7 +192,7 @@ type Prior struct {
 
 // Set is the resolved anchor view over a specific tensor bank.
 type Set struct {
-	// Hard floors: explicit, calibration, and layout-native router floors.
+	// Hard floors: explicit, calibration, output head, and router floors.
 	Hard []core.Anchor `json:"hard,omitempty"`
 	// Priors: soft preferences for embeddings/output and attention.
 	Priors []Prior `json:"priors,omitempty"`
@@ -208,6 +224,9 @@ func Derive(bank *core.TensorBank, explicit []core.Anchor, pol Policy) (*Set, er
 	}
 	if pol.RouterFloor != "" && (!pol.RouterFloor.Valid() || !pol.RouterFloor.IsQuant()) {
 		return nil, fmt.Errorf("anchor: invalid router floor dtype %q", pol.RouterFloor)
+	}
+	if pol.OutputFloor != "" && (!pol.OutputFloor.Valid() || !pol.OutputFloor.IsQuant()) {
+		return nil, fmt.Errorf("anchor: invalid output floor dtype %q", pol.OutputFloor)
 	}
 	s := &Set{NormPatterns: pol.NormPatterns}
 	for _, a := range explicit {
@@ -276,6 +295,11 @@ func Derive(bank *core.TensorBank, explicit []core.Anchor, pol Policy) (*Set, er
 			s.Priors = append(s.Priors, Prior{
 				Kind: core.AnchorAttention, Pattern: t.Name,
 				DType: pol.DownPrior, Weight: w,
+			})
+		case role == roleOutput && t.Quantizable() && pol.OutputFloor != "":
+			s.Hard = append(s.Hard, core.Anchor{
+				Kind: core.AnchorExplicit, Name: t.Name,
+				MinDType: pol.OutputFloor, Reason: "output head",
 			})
 		case role == roleRouter && t.Quantizable():
 			s.Hard = append(s.Hard, core.Anchor{

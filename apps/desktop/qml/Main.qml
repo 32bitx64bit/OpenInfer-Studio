@@ -240,7 +240,8 @@ ApplicationWindow {
                         visible: window.currentRoute === "chat" && chatPage.lastStats !== null
                         anchors.verticalCenter: parent.verticalCenter
                         text: chatPage.lastStats
-                            ? (chatPage.lastStats.tokens_per_second || 0).toFixed(1) + " tok/s"
+                            ? ((chatPage.lastStats.tokens_per_second || 0).toFixed(1) + " tok/s"
+                               + (chatPage.lastStats.finish_reason === "length" ? " · truncated" : ""))
                             : ""
                         color: AppTheme.textDim
                         font.pixelSize: AppTheme.fontSmall
