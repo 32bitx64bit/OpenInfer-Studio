@@ -6,6 +6,7 @@ package orchestrate
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -35,7 +36,7 @@ func (iv Invocation) Validate() error {
 	if iv.Tool != ToolLlamaQuantize && iv.Tool != ToolPerplexity {
 		return fmt.Errorf("orchestrate: unknown tool %q", iv.Tool)
 	}
-	if iv.Path == "" || !strings.HasPrefix(iv.Path, "/") {
+	if iv.Path == "" || !filepath.IsAbs(iv.Path) {
 		return fmt.Errorf("orchestrate: %s path must be absolute, got %q", iv.Tool, iv.Path)
 	}
 	if strings.ContainsAny(iv.Path, ";&|`$") {

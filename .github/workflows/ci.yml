@@ -26,7 +26,13 @@ jobs:
           if [ -n "$unformatted" ]; then echo "$unformatted"; exit 1; fi
       - name: Vet
         run: go vet ./...
+      - name: Vet quantlab
+        working-directory: quantlab
+        run: go vet ./...
       - name: Unit + integration tests
+        run: go test ./...
+      - name: Quantlab tests
+        working-directory: quantlab
         run: go test ./...
       - name: Backend self-test
         shell: bash

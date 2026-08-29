@@ -139,6 +139,7 @@ func newQuantEnv(t *testing.T, withTools bool) *quantEnv {
 	if err := qm.RecoverAfterRestart(); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { waitManagerIdle(qm) })
 	return &quantEnv{layout: layout, lib: lib, rt: rt, qm: qm, model: m}
 }
 
@@ -183,6 +184,7 @@ func newQuantlabEnv(t *testing.T) *quantEnv {
 	if err := qm.RecoverAfterRestart(); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { waitManagerIdle(qm) })
 	return &quantEnv{layout: layout, lib: lib, rt: rt, qm: qm, model: model}
 }
 
@@ -297,6 +299,21 @@ func importQuantlabTestModel(t *testing.T, env *quantEnv, name string) *models.M
 		t.Fatal(err)
 	}
 	return model
+}
+
+// waitManagerIdle lets the worker goroutine drop SQLite/file handles before
+// t.TempDir cleanup. Windows cannot delete files that are still open.
+func waitManagerIdle(qm *Manager) {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		qm.mu.Lock()
+		busy := qm.busy
+		qm.mu.Unlock()
+		if !busy {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // dummyCheckpointConfig is a valid quantlab RunConfig with OS-absolute paths.

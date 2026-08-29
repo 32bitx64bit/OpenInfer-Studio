@@ -1,6 +1,7 @@
 package orchestrate
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -8,7 +9,7 @@ import (
 )
 
 func TestInvocationValidate(t *testing.T) {
-	ok := Invocation{Tool: ToolLlamaQuantize, Path: "/usr/bin/llama-quantize", Argv: []string{"a", "b"}}
+	ok := Invocation{Tool: ToolLlamaQuantize, Path: filepath.Join(t.TempDir(), "llama-quantize"), Argv: []string{"a", "b"}}
 	if err := ok.Validate(); err != nil {
 		t.Fatalf("valid invocation rejected: %v", err)
 	}

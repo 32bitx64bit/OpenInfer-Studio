@@ -9,13 +9,22 @@ import (
 	"quantlab/core"
 )
 
+// unixAbs maps a POSIX absolute path onto an OS-absolute path so Validate
+// (filepath.IsAbs) accepts fixtures on Windows.
+func unixAbs(p string) string {
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return "C:" + filepath.FromSlash(p)
+}
+
 func testConfig() RunConfig {
 	return RunConfig{
-		SourcePath:          "/models/src.gguf",
-		OutputDir:           "/out",
-		WorkDir:             "/work",
-		EvalCorpus:          "/data/eval.txt",
-		Tools:               ToolPaths{LlamaQuantize: "/opt/bin/llama-quantize", LlamaPerplexity: "/opt/bin/llama-perplexity"},
+		SourcePath:          unixAbs("/models/src.gguf"),
+		OutputDir:           unixAbs("/out"),
+		WorkDir:             unixAbs("/work"),
+		EvalCorpus:          unixAbs("/data/eval.txt"),
+		Tools:               ToolPaths{LlamaQuantize: unixAbs("/opt/bin/llama-quantize"), LlamaPerplexity: unixAbs("/opt/bin/llama-perplexity")},
 		BudgetBytes:         1 << 30,
 		TargetBPW:           4.8,
 		Threads:             8,
@@ -145,7 +154,7 @@ func TestStoreRoundTripPreservesResumeState(t *testing.T) {
 	}
 	// Resume without CLI args: config, bank, measurements all present.
 	cfg := loaded.Config
-	if cfg.SourcePath != "/models/src.gguf" || cfg.Tools.LlamaQuantize == "" || cfg.BudgetBytes == 0 || cfg.Threads != 8 {
+	if cfg.SourcePath != unixAbs("/models/src.gguf") || cfg.Tools.LlamaQuantize == "" || cfg.BudgetBytes == 0 || cfg.Threads != 8 {
 		t.Fatalf("config not preserved: %+v", cfg)
 	}
 	if loaded.Bank == nil || loaded.Bank.SHA256 != "ff" {

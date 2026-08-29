@@ -9,9 +9,9 @@ llama.cpp. Qt 6/QML frontend, Go backend, SQLite state, one managed
 ## Build / test
 
 - `./scripts/build.sh` — backend + desktop
-- `./scripts/test.sh` — all Go tests + backend self-test
-- `go test ./internal/... ./tests/` — unit + integration
-- `gofmt -w . && go vet ./...` before committing
+- `./scripts/test.sh` — all Go tests (root module + quantlab) + backend self-test
+- `go test ./...` — Studio packages; `go test -C quantlab ./...` — Quantlab
+- `gofmt -w . && go vet ./... && go vet -C quantlab ./...` before committing
 
 ## Hard rules
 
