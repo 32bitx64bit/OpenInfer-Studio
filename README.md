@@ -6,7 +6,7 @@ models with an explicit memory estimate, chat with streaming and reasoning
 controls, quantize (including OpenInfer Dynamic), and serve loaded models
 through a local OpenAI-compatible API.
 
-**Status:** 1.3.1. First-run setup, discover → download → load → chat →
+**Status:** 1.4.0. First-run setup, discover → download → load → chat →
 quantize → serve works end to end. See *Known limitations* below.
 
 ## Features
@@ -155,8 +155,9 @@ OpenInfer Studio is free software licensed under the
 
 ## Releases
 
-Version lives in `internal/version/VERSION`. Tag `vX.Y.Z` (matching that file)
-to trigger `.github/workflows/release.yml`, which publishes:
+Release notes: [`CHANGELOG.md`](CHANGELOG.md). Version lives in
+`internal/version/VERSION`. Tag `vX.Y.Z` (matching that file) to trigger
+`.github/workflows/release.yml`, which publishes:
 
 - Linux: `OpenInferStudio-*-linux-x86_64.AppImage` and `OpenInferStudio-*-linux-aarch64.AppImage`
 - Windows: `OpenInferStudio-*-windows-x86_64-setup.exe` (+ portable `.zip`)
