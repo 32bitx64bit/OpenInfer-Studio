@@ -19,6 +19,13 @@ import (
 	"quantlab/tensorbank"
 )
 
+func testExe(dir, name string) string {
+	if runtime.GOOS == "windows" && filepath.Ext(name) == "" {
+		name += ".exe"
+	}
+	return filepath.Join(dir, name)
+}
+
 // buildFakeTool compiles the synthetic tool binary from testdata (argv-only
 // go build; skipped when no toolchain is available).
 func buildFakeTool(t *testing.T) string {
@@ -31,7 +38,7 @@ func buildFakeTool(t *testing.T) string {
 		t.Fatal("cannot locate test source dir")
 	}
 	pkgDir := filepath.Dir(thisFile)
-	bin := filepath.Join(t.TempDir(), "faketool")
+	bin := testExe(t.TempDir(), "faketool")
 	cmd := exec.Command("go", "build", "-o", bin, "./testdata/faketool")
 	cmd.Dir = pkgDir
 	cmd.Env = os.Environ()
@@ -175,7 +182,7 @@ func buildFakePerplexity(t *testing.T) string {
 		t.Fatal("cannot locate test source dir")
 	}
 	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
-	bin := filepath.Join(t.TempDir(), "llama-perplexity")
+	bin := testExe(t.TempDir(), "llama-perplexity")
 	cmd := exec.Command("go", "build", "-o", bin, "./tests/fakeperplexity")
 	cmd.Dir = repoRoot
 	cmd.Env = os.Environ()
