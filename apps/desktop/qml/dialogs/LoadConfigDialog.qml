@@ -999,17 +999,23 @@ Dialog {
                         Layout.fillWidth: true
                         label: "KV cache type K"; argName: "--cache-type-k"
                         hint: "Quantizing the K cache saves memory."
-                        AppComboBox { model: ["", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"]
+                        AppComboBox {
+                            width: parent.width
+                            model: ["", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"]
                             currentIndex: Math.max(0, model.indexOf(root.settings.cache_type_k))
-                            onActivated: function(i) { root.setSetting("cache_type_k", model[i]) } }
+                            onActivated: function(i) { root.setSetting("cache_type_k", model[i]) }
+                        }
                     }
                     FormField {
                         Layout.fillWidth: true
                         label: "KV cache type V"; argName: "--cache-type-v"
                         hint: "Quantizing the V cache saves memory."
-                        AppComboBox { model: ["", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"]
+                        AppComboBox {
+                            width: parent.width
+                            model: ["", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"]
                             currentIndex: Math.max(0, model.indexOf(root.settings.cache_type_v))
-                            onActivated: function(i) { root.setSetting("cache_type_v", model[i]) } }
+                            onActivated: function(i) { root.setSetting("cache_type_v", model[i]) }
+                        }
                     }
                     FormField {
                         Layout.fillWidth: true

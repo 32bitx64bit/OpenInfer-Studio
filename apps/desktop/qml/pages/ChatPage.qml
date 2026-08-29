@@ -47,12 +47,42 @@ Item {
         return page.chatModels()
     }
 
+    function modelLoadState(modelId) {
+        if (!modelId) return ""
+        var list = page.instances || []
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].model_id === modelId)
+                return list[i].state || ""
+        }
+        return ""
+    }
+    function modelIsLive(modelId) {
+        var st = page.modelLoadState(modelId)
+        return st === "ready" || st === "busy"
+    }
+    function modelIsActive(modelId) {
+        var st = page.modelLoadState(modelId)
+        return st === "ready" || st === "busy" || st === "loading" || st === "starting"
+    }
+    // Map of live model ids for the header combo highlight. New object when
+    // instances change so the combo restyles without replacing its model.
+    readonly property var readyModelIds: {
+        var list = page.instances || []
+        var m = ({})
+        for (var i = 0; i < list.length; i++) {
+            var st = list[i].state
+            if (st === "ready" || st === "busy")
+                m[list[i].model_id] = true
+        }
+        return m
+    }
+
     function modelState() {
         if (!page.currentConv) return "Choose a model"
-        var inst = page.instances.find(function(i) { return i.model_id === page.currentConv.model_id })
-        if (!inst) return "Not loaded"
-        if (inst.state === "ready" || inst.state === "busy") return "Ready"
-        return inst.state
+        var st = page.modelLoadState(page.currentConv.model_id)
+        if (!st) return "Not loaded"
+        if (st === "ready" || st === "busy") return "Ready"
+        return st
     }
 
     Shortcut { sequence: "Ctrl+N"; onActivated: page.newConversation() }
@@ -292,11 +322,13 @@ Item {
                         page.currentConv.model_id = mid
                         page.currentConvChanged()
                         page.syncReasoningEffort()
-                        page.reload()
                     }
                 })
         }
-        page.configureModel(mid)
+        // Already in memory (or currently loading): just switch. The load
+        // dialog is only for models that still need to be started.
+        if (!page.modelIsActive(mid))
+            page.configureModel(mid)
     }
 
     function openChatSettings() {
@@ -309,22 +341,24 @@ Item {
 
     function syncModelSelector() {
         var models = page.chatModels()
-        if (!page.currentConv || models.length === 0) return
-        for (var i = 0; i < models.length; i++) {
-            if (models[i].id === page.currentConv.model_id) {
-                if (page.selectedModelIndex !== i) page.selectedModelIndex = i
-                return
+        if (models.length === 0) return
+        var want = page.currentConv ? page.currentConv.model_id : page.currentModelId()
+        if (want) {
+            for (var i = 0; i < models.length; i++) {
+                if (models[i].id === want) {
+                    if (page.selectedModelIndex !== i) page.selectedModelIndex = i
+                    return
+                }
             }
         }
+        if (page.selectedModelIndex < 0)
+            page.selectedModelIndex = 0
     }
     onLibraryChanged: {
         syncModelSelector()
         page.syncReasoningEffort()
     }
-    onHeaderModelsChanged: {
-        if (page.selectedModelIndex < 0 && page.headerModels.length > 0)
-            page.selectedModelIndex = 0
-    }
+    onHeaderModelsChanged: page.syncModelSelector()
 
     function latestLeaf() {
         var hasChild = {}
@@ -545,10 +579,14 @@ Item {
                 page.reloadMessagesSoon()
             }
             if (name === "instance.state_changed") {
-                page.reload()
-                if (page.loadingModel) {
-                    modelWaitTimer.restart()
-                }
+                // Refresh live instances only. Reloading the whole library
+                // replaces the header combo model and Qt snaps it to index 0.
+                page.api.get("/api/v1/instances", function(st, data) {
+                    if (st === 200)
+                        page.instances = (data && data.instances) || []
+                    if (page.loadingModel)
+                        page.tryStartPendingGeneration()
+                })
             }
             if (name === "library.model_updated" || name === "library.scanned") {
                 page.reload()

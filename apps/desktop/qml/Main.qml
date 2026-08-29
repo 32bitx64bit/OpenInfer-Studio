@@ -201,8 +201,31 @@ ApplicationWindow {
                         model: chatPage.headerModels
                         textRole: "alias"
                         subtitleRole: "quantization"
+                        liveIds: chatPage.readyModelIds
                         currentIndex: chatPage.selectedModelIndex
-                        onActivated: function(i) { chatPage.setConversationModel(i) }
+                        property bool applyingIndex: false
+                        function applySelectedIndex() {
+                            applyingIndex = true
+                            var want = chatPage.selectedModelIndex
+                            if (want < 0) want = 0
+                            if (headerModelSelector.currentIndex !== want)
+                                headerModelSelector.currentIndex = want
+                            applyingIndex = false
+                        }
+                        // Replacing a JS-array model resets ComboBox to 0 and
+                        // drops the currentIndex binding. Put the real selection back.
+                        onModelChanged: Qt.callLater(applySelectedIndex)
+                        onCountChanged: Qt.callLater(applySelectedIndex)
+                        onActivated: function(i) {
+                            if (applyingIndex) return
+                            chatPage.setConversationModel(i)
+                        }
+                    }
+                    Connections {
+                        target: chatPage
+                        function onSelectedModelIndexChanged() {
+                            headerModelSelector.applySelectedIndex()
+                        }
                     }
                     Tag {
                         anchors.verticalCenter: parent.verticalCenter
