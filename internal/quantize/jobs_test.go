@@ -299,6 +299,23 @@ func importQuantlabTestModel(t *testing.T, env *quantEnv, name string) *models.M
 	return model
 }
 
+// dummyCheckpointConfig is a valid quantlab RunConfig with OS-absolute paths.
+func dummyCheckpointConfig(t *testing.T) state.RunConfig {
+	t.Helper()
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "tool")
+	return state.RunConfig{
+		SourcePath:  filepath.Join(dir, "source.gguf"),
+		OutputDir:   filepath.Join(dir, "out"),
+		WorkDir:     filepath.Join(dir, "work"),
+		EvalCorpus:  filepath.Join(dir, "eval.txt"),
+		BudgetBytes: 1,
+		CtxSize:     512,
+		Threads:     1,
+		Tools:       state.ToolPaths{LlamaQuantize: tool, LlamaPerplexity: tool},
+	}
+}
+
 func waitJob(t *testing.T, qm *Manager, id, want string) *Job {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
@@ -1336,11 +1353,7 @@ func TestRecoverAfterRestartRequeuesQuantlabCheckpoint(t *testing.T) {
 	env := newQuantEnv(t, true)
 	const id = "resumable"
 	stateDir := filepath.Join(env.layout.QuantJobs, id, quantlabDirName, "state")
-	run, err := state.NewRun(id, time.Now(), state.RunConfig{
-		SourcePath: "/tmp/source.gguf", OutputDir: "/tmp/out", WorkDir: "/tmp/work",
-		EvalCorpus: "/tmp/eval.txt", BudgetBytes: 1, CtxSize: 512, Threads: 1,
-		Tools: state.ToolPaths{LlamaQuantize: "/bin/true", LlamaPerplexity: "/bin/true"},
-	})
+	run, err := state.NewRun(id, time.Now(), dummyCheckpointConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1435,7 +1448,8 @@ func TestCancelPausedJob(t *testing.T) {
 	if err := env.qm.Pause(job.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.qm.Cancel(job.ID); err != nil {
+	paused := waitJob(t, env.qm, job.ID, "paused")
+	if err := env.qm.Cancel(paused.ID); err != nil {
 		t.Fatal(err)
 	}
 	got, err := env.qm.Get(job.ID)
@@ -1523,7 +1537,8 @@ func TestDeletePausedJob(t *testing.T) {
 	if err := env.qm.Pause(job.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := env.qm.Delete(job.ID); err != nil {
+	paused := waitJob(t, env.qm, job.ID, "paused")
+	if err := env.qm.Delete(paused.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := env.qm.Get(job.ID); err == nil {
@@ -1557,11 +1572,7 @@ func TestRecoverAfterRestartPausingBecomesPaused(t *testing.T) {
 	env := newQuantEnv(t, true)
 	const id = "flushing"
 	stateDir := filepath.Join(env.layout.QuantJobs, id, quantlabDirName, "state")
-	run, err := state.NewRun(id, time.Now(), state.RunConfig{
-		SourcePath: "/tmp/source.gguf", OutputDir: "/tmp/out", WorkDir: "/tmp/work",
-		EvalCorpus: "/tmp/eval.txt", BudgetBytes: 1, CtxSize: 512, Threads: 1,
-		Tools: state.ToolPaths{LlamaQuantize: "/bin/true", LlamaPerplexity: "/bin/true"},
-	})
+	run, err := state.NewRun(id, time.Now(), dummyCheckpointConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}

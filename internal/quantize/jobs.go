@@ -753,6 +753,11 @@ func (m *Manager) kick() {
 		m.mu.Unlock()
 		return
 	}
+	id := m.nextQueued()
+	if id == "" {
+		m.mu.Unlock()
+		return
+	}
 	m.busy = true
 	m.mu.Unlock()
 	go func() {
@@ -767,10 +772,6 @@ func (m *Manager) kick() {
 				m.kick()
 			}
 		}()
-		id := m.nextQueued()
-		if id == "" {
-			return
-		}
 		m.execute(id)
 	}()
 }
