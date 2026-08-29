@@ -2,11 +2,55 @@
 
 Desktop app for finding, downloading, configuring, and running GGUF models
 locally with llama.cpp. Search Hugging Face, manage llama.cpp builds, load
-models with explicit engine settings, chat with streaming, and serve loaded
-models through a local OpenAI-compatible API.
+models with an explicit memory estimate, chat with streaming and reasoning
+controls, quantize (including OpenInfer Dynamic), and serve loaded models
+through a local OpenAI-compatible API.
 
-**Status:** 1.3.1. Discover → download → load → chat → serve works end to end.
-See *Known limitations* below.
+**Status:** 1.3.1. First-run setup, discover → download → load → chat →
+quantize → serve works end to end. See *Known limitations* below.
+
+## Features
+
+**Get started.** A first-run wizard installs a llama.cpp runtime matched to
+detected hardware (Vulkan, CUDA, HIP, or Metal). Theme follows the OS; dark
+and light are available.
+
+**Find and download.** Browse Hugging Face for GGUF repositories. Results are
+grouped by quantization and split set, with tags for vision, audio, MTP,
+embeddings, and speculative drafts. Downloads resume, support multiple
+connections per file, and land in the library automatically. A Hugging Face
+token (OS keychain only) unlocks gated or private repos.
+
+**Library.** Import local GGUFs, register extra model directories, favorite
+and rename models, and pin a runtime per model. Load uses a live memory
+estimate (weights, KV cache, projector, draft, overhead) against VRAM and
+RAM. Context, GPU offload, Flash Attention, KV cache type, speculative
+decoding (MTP / EAGLE3 / DFlash / DSpark / draft-simple), embedding/rerank
+mode, and expert llama.cpp flags are all available — only flags the selected
+runtime advertises in `--help` are passed.
+
+**Chat.** Streaming replies, conversation branches and regenerate, system
+prompt, and per-chat parameters. Reasoning models expose template-native
+effort (including off when the chat template allows it) and a thinking-token
+budget. Dedicated embedders and rerankers stay out of the chat picker; load
+them from the library and call the Developer API.
+
+**Quantize.** Background jobs driven by the selected runtime’s
+`llama-quantize` / `llama-imatrix`: named ftypes, importance matrices, and
+**OpenInfer Dynamic** mixed-precision (OID-Q5/Q4/Q3/Q2_K_XL) with size
+tiers, effort (`fast` / `profiled` / `deep`), and KLD gates against the
+source. Convert a Hugging Face BF16/F16/F32 safetensors repo to GGUF, then
+quantize. Pause keeps Dynamic checkpoints; resume continues from the last
+stage.
+
+**Serve.** An optional OpenAI-compatible endpoint (`/v1/models`,
+chat/completions, completions, embeddings, responses) with its own API key.
+Loopback by default; LAN bind is opt-in. Optional [HostIt](https://github.com/32bitx64bit/HostIt)
+registration can expose that endpoint through a local agent.
+
+**Operate.** Hardware report and backend recommendation, runtime install from
+official llama.cpp releases or a custom binary/archive, redacted logs, and
+classified load failures with the generated command and a retry/CPU fallback.
 
 ## Platforms
 
@@ -32,7 +76,7 @@ llama-server (official llama.cpp builds, pinable per model)
 
 - **C++ bootstrap** launches the backend and loads QML — no app logic.
 - **Go backend** owns Hugging Face browsing, downloads, runtimes, process
-  supervision, chat, and the OpenAI-compatible proxy.
+  supervision, chat, quantization, convert, and the OpenAI-compatible proxy.
 - **QML** is the UI; it talks to the backend over an authenticated local API.
 
 Control API reference: [`docs/api.md`](docs/api.md).
@@ -75,8 +119,9 @@ models, and hardware info stay local. Offline once models and runtimes are
 installed.
 
 The control API is loopback-only with a session token. The optional public
-OpenAI-compatible server is a separate process with its own key; LAN bind is
-opt-in. Inference processes bind loopback with per-process keys.
+OpenAI-compatible server is a separate listener with its own key; LAN bind is
+opt-in. Inference processes bind loopback with per-process keys. Hugging Face
+tokens live in the OS keychain, never in logs or SQLite.
 
 ## Troubleshooting
 
@@ -89,6 +134,8 @@ opt-in. Inference processes bind loopback with per-process keys.
   `downloads/partial/` resume automatically.
 - **GPU unused** — Settings → Hardware for the detected backend, then install a
   matching runtime (Vulkan / CUDA / HIP / Metal).
+- **Quantize job paused or interrupted** — Dynamic jobs resume from the last
+  checkpoint. Classic `llama-quantize` restarts that tool.
 
 ## Known limitations
 
@@ -96,6 +143,10 @@ opt-in. Inference processes bind loopback with per-process keys.
   attachments can be enabled under Settings → Experimental → Audio models
   (mirrors llama.cpp’s experimental libmtmd audio input; quality may vary —
   remains gated until upstream treats audio as stable).
+- Hugging Face convert supports architectures llama.cpp can load as GGUF from
+  BF16/F16/F32 safetensors. NVFP4 / GPTQ / AWQ and some layouts (MLA, packed
+  Qwen3-Next, RWKV/Mamba, altup) fail closed. Vision weights are skipped, so
+  the converted GGUF is language-only.
 
 ## License
 
@@ -120,6 +171,7 @@ Local packaging (on each OS):
 ./packaging/macos/build-bundle.sh x86_64
 pwsh ./packaging/windows/build-installer.ps1
 ```
+
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md).
