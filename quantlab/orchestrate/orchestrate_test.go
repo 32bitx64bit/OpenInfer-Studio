@@ -14,10 +14,10 @@ func TestInvocationValidate(t *testing.T) {
 		t.Fatalf("valid invocation rejected: %v", err)
 	}
 	for _, iv := range []Invocation{
-		{Tool: "rm", Path: "/bin/rm"},                                       // unknown tool
-		{Tool: ToolLlamaQuantize, Path: "relative/path"},                    // not absolute
-		{Tool: ToolLlamaQuantize, Path: "/bin/x; rm -rf /"},                 // metachars
-		{Tool: ToolLlamaQuantize, Path: "/bin/x", Argv: []string{"a\x00b"}}, // NUL in argv
+		{Tool: "rm", Path: "/bin/rm"},                                                // unknown tool
+		{Tool: ToolLlamaQuantize, Path: "relative/path"},                             // not absolute
+		{Tool: ToolLlamaQuantize, Path: unixAbs("/bin/x; rm -rf /")},                 // metachars
+		{Tool: ToolLlamaQuantize, Path: unixAbs("/bin/x"), Argv: []string{"a\x00b"}}, // NUL in argv
 	} {
 		if err := iv.Validate(); err == nil {
 			t.Errorf("expected error for %+v", iv)
@@ -27,7 +27,7 @@ func TestInvocationValidate(t *testing.T) {
 
 func TestQuantizeJobInvocation(t *testing.T) {
 	j := QuantizeJob{ProfileID: "p1", InPath: "/in.gguf", OutPath: "/out.gguf", Type: core.DTypeQ4_K, Threads: 8}
-	iv, err := j.Invocation("/opt/bin/llama-quantize")
+	iv, err := j.Invocation(unixAbs("/opt/bin/llama-quantize"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,19 +36,19 @@ func TestQuantizeJobInvocation(t *testing.T) {
 		t.Fatalf("argv = %v, want %v", iv.Argv, want)
 	}
 	j.OutPath = j.InPath
-	if _, err := j.Invocation("/opt/bin/llama-quantize"); err == nil {
+	if _, err := j.Invocation(unixAbs("/opt/bin/llama-quantize")); err == nil {
 		t.Fatal("same in/out accepted")
 	}
 	j.OutPath = "/out.gguf"
 	j.Type = core.DTypeF16
-	if _, err := j.Invocation("/opt/bin/llama-quantize"); err == nil {
+	if _, err := j.Invocation(unixAbs("/opt/bin/llama-quantize")); err == nil {
 		t.Fatal("float quantize type accepted")
 	}
 }
 
 func TestPerplexityJobInvocation(t *testing.T) {
 	j := PerplexityJob{ModelPath: "/m.gguf", TextPath: "/wiki.txt", CtxSize: 512}
-	iv, err := j.Invocation("/opt/bin/llama-perplexity")
+	iv, err := j.Invocation(unixAbs("/opt/bin/llama-perplexity"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestPerplexityJobInvocation(t *testing.T) {
 		t.Fatalf("argv = %v, want %v", iv.Argv, want)
 	}
 	j.CtxSize = 0
-	if _, err := j.Invocation("/opt/bin/llama-perplexity"); err == nil {
+	if _, err := j.Invocation(unixAbs("/opt/bin/llama-perplexity")); err == nil {
 		t.Fatal("zero ctx accepted")
 	}
 }

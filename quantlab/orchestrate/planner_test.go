@@ -84,7 +84,7 @@ func TestProbeCapabilitiesViaRunner(t *testing.T) {
 		results: []Result{{Stdout: quantizeHelp}},
 		errs:    []error{nil},
 	}
-	caps, err := ProbeCapabilities(context.Background(), fr, ToolLlamaQuantize, "/bin/llama-quantize")
+	caps, err := ProbeCapabilities(context.Background(), fr, ToolLlamaQuantize, unixAbs("/bin/llama-quantize"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestPlanQuantizeArgvOrder(t *testing.T) {
 		DryRun:         true,
 		Threads:        12,
 	}
-	iv, err := PlanQuantize(req, fullQuantCaps(), "/bin/llama-quantize")
+	iv, err := PlanQuantize(req, fullQuantCaps(), unixAbs("/bin/llama-quantize"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,13 +136,13 @@ func TestPlanQuantizeArgvOrder(t *testing.T) {
 	if strings.Join(iv.Argv, "\x1f") != strings.Join(want, "\x1f") {
 		t.Fatalf("argv = %v, want %v", iv.Argv, want)
 	}
-	if iv.Tool != ToolLlamaQuantize || iv.Path != "/bin/llama-quantize" {
+	if iv.Tool != ToolLlamaQuantize || iv.Path != unixAbs("/bin/llama-quantize") {
 		t.Fatalf("iv = %+v", iv)
 	}
 
 	// Minimal request: flags absent, no positional threads.
 	min := QuantizeRequest{ProfileID: "p", SourcePath: "/a.gguf", OutputPath: "/b.gguf", Type: core.DTypeQ4_K_M}
-	iv, err = PlanQuantize(min, fullQuantCaps(), "/bin/llama-quantize")
+	iv, err = PlanQuantize(min, fullQuantCaps(), unixAbs("/bin/llama-quantize"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,26 +158,26 @@ func TestPlanQuantizeCapabilityGating(t *testing.T) {
 		ProfileID: "p", SourcePath: "/a.gguf", OutputPath: "/b.gguf",
 		Type: core.DTypeQ4_K_M, Pure: true, // --pure not advertised by old binary
 	}
-	if _, err := PlanQuantize(req, oldCapsP, "/bin/old"); err == nil {
+	if _, err := PlanQuantize(req, oldCapsP, unixAbs("/bin/old")); err == nil {
 		t.Fatal("unadvertised --pure accepted")
 	} else if !strings.Contains(err.Error(), "--pure") {
 		t.Fatalf("err = %v", err)
 	}
 	req.Pure = false
 	req.TensorTypeFile = "/work/types.txt" // also unadvertised
-	if _, err := PlanQuantize(req, oldCapsP, "/bin/old"); err == nil {
+	if _, err := PlanQuantize(req, oldCapsP, unixAbs("/bin/old")); err == nil {
 		t.Fatal("unadvertised --tensor-type accepted")
 	}
 	// Advertised subset passes.
 	req.TensorTypeFile = ""
 	req.Threads = 8
 	req.ImatrixPath = "/im.bin" // --imatrix IS advertised in old help
-	if _, err := PlanQuantize(req, oldCapsP, "/bin/old"); err != nil {
+	if _, err := PlanQuantize(req, oldCapsP, unixAbs("/bin/old")); err != nil {
 		t.Fatalf("advertised flags rejected: %v", err)
 	}
 	// Wrong-tool capabilities rejected.
 	pplCaps := ParseHelp(ToolPerplexity, "/bin/p", "-m -f -c --kl-divergence-base")
-	if _, err := PlanQuantize(req, &pplCaps, "/bin/old"); err == nil {
+	if _, err := PlanQuantize(req, &pplCaps, unixAbs("/bin/old")); err == nil {
 		t.Fatal("perplexity caps accepted for quantize")
 	}
 }
@@ -194,13 +194,13 @@ version: b5000
 		ProfileID: "p", SourcePath: "/a.gguf", OutputPath: "/b.gguf",
 		Type: core.DTypeQ4_K_M,
 	}
-	if _, err := PlanQuantize(req, &narrow, "/bin/narrow"); err == nil {
+	if _, err := PlanQuantize(req, &narrow, unixAbs("/bin/narrow")); err == nil {
 		t.Fatal("unadvertised quant type accepted")
 	} else if !strings.Contains(err.Error(), "Q4_K_M") {
 		t.Fatalf("err = %v", err)
 	}
 	req.Type = core.DTypeQ8_0
-	if _, err := PlanQuantize(req, &narrow, "/bin/narrow"); err != nil {
+	if _, err := PlanQuantize(req, &narrow, unixAbs("/bin/narrow")); err != nil {
 		t.Fatalf("advertised type rejected: %v", err)
 	}
 	// An empty advertised list (older tools) disables type gating.
@@ -209,11 +209,11 @@ version: b5000
 		t.Fatalf("legacy caps parsed types from untyped help: %v", legacy.Types)
 	}
 	req.Type = core.DTypeQ3_K_L
-	if _, err := PlanQuantize(req, &legacy, "/bin/legacy"); err != nil {
+	if _, err := PlanQuantize(req, &legacy, unixAbs("/bin/legacy")); err != nil {
 		t.Fatalf("empty type list gated the request: %v", err)
 	}
 	// Nil caps permits everything (callers that never probed).
-	if _, err := PlanQuantize(req, nil, "/bin/lq"); err != nil {
+	if _, err := PlanQuantize(req, nil, unixAbs("/bin/lq")); err != nil {
 		t.Fatalf("nil caps rejected request: %v", err)
 	}
 }
@@ -223,7 +223,7 @@ func TestPlanQuantizePureIQ2SUsesIQ2M(t *testing.T) {
 		ProfileID: "p", SourcePath: "/a.gguf", OutputPath: "/b.gguf",
 		Type: core.DTypeIQ2_S, ImatrixPath: "/im.bin", Pure: true,
 	}
-	iv, err := PlanQuantize(req, fullQuantCaps(), "/bin/lq")
+	iv, err := PlanQuantize(req, fullQuantCaps(), unixAbs("/bin/lq"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestPlanQuantizePureIQ2SUsesIQ2M(t *testing.T) {
 	}
 
 	req.Pure = false
-	iv, err = PlanQuantize(req, fullQuantCaps(), "/bin/lq")
+	iv, err = PlanQuantize(req, fullQuantCaps(), unixAbs("/bin/lq"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ allowed quantization types: Q8_0 IQ2_S IQ2_XS
 version: b10000
 `)
 	req.Pure = true
-	iv, err = PlanQuantize(req, &noM, "/bin/old")
+	iv, err = PlanQuantize(req, &noM, unixAbs("/bin/old"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ version: b10000
 		t.Fatalf("IQ2_M missing from help: argv type = %q, want IQ2_S; argv=%v", got, iv.Argv)
 	}
 
-	iv, err = PlanQuantize(req, nil, "/bin/lq")
+	iv, err = PlanQuantize(req, nil, unixAbs("/bin/lq"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,20 +269,20 @@ func TestPlanQuantizeRequantizeRefusal(t *testing.T) {
 		ProfileID: "p", SourcePath: "/q4.gguf", OutputPath: "/q3.gguf",
 		Type: core.DTypeQ3_K, SourceQuantized: true,
 	}
-	if _, err := PlanQuantize(req, fullQuantCaps(), "/bin/lq"); err == nil {
+	if _, err := PlanQuantize(req, fullQuantCaps(), unixAbs("/bin/lq")); err == nil {
 		t.Fatal("requantization accepted by default")
 	}
 	req.AllowRequantize = true
-	if _, err := PlanQuantize(req, fullQuantCaps(), "/bin/lq"); err != nil {
+	if _, err := PlanQuantize(req, fullQuantCaps(), unixAbs("/bin/lq")); err != nil {
 		t.Fatalf("explicit override refused: %v", err)
 	}
 	// IQ type without imatrix is refused even with override.
 	req.Type = core.DTypeIQ2_XXS
-	if _, err := PlanQuantize(req, fullQuantCaps(), "/bin/lq"); err == nil {
+	if _, err := PlanQuantize(req, fullQuantCaps(), unixAbs("/bin/lq")); err == nil {
 		t.Fatal("IQ type without imatrix accepted")
 	}
 	req.ImatrixPath = "/im.bin"
-	if _, err := PlanQuantize(req, fullQuantCaps(), "/bin/lq"); err != nil {
+	if _, err := PlanQuantize(req, fullQuantCaps(), unixAbs("/bin/lq")); err != nil {
 		t.Fatal(err)
 	}
 	// Non-float output type refused.
@@ -290,7 +290,7 @@ func TestPlanQuantizeRequantizeRefusal(t *testing.T) {
 		ProfileID: "p", SourcePath: "/a.gguf", OutputPath: "/b.gguf",
 		Type: core.DTypeQ4_K_M, OutputType: core.DTypeQ6_K,
 	}
-	if _, err := PlanQuantize(req2, fullQuantCaps(), "/bin/lq"); err == nil {
+	if _, err := PlanQuantize(req2, fullQuantCaps(), unixAbs("/bin/lq")); err == nil {
 		t.Fatal("quant output-tensor-type accepted")
 	}
 }
@@ -494,11 +494,11 @@ func argvHas(argv []string, tok string) bool {
 
 func TestEvalPlansComparable(t *testing.T) {
 	cfg := EvalConfig{CorpusPath: "/corpus.txt", CtxSize: 2048, Chunks: 16, Threads: 8, NGPULayers: 0, Seed: 42}
-	base, err := PlanBaselineEval(cfg, "/models/base.gguf", "/work/base.logits", pplCaps(), "/bin/lp")
+	base, err := PlanBaselineEval(cfg, "/models/base.gguf", "/work/base.logits", pplCaps(), unixAbs("/bin/lp"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	cand, err := PlanCandidateEval(cfg, "/models/cand.gguf", "/work/base.logits", pplCaps(), "/bin/lp")
+	cand, err := PlanCandidateEval(cfg, "/models/cand.gguf", "/work/base.logits", pplCaps(), unixAbs("/bin/lp"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,7 +526,7 @@ func TestEvalPlansComparable(t *testing.T) {
 	// A differing corpus breaks comparability.
 	bad := cfg
 	bad.CorpusPath = "/other.txt"
-	badBase, err := PlanBaselineEval(bad, "/models/base.gguf", "/work/base.logits", pplCaps(), "/bin/lp")
+	badBase, err := PlanBaselineEval(bad, "/models/base.gguf", "/work/base.logits", pplCaps(), unixAbs("/bin/lp"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,27 +535,27 @@ func TestEvalPlansComparable(t *testing.T) {
 	}
 	// Capability gating: old perplexity without --kl-divergence-base.
 	oldHelp := ParseHelp(ToolPerplexity, "/bin/old", "usage: llama-perplexity -m FNAME -f FNAME -c N\n")
-	if _, err := PlanBaselineEval(cfg, "/m.gguf", "/l", &oldHelp, "/bin/old"); err == nil {
+	if _, err := PlanBaselineEval(cfg, "/m.gguf", "/l", &oldHelp, unixAbs("/bin/old")); err == nil {
 		t.Fatal("missing KLD flag accepted")
 	}
 	// Missing -chunks advertised likewise refused when needed.
 	noChunks := ParseHelp(ToolPerplexity, "/bin/nc", "-m -f -c -t --kl-divergence --kl-divergence-base")
-	if _, err := PlanCandidateEval(cfg, "/m.gguf", "/l", &noChunks, "/bin/nc"); err == nil {
+	if _, err := PlanCandidateEval(cfg, "/m.gguf", "/l", &noChunks, unixAbs("/bin/nc")); err == nil {
 		t.Fatal("missing -chunks accepted while requested")
 	}
 	// Candidate requires --kl-divergence even when --kl-divergence-base is advertised.
 	baseOnly := ParseHelp(ToolPerplexity, "/bin/baseonly",
 		"usage: llama-perplexity -m FNAME -f FNAME -c N -chunks N -t N -ngl N -s SEED --kl-divergence-base FNAME\n")
-	if _, err := PlanCandidateEval(cfg, "/m.gguf", "/l", &baseOnly, "/bin/baseonly"); err == nil {
+	if _, err := PlanCandidateEval(cfg, "/m.gguf", "/l", &baseOnly, unixAbs("/bin/baseonly")); err == nil {
 		t.Fatal("missing --kl-divergence accepted for candidate")
 	} else if !strings.Contains(err.Error(), kldFlag) {
 		t.Fatalf("candidate missing --kl-divergence: %v", err)
 	}
-	if _, err := PlanBaselineEval(cfg, "/m.gguf", "/l", &baseOnly, "/bin/baseonly"); err != nil {
+	if _, err := PlanBaselineEval(cfg, "/m.gguf", "/l", &baseOnly, unixAbs("/bin/baseonly")); err != nil {
 		t.Fatalf("baseline rejected without --kl-divergence: %v", err)
 	}
 	// Invalid config refused.
-	if _, err := PlanBaselineEval(EvalConfig{CtxSize: 100}, "/m", "/l", pplCaps(), "/bin/lp"); err == nil {
+	if _, err := PlanBaselineEval(EvalConfig{CtxSize: 100}, "/m", "/l", pplCaps(), unixAbs("/bin/lp")); err == nil {
 		t.Fatal("config without corpus accepted")
 	}
 }
@@ -595,7 +595,7 @@ func TestEvalPlansChooseAdvertisedAliases(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			caps := ParseHelp(ToolPerplexity, "/bin/lp", tc.help)
-			iv, err := PlanBaselineEval(cfg, "/model.gguf", "/base.logits", &caps, "/bin/lp")
+			iv, err := PlanBaselineEval(cfg, "/model.gguf", "/base.logits", &caps, unixAbs("/bin/lp"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -609,11 +609,11 @@ func TestEvalPlansChooseAdvertisedAliases(t *testing.T) {
 
 	current := ParseHelp(ToolPerplexity, "/bin/current", currentHelp)
 	legacy := pplCaps()
-	base, err := PlanBaselineEval(cfg, "/base.gguf", "/base.logits", &current, "/bin/current")
+	base, err := PlanBaselineEval(cfg, "/base.gguf", "/base.logits", &current, unixAbs("/bin/current"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	candidate, err := PlanCandidateEval(cfg, "/candidate.gguf", "/base.logits", legacy, "/bin/legacy")
+	candidate, err := PlanCandidateEval(cfg, "/candidate.gguf", "/base.logits", legacy, unixAbs("/bin/legacy"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +658,7 @@ func TestEvalPlansRejectMissingAliases(t *testing.T) {
 				missing = strings.ReplaceAll(missing, alias, "unsupported")
 			}
 			caps := ParseHelp(ToolPerplexity, "/bin/missing", missing)
-			if _, err := PlanBaselineEval(cfg, "/model.gguf", "/base.logits", &caps, "/bin/missing"); err == nil {
+			if _, err := PlanBaselineEval(cfg, "/model.gguf", "/base.logits", &caps, unixAbs("/bin/missing")); err == nil {
 				t.Fatalf("missing all %s aliases accepted", tc.name)
 			}
 		})
