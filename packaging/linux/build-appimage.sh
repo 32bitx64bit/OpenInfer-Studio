@@ -72,6 +72,9 @@ fi
 # StartupWMClass must match the window's X11 WM_CLASS / Wayland app_id so
 # Plasma (and other DEs) group the running window with the pinned launcher.
 # Without it, pinning from the app menu creates a second taskbar entry.
+# The in-image copy is not a stable launcher (AppImages remount under a new
+# /tmp/.mount_* path each run). The Qt bootstrap installs
+# ~/.local/share/applications/openinfer-studio.desktop pointing at $APPIMAGE.
 cat > "$APPDIR/usr/share/applications/openinfer-studio.desktop" <<EOF
 [Desktop Entry]
 Name=OpenInfer Studio

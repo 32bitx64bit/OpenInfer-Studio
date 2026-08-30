@@ -5,6 +5,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QEventLoop>
+#include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QJsonDocument>
@@ -15,6 +16,7 @@
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QRandomGenerator>
+#include <QSaveFile>
 #include <QTcpServer>
 #include <QTimer>
 
@@ -69,10 +71,105 @@ int fatal(const QString &title, const QString &message)
     return 1;
 }
 
+#ifdef Q_OS_LINUX
+// Quote a path for a .desktop Exec= key (desktop-entry spec quoting + %% ).
+QString quoteDesktopExec(const QString &path)
+{
+    QString escaped = path;
+    escaped.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+    escaped.replace(QLatin1Char('"'), QStringLiteral("\\\""));
+    escaped.replace(QLatin1Char('`'), QStringLiteral("\\`"));
+    escaped.replace(QLatin1Char('$'), QStringLiteral("\\$"));
+    escaped.replace(QLatin1Char('%'), QStringLiteral("%%"));
+    return QLatin1Char('"') + escaped + QLatin1Char('"');
+}
+
+// AppImages mount at a new /tmp/.mount_* path every launch. Plasma pins the
+// in-image .desktop at that ephemeral path, then fails on the next click.
+// Install a stable user launcher that Exec=s the AppImage itself, matching
+// setDesktopFileName("openinfer-studio"), before the window is created.
+void installAppImageDesktopEntry()
+{
+    const QString appImage = qEnvironmentVariable("APPIMAGE");
+    if (appImage.isEmpty() || appImage.contains(QLatin1Char('\n')))
+        return;
+    if (!QFileInfo::exists(appImage))
+        return;
+
+    const QString dataHome = qEnvironmentVariable("XDG_DATA_HOME");
+    const QString share = dataHome.isEmpty()
+        ? QDir::homePath() + QStringLiteral("/.local/share")
+        : dataHome;
+    const QString appsDir = share + QStringLiteral("/applications");
+    if (!QDir().mkpath(appsDir))
+        return;
+
+    QString iconValue = QStringLiteral("openinfer-studio");
+    const QString appDir = qEnvironmentVariable("APPDIR");
+    if (!appDir.isEmpty()) {
+        const QStringList iconCandidates = {
+            appDir + QStringLiteral("/usr/share/icons/hicolor/256x256/apps/openinfer-studio.png"),
+            appDir + QStringLiteral("/usr/share/icons/hicolor/128x128/apps/openinfer-studio.png"),
+            appDir + QStringLiteral("/openinfer-studio.png"),
+            appDir + QStringLiteral("/usr/share/icons/hicolor/scalable/apps/openinfer-studio.svg"),
+            appDir + QStringLiteral("/usr/share/icons/hicolor/256x256/apps/openinfer-studio.svg"),
+            appDir + QStringLiteral("/openinfer-studio.svg"),
+        };
+        for (const QString &src : iconCandidates) {
+            if (!QFileInfo::exists(src))
+                continue;
+            const bool svg = src.endsWith(QLatin1String(".svg"));
+            const QString rel = svg
+                ? QStringLiteral("/icons/hicolor/scalable/apps")
+                : QStringLiteral("/icons/hicolor/256x256/apps");
+            const QString iconDir = share + rel;
+            if (!QDir().mkpath(iconDir))
+                break;
+            const QString dst = iconDir + (svg
+                ? QStringLiteral("/openinfer-studio.svg")
+                : QStringLiteral("/openinfer-studio.png"));
+            QFile::remove(dst);
+            if (QFile::copy(src, dst))
+                iconValue = dst;
+            break;
+        }
+    }
+
+    QString body;
+    body += QStringLiteral("[Desktop Entry]\n");
+    body += QStringLiteral("Name=OpenInfer Studio\n");
+    body += QStringLiteral("Comment=Run GGUF models locally with llama.cpp\n");
+    body += QStringLiteral("Exec=") + quoteDesktopExec(appImage) + QLatin1Char('\n');
+    body += QStringLiteral("TryExec=") + appImage + QLatin1Char('\n');
+    body += QStringLiteral("Icon=") + iconValue + QLatin1Char('\n');
+    body += QStringLiteral("Type=Application\n");
+    body += QStringLiteral("Categories=Development;Utility;\n");
+    body += QStringLiteral("Terminal=false\n");
+    body += QStringLiteral("StartupWMClass=openinfer-studio\n");
+    body += QStringLiteral("X-AppImage-Version=") + QStringLiteral(OPENINFER_VERSION) + QLatin1Char('\n');
+    body += QStringLiteral("X-OpenInfer-AppImage=") + appImage + QLatin1Char('\n');
+
+    const QString desktopPath = appsDir + QStringLiteral("/openinfer-studio.desktop");
+    QFile existing(desktopPath);
+    if (existing.open(QIODevice::ReadOnly) && existing.readAll() == body.toUtf8())
+        return;
+
+    QSaveFile out(desktopPath);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Text))
+        return;
+    out.write(body.toUtf8());
+    out.commit();
+}
+#endif
+
 } // namespace
 
 int main(int argc, char *argv[])
 {
+#ifdef Q_OS_LINUX
+    installAppImageDesktopEntry();
+#endif
+
     // High-DPI and application identity.
     QGuiApplication::setApplicationName(QStringLiteral("openinfer-studio"));
     QGuiApplication::setApplicationDisplayName(QStringLiteral("OpenInfer Studio"));
