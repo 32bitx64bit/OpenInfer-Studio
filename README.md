@@ -6,7 +6,7 @@ models with an explicit memory estimate, chat with streaming and reasoning
 controls, quantize (including OpenInfer Dynamic), and serve loaded models
 through a local OpenAI-compatible API.
 
-**Status:** 1.4.0. First-run setup, discover → download → load → chat →
+**Status:** 1.4.1. First-run setup, discover → download → load → chat →
 quantize → serve works end to end. See *Known limitations* below.
 
 ## Features
