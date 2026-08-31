@@ -170,6 +170,10 @@ func BuildArgs(s LoadSettings, modelPath, projectorPath string,
 	add("--host", host)
 	add("--port", strconv.Itoa(port))
 	add("--api-key", apiKey)
+	// GET /slots drives the library/detail activity meters. Older llama.cpp
+	// disables the endpoint unless --slots is passed; current builds default
+	// it on, so this is a no-op there.
+	add("--slots")
 
 	// Context. llama.cpp splits --ctx-size across --parallel slots, so the
 	// flag receives ctx × slots: every request gets the full window, and

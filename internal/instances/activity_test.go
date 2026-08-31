@@ -144,6 +144,109 @@ func TestMonitorActivityBusyTransitions(t *testing.T) {
 	}
 }
 
+func TestParseLlamaSlotDecoded(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want int
+	}{
+		{
+			name: "top-level legacy",
+			raw:  `{"id":0,"id_task":7,"is_processing":true,"n_decoded":12,"n_prompt_tokens":5}`,
+			want: 12,
+		},
+		{
+			name: "next_token object",
+			raw:  `{"id":0,"id_task":7,"is_processing":true,"n_prompt_tokens":5,"next_token":{"has_next_token":true,"n_decoded":34}}`,
+			want: 34,
+		},
+		{
+			name: "next_token array",
+			raw:  `{"id":0,"id_task":7,"is_processing":true,"n_prompt_tokens":5,"next_token":[{"has_next_token":true,"n_decoded":56}]}`,
+			want: 56,
+		},
+		{
+			name: "nested wins over stale top-level zero",
+			raw:  `{"id":0,"is_processing":true,"n_decoded":0,"next_token":{"n_decoded":9}}`,
+			want: 9,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var s llamaSlot
+			if err := json.Unmarshal([]byte(tc.raw), &s); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if s.Decoded != tc.want {
+				t.Fatalf("decoded=%d want %d (processing=%v prompt=%d)", s.Decoded, tc.want, s.Processing, s.PromptTokens)
+			}
+			if !s.Processing {
+				t.Fatal("expected is_processing")
+			}
+		})
+	}
+}
+
+func TestMonitorActivityNestedNextToken(t *testing.T) {
+	old := activityPollInterval
+	activityPollInterval = 30 * time.Millisecond
+	defer func() { activityPollInterval = old }()
+
+	var mu sync.Mutex
+	decoded := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/slots" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		mu.Lock()
+		d := decoded
+		decoded += 4
+		mu.Unlock()
+		json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"id": 0, "id_task": 7, "is_processing": true,
+				"n_prompt_tokens": 8,
+				"next_token":      []map[string]any{{"has_next_token": true, "n_decoded": d}},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	port := 0
+	if _, err := fmt.Sscanf(strings.TrimPrefix(srv.URL, "http://127.0.0.1:"), "%d", &port); err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+
+	sink := &captureSink{}
+	m := &Manager{events: sink, log: slog.Default()}
+	li := &liveInstance{
+		Instance: Instance{ModelID: "m1", Port: port, State: StateReady},
+		apiKey:   "k",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.monitorActivity(ctx, li)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if a, ok := sink.lastActivity(); ok && a.Busy && a.DecodedTotal > 0 && a.TokensPerSec > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	act, ok := sink.lastActivity()
+	if !ok {
+		t.Fatal("no activity events published")
+	}
+	if !act.Busy || act.DecodedTotal == 0 {
+		t.Fatalf("expected nested n_decoded token counts, got %+v", act)
+	}
+	if act.TokensPerSec <= 0 {
+		t.Fatalf("expected positive tok/s from nested n_decoded, got %+v", act)
+	}
+}
+
 func TestMonitorActivityGivesUpWithoutSlots(t *testing.T) {
 	old := activityPollInterval
 	activityPollInterval = 20 * time.Millisecond

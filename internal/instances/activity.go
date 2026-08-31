@@ -32,12 +32,57 @@ type SlotActivity struct {
 
 // llamaSlot mirrors the /slots response shape of llama-server. Missing
 // fields decode as zero, which keeps us compatible across versions.
+// n_decoded lives under next_token in current llama.cpp (object historically,
+// array of one object on recent builds). Older fakes / builds put it at the
+// top level.
 type llamaSlot struct {
 	ID           int  `json:"id"`
 	TaskID       int  `json:"id_task"`
 	Processing   bool `json:"is_processing"`
 	PromptTokens int  `json:"n_prompt_tokens"`
 	Decoded      int  `json:"n_decoded"`
+}
+
+type llamaNextToken struct {
+	Decoded int `json:"n_decoded"`
+}
+
+func (s *llamaSlot) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID           int             `json:"id"`
+		TaskID       int             `json:"id_task"`
+		Processing   bool            `json:"is_processing"`
+		PromptTokens int             `json:"n_prompt_tokens"`
+		Decoded      int             `json:"n_decoded"`
+		NextToken    json.RawMessage `json:"next_token"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	s.ID = raw.ID
+	s.TaskID = raw.TaskID
+	s.Processing = raw.Processing
+	s.PromptTokens = raw.PromptTokens
+	s.Decoded = raw.Decoded
+	if n, ok := decodedFromNextToken(raw.NextToken); ok {
+		s.Decoded = n
+	}
+	return nil
+}
+
+func decodedFromNextToken(raw json.RawMessage) (int, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, false
+	}
+	var obj llamaNextToken
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		return obj.Decoded, true
+	}
+	var arr []llamaNextToken
+	if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
+		return arr[0].Decoded, true
+	}
+	return 0, false
 }
 
 // activityPollInterval is a var so tests can shorten it.

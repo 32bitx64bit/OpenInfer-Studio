@@ -163,7 +163,8 @@ func main() {
 		for i := 0; i < n; i++ {
 			slots = append(slots, map[string]any{
 				"id": i, "id_task": 100 + i, "is_processing": true,
-				"n_decoded": d, "n_prompt_tokens": 5,
+				"n_prompt_tokens": 5,
+				"next_token":      []map[string]any{{"has_next_token": true, "n_decoded": d}},
 			})
 		}
 		json.NewEncoder(w).Encode(slots)

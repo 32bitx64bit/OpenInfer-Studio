@@ -46,6 +46,21 @@ func TestBuildArgsBasics(t *testing.T) {
 	}
 }
 
+func TestBuildArgsEnablesSlots(t *testing.T) {
+	s := DefaultSettings()
+	help := testHelp + "  --slots\n"
+	caps := append(testCaps(), "slots")
+	br := BuildArgs(s, "/m.gguf", "", caps, help, "127.0.0.1", 1, "k")
+	if !strings.Contains(strings.Join(br.Args, " "), "--slots") {
+		t.Errorf("expected --slots so /slots activity works: %v", br.Args)
+	}
+	// Runtimes that never advertised the flag must not receive it.
+	br = BuildArgs(s, "/m.gguf", "", testCaps(), testHelp, "127.0.0.1", 1, "k")
+	if strings.Contains(strings.Join(br.Args, " "), "--slots") {
+		t.Errorf("unsupported --slots leaked: %v", br.Args)
+	}
+}
+
 func TestBuildArgsParallelFullContextPerSlot(t *testing.T) {
 	s := DefaultSettings()
 	s.ContextLength = 8192
