@@ -120,8 +120,32 @@ var pciVendor = map[string]string{
 	"0x10de": "nvidia", "0x1002": "amd", "0x8086": "intel",
 }
 
+// sysfsVRAMTotal reads dedicated VRAM from the DRM device directory
+// (mem_info_vram_total, exposed by amdgpu and some others). Returns 0 when
+// the driver does not report a dedicated pool — e.g. integrated GPUs, which
+// share system RAM and are treated as unified memory.
+func sysfsVRAMTotal(deviceDir string) uint64 {
+	b, err := os.ReadFile(filepath.Join(deviceDir, "mem_info_vram_total"))
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+func gpuVendorPresent(gpus []GPU, vendor string) bool {
+	for _, g := range gpus {
+		if g.Vendor == vendor {
+			return true
+		}
+	}
+	return false
+}
+
 func detectGPUs(i *Info) {
-	seen := map[string]bool{}
 	entries, err := filepath.Glob("/sys/class/drm/card*/device/vendor")
 	if err == nil {
 		for _, vfile := range entries {
@@ -133,10 +157,11 @@ func detectGPUs(i *Info) {
 			if vendor == "" {
 				vendor = "unknown"
 			}
-			if !seen[vendor] {
-				seen[vendor] = true
-				i.GPUs = append(i.GPUs, GPU{Vendor: vendor, Name: vendor + " GPU"})
-			}
+			i.GPUs = append(i.GPUs, GPU{
+				Vendor: vendor,
+				Name:   vendor + " GPU",
+				VRAM:   sysfsVRAMTotal(filepath.Dir(vfile)),
+			})
 		}
 	}
 	// Enrich with nvidia-smi when available (names, VRAM, driver).
@@ -161,7 +186,7 @@ func detectGPUs(i *Info) {
 		}
 		i.CUDA = true
 		i.Probes = append(i.Probes, Probe{Name: "nvidia-smi", OK: true})
-	} else if seen["nvidia"] {
+	} else if gpuVendorPresent(i.GPUs, "nvidia") {
 		i.Probes = append(i.Probes, Probe{Name: "nvidia-smi", OK: false,
 			Detail: "NVIDIA device present but nvidia-smi failed; driver may be missing"})
 	}
