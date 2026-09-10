@@ -135,6 +135,10 @@ func Solve(req Request) (*Result, error) {
 		budget = b
 	}
 
+	if req.Sensitivity != nil {
+		return solveCalibrated(req, set, est, cands, budget)
+	}
+
 	states := make([]solverState, len(req.Bank.Tensors))
 	var minTotal, maxTotal uint64
 	var constrained []string
@@ -220,7 +224,13 @@ func Solve(req Request) (*Result, error) {
 	if !req.DisableSwiGLUCoupling {
 		coupleSwiGLU(states, req.Bank, effective)
 	}
+	return assembleResult(req, set, states, budget, effective, minTotal, maxTotal)
+}
 
+// assembleResult turns the chosen rungs into a validated profile, its exact
+// selection manifest, and solve diagnostics.
+func assembleResult(req Request, set *anchor.Set, states []solverState,
+	budget, effective, minTotal, maxTotal uint64) (*Result, error) {
 	// Assemble outputs in bank order.
 	assignments := make([]core.QuantAssignment, 0, len(states))
 	var total uint64

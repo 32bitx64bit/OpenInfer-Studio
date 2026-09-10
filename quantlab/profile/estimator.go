@@ -29,9 +29,12 @@ type ImatrixStats struct {
 	// EffRank is the participation ratio of the channel-importance
 	// distribution: (sum v)^2 / sum v^2 over the per-row means, in [1, rows].
 	EffRank float64 `json:"effRank,omitempty"`
-	// Values is the full per-(row, chunk) mean activation power vector in
-	// row-major order, bounded by maxImatrixVector. Nil when the vector
-	// exceeded the retention budget or the source lacked per-block data.
+	// Values is the mean activation power E[x_c^2] per input channel c of
+	// the consuming weight (the tensor's ne0 dimension), in llama-imatrix
+	// in_sum2/counts layout: length ne0 for 2-D weights, ne0*experts
+	// (expert-major) for fused 3-D expert stacks. See ImportanceLayout for
+	// the element mapping. Bounded by maxImatrixVector; nil when the vector
+	// exceeded the retention budget or the source lacked per-channel data.
 	Values []float32 `json:"values,omitempty"`
 }
 

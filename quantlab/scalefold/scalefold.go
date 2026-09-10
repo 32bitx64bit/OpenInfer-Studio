@@ -194,44 +194,22 @@ func Discover(bank *core.TensorBank) []Cluster {
 // projection's input vector, so the mean across rows reduces row-wise
 // sampling noise. Chunk granularity coarser than channels is spread
 // uniformly over covered channels. Nil when the entry lacks vector data.
+// channelImportanceOne returns one consumer's per-input-channel activation
+// power (imatrix layout: one value per column of the weight), or nil when
+// the retained vector does not fit the tensor or carries no signal.
 func channelImportanceOne(st profile.ImatrixStats, ne0, rows uint64) []float64 {
-	if ne0 == 0 || rows == 0 || len(st.Values) == 0 {
+	v := profile.ChannelMean(st.Values, ne0, rows)
+	if v == nil {
 		return nil
-	}
-	rowChunks := uint64(len(st.Values)) / rows
-	if rowChunks == 0 {
-		return nil
-	}
-	sum := make([]float64, ne0)
-	hits := make([]float64, ne0)
-	sz := ne0 / rowChunks
-	if sz == 0 {
-		sz = 1
-	}
-	nr := rows
-	if uint64(len(st.Values))/rowChunks < nr {
-		nr = uint64(len(st.Values)) / rowChunks
-	}
-	for r := uint64(0); r < nr; r++ {
-		for c := uint64(0); c < rowChunks; c++ {
-			v := float64(st.Values[r*rowChunks+c])
-			for j := c * sz; j < (c+1)*sz && j < ne0; j++ {
-				sum[j] += v
-				hits[j]++
-			}
-		}
 	}
 	var total float64
-	for i := range sum {
-		if hits[i] > 0 {
-			sum[i] /= hits[i]
-		}
-		total += sum[i]
+	for _, x := range v {
+		total += x
 	}
 	if total <= 0 {
 		return nil
 	}
-	return sum
+	return v
 }
 
 // ChannelImportance pools per-consumer importance vectors for the cluster,

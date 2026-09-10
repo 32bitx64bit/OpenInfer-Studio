@@ -60,6 +60,8 @@ type PlanOptions struct {
 	NoFTI                 bool
 	ProbeKLD              bool
 	NoProbeKLD            bool
+	Sensitivity           bool
+	NoSensitivity         bool
 }
 
 // Plan validates everything, builds calibration corpora when needed, derives
@@ -245,7 +247,8 @@ func Plan(opts PlanOptions) (*state.Run, error) {
 	if chunks > 0 || opts.CSKMaxWorkingSetBytes > 0 ||
 		opts.ExactEstimatorOff || opts.ScaleFold || opts.NoScaleFold ||
 		opts.Hadamard || opts.NoHadamard || opts.CSK || opts.NoCSK ||
-		opts.FTI || opts.NoFTI || opts.ProbeKLD || opts.NoProbeKLD {
+		opts.FTI || opts.NoFTI || opts.ProbeKLD || opts.NoProbeKLD ||
+		opts.Sensitivity || opts.NoSensitivity {
 		e := &Engine{Store: store, Run: r, Extra: ExtraConfig{
 			Chunks:                chunks,
 			ExactEstimatorOff:     opts.ExactEstimatorOff,
@@ -260,6 +263,8 @@ func Plan(opts PlanOptions) (*state.Run, error) {
 			NoFTI:                 opts.NoFTI,
 			ProbeKLD:              opts.ProbeKLD,
 			NoProbeKLD:            opts.NoProbeKLD,
+			Sensitivity:           opts.Sensitivity,
+			NoSensitivity:         opts.NoSensitivity,
 		}}
 		if err := e.saveExtra(); err != nil {
 			return nil, fmt.Errorf("pipeline: write extra config: %w", err)

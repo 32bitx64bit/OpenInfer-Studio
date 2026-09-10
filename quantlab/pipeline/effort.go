@@ -35,19 +35,33 @@ type EffortProfile struct {
 	// Extra/CLI only; every preset leaves this off.
 	Reconstruct bool
 	// ScaleFold enables AWQ-style equivalent scaling on a job-private copy.
-	// Profiled/deep on; fast off. Extra.NoScaleFold opts out.
+	// Off in every preset: measured end-to-end it did not lower KLD
+	// (llama-quantize's own imatrix-weighted scale search already covers
+	// the per-channel effect, and the folded scales cost the paired
+	// tensors). Extra.ScaleFold forces it on.
 	ScaleFold bool
 	// InPlaceReconstruct enables Hadamard + CSK on a job-private source
-	// without a second model-sized GGUF. Profiled/deep on; fast off.
+	// without a second model-sized GGUF. Off in every preset (same
+	// evidence as ScaleFold); Extra.Hadamard / Extra.CSK force them on.
 	// Permute/MagR/LWC stay off unless Reconstruct or Extra turns them on.
 	InPlaceReconstruct bool
 	// ProbeKLD blends a cheap Wx softmax-KLD into the exact loss table.
-	// Profiled/deep on; fast off. Extra.NoProbeKLD opts out.
+	// Off in every preset: the sensitivity-calibrated solver consumes the
+	// table's per-tensor rung ratios, and the blend was validated only
+	// against the uncalibrated objective. Extra.ProbeKLD forces it on.
 	ProbeKLD bool
 	// SolverFTI sharpens imatrix channel weights in memory for exact-loss
 	// and Solve. llama-quantize still sees the original measured matrix.
 	// No extra GGUF. Profiled/deep on; fast off. Extra.NoFTI opts out.
 	SolverFTI bool
+	// SensitivityProbes measures per-role KLD sensitivity (one Q8_0
+	// background plus one aggressive-rung probe per tensor role, each with
+	// a ProbeChunks-chunk KLD eval) and hands the solver a calibrated
+	// cross-tensor loss model. Profiled/deep on; fast off.
+	// Extra.NoSensitivity opts out.
+	SensitivityProbes bool
+	// ProbeChunks is the KLD chunk count for each sensitivity probe eval.
+	ProbeChunks int
 }
 
 // qualityGateKnots are (bpw, mean-KLD, p95-KLD), descending in bits-per-weight.
@@ -135,15 +149,14 @@ func EffortFor(e Effort) (EffortProfile, error) {
 		}, nil
 	case "", EffortProfiled:
 		return EffortProfile{
-			EvalChunks:         4,
-			EvalCtx:            2048,
-			AnchorRecipes:      []core.DType{core.DTypeQ3_K_M, core.DTypeQ3_K_L, core.DTypeQ4_K_M},
-			Gates:              defaultEffortGates(),
-			ExactEstimator:     true,
-			ScaleFold:          true,
-			InPlaceReconstruct: true,
-			ProbeKLD:           true,
-			SolverFTI:          true,
+			EvalChunks:        4,
+			EvalCtx:           2048,
+			AnchorRecipes:     []core.DType{core.DTypeQ3_K_M, core.DTypeQ3_K_L, core.DTypeQ4_K_M},
+			Gates:             defaultEffortGates(),
+			ExactEstimator:    true,
+			SolverFTI:         true,
+			SensitivityProbes: true,
+			ProbeChunks:       2,
 		}, nil
 	case EffortDeep:
 		return EffortProfile{
@@ -152,13 +165,12 @@ func EffortFor(e Effort) (EffortProfile, error) {
 			// Q4_K_L has no core constant; the recipe list is preset data
 			// (consumed by the app adapter), so it is spelled inline rather
 			// than extending core.
-			AnchorRecipes:      []core.DType{core.DTypeQ3_K_M, core.DTypeQ3_K_L, core.DTypeQ4_K_M, core.DType("Q4_K_L")},
-			Gates:              defaultEffortGates(),
-			ExactEstimator:     true,
-			ScaleFold:          true,
-			InPlaceReconstruct: true,
-			ProbeKLD:           true,
-			SolverFTI:          true,
+			AnchorRecipes:     []core.DType{core.DTypeQ3_K_M, core.DTypeQ3_K_L, core.DTypeQ4_K_M, core.DType("Q4_K_L")},
+			Gates:             defaultEffortGates(),
+			ExactEstimator:    true,
+			SolverFTI:         true,
+			SensitivityProbes: true,
+			ProbeChunks:       4,
 		}, nil
 	}
 	return EffortProfile{}, fmt.Errorf("pipeline: unknown effort %q (want fast, profiled, or deep)", e)

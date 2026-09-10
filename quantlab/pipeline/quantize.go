@@ -179,6 +179,16 @@ func (e *Engine) planAnchorJobs(ctx context.Context, dtypes []core.DType) error 
 	return nil
 }
 
+// anchorProfileID labels llama-quantize jobs: the solved manifest's profile
+// when one exists, else the run (sensitivity probes run before solve
+// freezes a manifest).
+func (e *Engine) anchorProfileID() string {
+	if e.Run.Manifest != nil && e.Run.Manifest.ProfileID != "" {
+		return e.Run.Manifest.ProfileID
+	}
+	return "probe-" + e.Run.RunID
+}
+
 func (e *Engine) fillQuantizeRequest(req *orchestrate.QuantizeRequest) {
 	cfg := e.Run.Config
 	req.Threads = cfg.Threads
@@ -409,7 +419,7 @@ func (e *Engine) runOneTrimmedAnchor(ctx context.Context, caps *orchestrate.Capa
 		}
 	} else {
 		req := orchestrate.QuantizeRequest{
-			ProfileID:  e.Run.Manifest.ProfileID,
+			ProfileID:  e.anchorProfileID(),
 			SourcePath: subsetPath,
 			OutputPath: tmpPath,
 			Type:       d,

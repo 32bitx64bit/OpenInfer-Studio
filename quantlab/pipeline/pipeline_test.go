@@ -309,6 +309,12 @@ type fakeRunner struct {
 	// a trimmed subset rather than the full source.
 	lastQuantInTensors int
 	lastQuantType      core.DType
+	// kldForModel, when set, derives a candidate's mean KLD from the model
+	// GGUF handed to llama-perplexity (sensitivity probes assemble a
+	// different model per role); ok=false falls back to candKLD.
+	kldForModel func(path string) (float64, bool)
+	// evaluated records every model path handed to a KLD evaluation.
+	evaluated []string
 }
 
 func newFakeRunner(t *testing.T) *fakeRunner {
@@ -348,12 +354,19 @@ func (f *fakeRunner) Run(ctx context.Context, iv orchestrate.Invocation) (orches
 		f.pplRuns++
 		f.lastPPLArgv = append([]string(nil), iv.Argv...)
 		if compare {
+			f.evaluated = append(f.evaluated, model)
 			if f.omitKLD {
 				return orchestrate.Result{Stdout: fmt.Sprintf("Final estimate: PPL = %.4f +/- 0.1000\n", f.candPPL)}, nil
 			}
-			out := fmt.Sprintf("Final estimate: PPL = %.4f +/- 0.1000\nmean KLD: %.6f\n", f.candPPL, f.candKLD)
+			kld := f.candKLD
+			if f.kldForModel != nil {
+				if v, ok := f.kldForModel(model); ok {
+					kld = v
+				}
+			}
+			out := fmt.Sprintf("Final estimate: PPL = %.4f +/- 0.1000\nmean KLD: %.6f\n", f.candPPL, kld)
 			if !f.noP95 {
-				out += fmt.Sprintf("p95 KLD: %.6f\n", 2*f.candKLD)
+				out += fmt.Sprintf("p95 KLD: %.6f\n", 2*kld)
 			}
 			return orchestrate.Result{Stdout: out}, nil
 		}

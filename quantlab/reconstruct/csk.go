@@ -601,31 +601,16 @@ func channelStd(imatrix map[string]profile.ImatrixStats, name string, ne0, rows 
 		}
 		st, ok = imatrix[alt]
 	}
-	if !ok || len(st.Values) == 0 || rows == 0 {
+	if !ok {
 		return out
 	}
-	rowChunks := uint64(len(st.Values)) / rows
-	if rowChunks == 0 {
+	// Values holds E[x_c^2] per input channel; the sketch wants sigma_c.
+	power := profile.ChannelMean(st.Values, ne0, rows)
+	if power == nil {
 		return out
 	}
-	sz := ne0 / rowChunks
-	if sz == 0 {
-		sz = 1
-	}
-	for c := uint64(0); c < rowChunks; c++ {
-		var s float64
-		n := uint64(0)
-		for r := uint64(0); r < rows && r*rowChunks+c < uint64(len(st.Values)); r++ {
-			s += float64(st.Values[r*rowChunks+c])
-			n++
-		}
-		if n == 0 {
-			continue
-		}
-		v := math.Sqrt(math.Max(s/float64(n), 1e-12))
-		for j := c * sz; j < (c+1)*sz && j < ne0; j++ {
-			out[j] = float32(v)
-		}
+	for c, p := range power {
+		out[c] = float32(math.Sqrt(math.Max(p, 1e-12)))
 	}
 	return out
 }

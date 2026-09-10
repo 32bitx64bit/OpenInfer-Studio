@@ -56,6 +56,13 @@ type Request struct {
 	// Diversity inverts the greedy gain ranking so the budget is spent on
 	// the upgrades the main seeds deprioritized (anti-greedy seed).
 	Diversity bool
+	// Sensitivity, when non-nil, switches the solver to the probe-calibrated
+	// objective: per-tensor losses in KLD units derived from measured
+	// per-role sensitivities and the ExactLoss table (Sensitivity.Loss),
+	// allocated by an exact Lagrangian sweep over each tensor's convex
+	// frontier. Soft priors and SwiGLU coupling are not applied; hard floors
+	// apply only to tensors whose role was not probed. Requires ExactLoss.
+	Sensitivity *Sensitivity
 }
 
 // Validate checks the request is well-formed.

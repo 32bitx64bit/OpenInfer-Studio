@@ -47,8 +47,10 @@ type ExactConfig struct {
 // quantizable tensor whose source storage is float (F32/F16/BF16) and every
 // candidate dtype with a qtype reference quantizer, the
 // importance-weighted squared reconstruction error
-// sum_ch imp_ch * ||w_ch - Q(w_ch)||^2. imp comes from the imatrix
-// per-(row, 256-chunk) Values when available, else weights are uniform.
+// sum_c imp_c * sum_r (w_rc - Q(w)_rc)^2, i.e. the expected squared output
+// error E||(W - Q(W)) x||^2 under the calibration activations. imp_c is the
+// imatrix per-input-channel activation power (ImportanceLayout) when
+// available, else weights are uniform.
 //
 // The map is keyed by tensor name, then by candidate dtype. Tensors skipped
 // here fall back to the analytic estimator. progress, when non-nil,
@@ -84,7 +86,7 @@ func BuildExactLossTableCfg(bank *core.TensorBank, candidates []core.DType, imat
 	type job struct {
 		t    core.TensorDesc
 		off  int64
-		impV []float32 // raw per-(row, chunk) values
+		impV []float32 // per-input-channel importance (see ImportanceLayout)
 	}
 	var jobs []job
 	var totalBytes int64
@@ -242,14 +244,7 @@ func exactTensorLoss(ctx context.Context, src *tensorbank.Source, t core.TensorD
 	if rowsPerRead < 1 {
 		rowsPerRead = 1
 	}
-	rowChunks := uint64(0)
-	haveImp := false
-	if len(impV) > 0 && rows > 0 && uint64(len(impV))%rows == 0 {
-		rowChunks = uint64(len(impV)) / rows
-		if rowChunks > 0 {
-			haveImp = true
-		}
-	}
+	layout, haveImp := LayoutFor(impV, ne0, rows)
 	sums := make(map[core.DType]float64, len(candidates))
 	buf := make([]byte, rowBytes*rowsPerRead)
 	row := make([]float32, ne0*rowsPerRead)
@@ -285,7 +280,7 @@ func exactTensorLoss(ctx context.Context, src *tensorbank.Source, t core.TensorD
 		}
 		decodeFloats(row[:ne0*n], buf[:read], t.DType)
 		if haveImp {
-			fillRowImp(imp[:ne0*n], impV, r, n, ne0, rowChunks)
+			layout.Fill(imp[:ne0*n], impV, r, n)
 		} else {
 			for i := range imp[:ne0*n] {
 				imp[i] = 1
@@ -465,18 +460,6 @@ func f16ToF32(h uint16) float32 {
 		return math.Float32frombits(sign | 0x7f800000 | man<<13)
 	}
 	return math.Float32frombits(sign | (exp+112)<<23 | man<<13)
-}
-
-// fillRowImp expands per-(row, chunk) importance to per-element weights.
-func fillRowImp(dst, impV []float32, rowStart, rows, ne0, rowChunks uint64) {
-	for i := range dst {
-		r := uint64(i)/ne0 + rowStart
-		c := (uint64(i) % ne0) / 256
-		if c >= rowChunks {
-			c = rowChunks - 1
-		}
-		dst[i] = impV[r*rowChunks+c]
-	}
 }
 
 // SetExactLoss installs a precomputed exact loss table (tensor -> dtype ->

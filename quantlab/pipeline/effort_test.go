@@ -64,11 +64,14 @@ func TestEffortForPresets(t *testing.T) {
 		if p.Reconstruct {
 			t.Errorf("profiled reconstruct = true, want false (Extra/CLI only)")
 		}
-		if !p.ScaleFold || !p.InPlaceReconstruct {
-			t.Errorf("profiled fold/inplace = %v/%v, want true", p.ScaleFold, p.InPlaceReconstruct)
+		if p.ScaleFold || p.InPlaceReconstruct {
+			t.Errorf("profiled fold/inplace = %v/%v, want false (opt-in transforms)", p.ScaleFold, p.InPlaceReconstruct)
 		}
-		if !p.ProbeKLD || !p.SolverFTI {
-			t.Errorf("profiled probeKLD/solverFTI = %v/%v, want true", p.ProbeKLD, p.SolverFTI)
+		if p.ProbeKLD || !p.SolverFTI {
+			t.Errorf("profiled probeKLD/solverFTI = %v/%v, want false/true", p.ProbeKLD, p.SolverFTI)
+		}
+		if !p.SensitivityProbes || p.ProbeChunks != 2 {
+			t.Errorf("profiled sensitivity/probeChunks = %v/%d, want true/2", p.SensitivityProbes, p.ProbeChunks)
 		}
 		if len(p.AnchorRecipes) != 3 || p.AnchorRecipes[0] != core.DTypeQ3_K_M ||
 			p.AnchorRecipes[1] != core.DTypeQ3_K_L || p.AnchorRecipes[2] != core.DTypeQ4_K_M {
@@ -92,11 +95,14 @@ func TestEffortForPresets(t *testing.T) {
 	if deep.Reconstruct {
 		t.Errorf("deep reconstruct = true, want false (Extra/CLI only)")
 	}
-	if !deep.ScaleFold || !deep.InPlaceReconstruct {
-		t.Errorf("deep fold/inplace = %v/%v, want true", deep.ScaleFold, deep.InPlaceReconstruct)
+	if deep.ScaleFold || deep.InPlaceReconstruct {
+		t.Errorf("deep fold/inplace = %v/%v, want false (opt-in transforms)", deep.ScaleFold, deep.InPlaceReconstruct)
 	}
-	if !deep.ProbeKLD || !deep.SolverFTI {
-		t.Errorf("deep probeKLD/solverFTI = %v/%v, want true", deep.ProbeKLD, deep.SolverFTI)
+	if deep.ProbeKLD || !deep.SolverFTI {
+		t.Errorf("deep probeKLD/solverFTI = %v/%v, want false/true", deep.ProbeKLD, deep.SolverFTI)
+	}
+	if !deep.SensitivityProbes || deep.ProbeChunks != 4 {
+		t.Errorf("deep sensitivity/probeChunks = %v/%d, want true/4", deep.SensitivityProbes, deep.ProbeChunks)
 	}
 	wantDeep := []core.DType{core.DTypeQ3_K_M, core.DTypeQ3_K_L, core.DTypeQ4_K_M, core.DType("Q4_K_L")}
 	if len(deep.AnchorRecipes) != len(wantDeep) {
@@ -276,7 +282,9 @@ func TestResumeStoredEffortZeroFlags(t *testing.T) {
 
 func TestProfiledAssembleClonesPrivatePayload(t *testing.T) {
 	f := newFixture(t, 150000)
-	r := f.planEffort("priv", "profiled", nil)
+	// Transforms are opt-in; forcing scale folding is what makes assemble
+	// clone the library GGUF into a job-private payload.
+	r := f.planEffort("priv", "profiled", func(o *PlanOptions) { o.ScaleFold = true })
 	e := f.engine(r)
 	e.StageLimit = 1
 	if err := e.Resume(context.Background()); err != nil {

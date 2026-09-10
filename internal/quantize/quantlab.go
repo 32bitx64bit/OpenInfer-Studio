@@ -273,8 +273,8 @@ type quantlabStageRange struct {
 var quantlabStageRanges = map[core.Stage]quantlabStageRange{
 	core.StageAssemble: {"analyze", 0.05, 0.10},
 	core.StageAnchor:   {"anchor", 0.10, 0.15},
-	core.StageSolve:    {"solve", 0.15, 0.20},
-	core.StageQuantize: {"quantize", 0.20, 0.65},
+	core.StageSolve:    {"solve", 0.15, 0.35},
+	core.StageQuantize: {"quantize", 0.35, 0.65},
 	core.StageEvaluate: {"validate", 0.65, 0.92},
 	core.StageSearch:   {"search", 0.92, 0.93},
 	core.StageEmit:     {"finalize", 0.93, 1.0},
@@ -335,6 +335,8 @@ func (o *quantlabObserver) StageProgress(stage core.Stage, progress float64, mes
 	frac := progress
 	current, total := 0, 0
 	switch stage {
+	case core.StageSolve:
+		frac = remapSolveProgress(message, progress)
 	case core.StageQuantize:
 		frac = remapQuantizeProgress(message, progress)
 		if strings.HasPrefix(message, "anchor") {

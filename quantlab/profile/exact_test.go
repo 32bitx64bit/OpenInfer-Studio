@@ -93,16 +93,16 @@ func TestBuildExactLossTable(t *testing.T) {
 	}
 	writeF32GGUF2(t, model, ne0, rows, map[string][]float32{"blk.0.attn_q.weight": vals})
 
+	// llama-imatrix layout: one in_sum2 entry per input channel (ne0), one
+	// count per matrix.
 	impPath := filepath.Join(dir, "imp.gguf")
-	sum2 := make([]float32, rows)
-	counts := make([]float32, rows)
-	for r := range sum2 {
-		sum2[r] = float32(r+1) * 8
-		counts[r] = 8
+	sum2 := make([]float32, ne0)
+	for c := range sum2 {
+		sum2[c] = float32(c+1) * 8
 	}
 	writeImatrixGGUF(t, impPath,
 		map[string][]float32{"blk.0.attn_q.weight": sum2},
-		map[string][]float32{"blk.0.attn_q.weight": counts})
+		map[string][]float32{"blk.0.attn_q.weight": {8}})
 
 	imatrix, err := LoadImatrix(impPath)
 	if err != nil {
@@ -112,13 +112,13 @@ func TestBuildExactLossTable(t *testing.T) {
 	if !ok {
 		t.Fatalf("no imatrix stats: %v", imatrix)
 	}
-	if len(st.Values) != rows {
-		t.Fatalf("Values len %d, want %d", len(st.Values), rows)
+	if len(st.Values) != ne0 {
+		t.Fatalf("Values len %d, want %d", len(st.Values), ne0)
 	}
 	if st.Entropy <= 0 || st.Entropy > 1 {
 		t.Errorf("entropy %v out of (0,1]", st.Entropy)
 	}
-	if st.EffRank < 1 || st.EffRank > float64(rows) {
+	if st.EffRank < 1 || st.EffRank > float64(ne0) {
 		t.Errorf("effRank %v out of [1,%d]", st.EffRank, rows)
 	}
 

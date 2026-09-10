@@ -120,10 +120,23 @@ func EstimateScratch(bank *core.TensorBank, effort Effort, budget uint64, eval E
 	// persist across stages and are included in each peak through common.
 	quantizePeak := saturatingAdd(common, quantizeWorking)
 	evalPeak := saturatingAdd(common, candidate, candidate, logits)
-	if evalPeak > quantizePeak {
-		return evalPeak
+	//  - Sensitivity probes (solve): the Q8_0 background anchor persists
+	//    across probes; each probe adds a trimmed source subset (≤ source),
+	//    its quantized role, one assembled probe model (≤ Q8_0 artifact),
+	//    and the probe baseline logits.
+	var probePeak uint64
+	if p.SensitivityProbes {
+		q8 := estimatedArtifact(bank, backgroundDType)
+		probePeak = saturatingAdd(common, sourceArtifact, q8, q8, logitsOne)
 	}
-	return quantizePeak
+	peak := quantizePeak
+	if evalPeak > peak {
+		peak = evalPeak
+	}
+	if probePeak > peak {
+		peak = probePeak
+	}
+	return peak
 }
 
 func estimateTransformCopies(p EffortProfile, eval EvalScratchConfig) int {

@@ -57,13 +57,18 @@ type ExtraConfig struct {
 	NoFTI                 bool   `json:"noFTI,omitempty"`
 	ProbeKLD              bool   `json:"probeKLD,omitempty"`
 	NoProbeKLD            bool   `json:"noProbeKLD,omitempty"`
-	NoPermute             bool   `json:"noPermute,omitempty"`
-	NoMagR                bool   `json:"noMagR,omitempty"`
-	NoLWC                 bool   `json:"noLWC,omitempty"`
-	NoFreqVQ              bool   `json:"noFreqVQ,omitempty"`
-	NoGPTQ                bool   `json:"noGPTQ,omitempty"`
-	NoViterbi             bool   `json:"noViterbi,omitempty"`
-	NoExpertCentroid      bool   `json:"noExpertCentroid,omitempty"`
+	// Sensitivity forces the per-role KLD sensitivity probes that calibrate
+	// the solver's cross-tensor loss model on; NoSensitivity opts out.
+	// Profiled/deep enable them via the effort profile.
+	Sensitivity      bool `json:"sensitivity,omitempty"`
+	NoSensitivity    bool `json:"noSensitivity,omitempty"`
+	NoPermute        bool `json:"noPermute,omitempty"`
+	NoMagR           bool `json:"noMagR,omitempty"`
+	NoLWC            bool `json:"noLWC,omitempty"`
+	NoFreqVQ         bool `json:"noFreqVQ,omitempty"`
+	NoGPTQ           bool `json:"noGPTQ,omitempty"`
+	NoViterbi        bool `json:"noViterbi,omitempty"`
+	NoExpertCentroid bool `json:"noExpertCentroid,omitempty"`
 	// Encode / FreqVQ / ExpertCentroid are opt-in. They are not default-on
 	// for profiled/deep: GPTQ does not pack IQ (the bulk of a 3.5 bpw
 	// hybrid), and FreqVQ/centroid are skip-safe extras, not the quality lever.
@@ -644,6 +649,21 @@ func (e *Engine) stageSolve(ctx context.Context) error {
 			e.printf("plan: exact loss table over %d candidate dtypes\n", len(req.Candidates))
 		}
 	}
+	if e.sensitivityEnabled() {
+		if e.DryRun {
+			e.printf("plan: sensitivity probes (%s background, %v per role, %d-chunk KLD)\n",
+				backgroundDType, profile.DefaultProbeDTypes, e.probeEvalConfig().Chunks)
+		} else if req.ExactLoss != nil {
+			sens, err := e.calibrateSensitivity(ctx, bank, set, req.ExactLoss)
+			if err != nil {
+				return fmt.Errorf("pipeline: sensitivity calibration: %w", err)
+			}
+			if sens != nil {
+				req.Sensitivity = sens
+				e.printSensitivity(sens)
+			}
+		}
+	}
 	res, err := profile.Solve(req)
 	if err != nil {
 		return err
@@ -664,10 +684,12 @@ func (e *Engine) stageSolve(ctx context.Context) error {
 		Profile     *core.Profile           `json:"profile"`
 		Manifest    *core.SelectionManifest `json:"manifest"`
 		Diagnostics profile.Diagnostics     `json:"diagnostics"`
+		Sensitivity *profile.Sensitivity    `json:"sensitivity,omitempty"`
 	}{
 		Profile:     res.Profile,
 		Manifest:    res.Manifest,
 		Diagnostics: res.Diag,
+		Sensitivity: req.Sensitivity,
 	}); err != nil {
 		return err
 	}

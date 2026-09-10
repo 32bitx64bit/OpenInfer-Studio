@@ -209,8 +209,15 @@ to the request.
 | `effort` | What it does |
 |---|---|
 | `fast` | heuristic solve + mandatory 2-chunk KLD gate |
-| `profiled` (default) | exact-loss solve with ProbeKLD + 4-chunk KLD validation |
-| `deep` | exact-loss solve with ProbeKLD + 8-chunk KLD validation |
+| `profiled` (default) | exact-loss table + per-role sensitivity probes (2-chunk KLD each) calibrating the solver + 4-chunk KLD validation |
+| `deep` | exact-loss table + per-role sensitivity probes (4-chunk KLD each) calibrating the solver + 8-chunk KLD validation |
+
+Sensitivity probes quantize one tensor role at a time (attention Q/K/V/O,
+FFN gate/up/down, embeddings, output head, ...) to an aggressive rung with
+everything else at Q8_0 and measure the KLD cost of each on the run's own
+validation corpus. The solver then allocates bits between roles on those
+measurements rather than on fixed priors. Roles below 0.2% of the weights
+are pinned to top fidelity and skipped.
 
 Every effort validates the quantized model against the source before it is
 published. Default KLD gates scale with `target_bpw` / the named quant tier:
@@ -222,7 +229,8 @@ quantization (corrupt output, missing tools, cancelled job) fails the job.
 Dynamic runs checkpoint each completed stage and can resume from the first
 unfinished stage without repeating recorded measurements. They retain working
 artifacts until a successful publish; allow substantial scratch disk for
-anchors, candidate GGUFs, calibration data, and (for `deep`) baseline logits.
+anchors, candidate GGUFs, calibration data, baseline logits, and (for
+`profiled`/`deep`) the Q8_0 background model the sensitivity probes share.
 
 Deprecated compatibility fields: `adaptive_mode` is an alias for `effort`
 (same three values; an explicit `effort` wins). `adaptive_preset` is

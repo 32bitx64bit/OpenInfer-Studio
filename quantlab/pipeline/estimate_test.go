@@ -216,6 +216,15 @@ func TestEstimateScratchPeakFormula(t *testing.T) {
 	if evalPeak > want {
 		want = evalPeak
 	}
+	// Sensitivity probes: background Q8_0 anchor + one assembled probe
+	// model + a trimmed source subset + probe logits.
+	if p.SensitivityProbes {
+		q8 := estimatedArtifact(bank, core.DTypeQ8_0)
+		probePeak := saturatingAdd(common, sourceArtifact, q8, q8, logitsOne)
+		if probePeak > want {
+			want = probePeak
+		}
+	}
 	if got != want {
 		t.Fatalf("peak = %d, want %d (source=%d maxAnchor=%d candidate=%d overhead=%d)", got, want, sourceArtifact, maxAnchor, candidate, overhead)
 	}

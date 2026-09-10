@@ -239,7 +239,7 @@ func TestCSKReducesNextLayerError(t *testing.T) {
 		"blk.0.ffn_up.weight":   {[]uint64{nEmb, nFF}, up},
 		"blk.0.ffn_down.weight": {[]uint64{nFF, nOut}, down},
 	})
-	imp := make([]float32, nFF)
+	imp := make([]float32, nEmb) // per input channel of the gate/up weights
 	for i := range imp {
 		imp[i] = 1
 	}
@@ -423,7 +423,7 @@ func TestCSKInPlaceDoesNotDeleteSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer src.Close()
-	imp := make([]float32, nFF)
+	imp := make([]float32, nEmb) // per input channel of the gate/up weights
 	for i := range imp {
 		imp[i] = 1
 	}
@@ -533,7 +533,7 @@ func TestUnnamedGLUCSKApplies(t *testing.T) {
 		"blk.0.b.weight":         {[]uint64{nEmb, nFF}, fill(nEmb * nFF)},
 		"blk.0.c.weight":         {[]uint64{nFF, nEmb}, fill(nFF * nEmb)},
 	})
-	imp := make([]float32, nFF)
+	imp := make([]float32, nEmb) // per input channel of the gate/up weights
 	for i := range imp {
 		imp[i] = 1
 	}

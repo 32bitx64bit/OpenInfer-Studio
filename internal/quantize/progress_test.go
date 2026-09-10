@@ -86,14 +86,14 @@ func TestStageRangeAndOverallETA(t *testing.T) {
 		t.Fatalf("imatrix mid-stage progress = %v, want 0.035", overall)
 	}
 	qStart, qEnd := stageRange(j, "quantize")
-	if qStart != 0.20 || qEnd != 0.65 {
+	if qStart != 0.35 || qEnd != 0.65 {
 		t.Fatalf("quantize range = %v..%v", qStart, qEnd)
 	}
 	anchorStart, anchorEnd := stageRange(j, "anchor")
 	solveStart, solveEnd := stageRange(j, "solve")
 	searchStart, searchEnd := stageRange(j, "search")
 	finalStart, finalEnd := stageRange(j, "finalize")
-	if anchorStart != 0.10 || anchorEnd != 0.15 || solveStart != 0.15 || solveEnd != 0.20 ||
+	if anchorStart != 0.10 || anchorEnd != 0.15 || solveStart != 0.15 || solveEnd != 0.35 ||
 		searchStart != 0.92 || searchEnd != 0.93 || finalStart != 0.93 || finalEnd != 1 {
 		t.Fatalf("quantlab stage ranges = anchor %v..%v solve %v..%v search %v..%v finalize %v..%v",
 			anchorStart, anchorEnd, solveStart, solveEnd, searchStart, searchEnd, finalStart, finalEnd)

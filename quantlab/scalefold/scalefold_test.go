@@ -234,14 +234,16 @@ func TestChooseAlphaFloor(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer src.Close()
-	// Per-(row, chunk) importance: first half strong, second half weak.
-	// 8 rows x 2 chunks (D=512 -> 2 chunks of 256).
-	vals := make([]float32, 8*2)
-	for r := 0; r < 8; r++ {
-		vals[r*2] = 4.0    // strong first half
-		vals[r*2+1] = 0.05 // weak second half
+	// Per-input-channel importance (imatrix layout, one value per column):
+	// first half strong, second half weak.
+	vals := make([]float32, D)
+	for c := range vals {
+		vals[c] = 4.0 // strong first half
+		if c >= D/2 {
+			vals[c] = 0.05 // weak second half
+		}
 	}
-	st := ImatrixVec(vals, 8)
+	st := ImatrixVec(vals)
 	imatrix := map[string]profile.ImatrixStats{
 		"blk.0.attn_q.weight": st,
 		"blk.0.attn_k.weight": st,
@@ -270,8 +272,8 @@ func TestChooseAlphaFloor(t *testing.T) {
 	}
 }
 
-// ImatrixVec builds ImatrixStats with retained per-(row, chunk) values.
-func ImatrixVec(vals []float32, rows int) profile.ImatrixStats {
+// ImatrixVec builds ImatrixStats with a retained per-input-channel vector.
+func ImatrixVec(vals []float32) profile.ImatrixStats {
 	st := profile.ImatrixStats{Samples: 1, Values: vals}
 	return st
 }

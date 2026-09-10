@@ -198,9 +198,9 @@ func stageRange(j *Job, stage string) (float64, float64) {
 		case "anchor":
 			return scale(0.10, 0.15)
 		case "solve":
-			return scale(0.15, 0.20)
+			return scale(0.15, 0.35)
 		case "quantize":
-			return scale(0.20, 0.65)
+			return scale(0.35, 0.65)
 		case "validate":
 			return scale(0.65, 0.92)
 		case "search":
@@ -314,6 +314,16 @@ func stepCounter(count int, frac float64) (current, total int) {
 // per-dtype anchor builds, then continuous candidate assembly — across the 0..1
 // stage fraction. Without this, the monotonic clamp in emitQuantlabProgress
 // hides the (often long) assembly phase behind a completed anchor bar.
+// remapSolveProgress splits the solve stage between the exact loss table
+// (first 35%) and the sensitivity probes that follow it, so the second
+// 0->1 sweep is not hidden by the monotonic clamp.
+func remapSolveProgress(message string, frac float64) float64 {
+	if strings.HasPrefix(message, "sensitivity") {
+		return 0.35 + 0.65*clampProgress(frac)
+	}
+	return 0.35 * clampProgress(frac)
+}
+
 func remapQuantizeProgress(message string, frac float64) float64 {
 	if strings.HasPrefix(message, "anchor") {
 		return 0.5 * clampProgress(frac)

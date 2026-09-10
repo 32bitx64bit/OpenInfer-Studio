@@ -30,6 +30,7 @@ usage:
                    [-run <id>] [-dry-run]
                    [-scale-fold] [-no-scale-fold] [-hadamard] [-no-hadamard]
                    [-csk] [-no-csk] [-fti] [-no-fti] [-probe-kld] [-no-probe-kld]
+                   [-sensitivity] [-no-sensitivity]
   quantlab resume  -state-dir <dir> -run <id> [-stage-limit <n>] [-dry-run]
   quantlab status  -state-dir <dir> -run <id>
 `
@@ -89,6 +90,8 @@ func cmdPlan(args []string, stdout io.Writer) error {
 	noFTI := fs.Bool("no-fti", false, "disable imatrix sharpening")
 	probeKLD := fs.Bool("probe-kld", false, "force probe-KLD in the exact loss table (default-on for profiled/deep)")
 	noProbeKLD := fs.Bool("no-probe-kld", false, "disable probe-KLD in the exact loss table")
+	sensitivity := fs.Bool("sensitivity", false, "force per-role KLD sensitivity probes for the solver (default-on for profiled/deep)")
+	noSensitivity := fs.Bool("no-sensitivity", false, "disable sensitivity probes (solver falls back to heuristic role priors)")
 	runID := fs.String("run", "", "run id (default: run-<unixtime>)")
 	dryRun := fs.Bool("dry-run", false, "validate and plan without writing artifacts")
 	if err := fs.Parse(args); err != nil {
@@ -142,6 +145,8 @@ func cmdPlan(args []string, stdout io.Writer) error {
 		NoFTI:             *noFTI,
 		ProbeKLD:          *probeKLD,
 		NoProbeKLD:        *noProbeKLD,
+		Sensitivity:       *sensitivity,
+		NoSensitivity:     *noSensitivity,
 	})
 	return err
 }
