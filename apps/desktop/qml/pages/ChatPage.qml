@@ -125,11 +125,28 @@ Item {
         return !!(meta.is_embedding || meta.is_reranker)
     }
 
-    // Chat targets only — MTP/EAGLE/DFlash/DSpark sidecars and embedders
-    // belong elsewhere (draft picker / Developer API), not as conversation models.
+    function isDiffusionModel(m) {
+        if (!m) return false
+        var meta = m.metadata || {}
+        if (m.modality === "diffusion" || meta.modality === "diffusion") return true
+        if (meta.diffusion_kind || meta.sd_family) return true
+        // Block-diffusion LMs (DiffusionGemma) are chat models.
+        if (meta.is_diffusion) return false
+        var path = String(m.primary_path || m.alias || "").toLowerCase()
+        var fams = ["qwen-image", "qwen_image", "flux", "sdxl", "sd-xl",
+                    "stable-diffusion", "stable_diffusion", "chroma", "z-image",
+                    "wan2", "wan-2", "wanx", "ltx", "hunyuanvideo", "hunyuan-video"]
+        for (var i = 0; i < fams.length; i++) {
+            if (path.indexOf(fams[i]) >= 0) return true
+        }
+        return false
+    }
+
+    // Chat targets only — MTP/EAGLE/DFlash/DSpark sidecars, embedders, and
+    // diffusion checkpoints belong elsewhere, not as conversation models.
     function chatModels() {
         return (page.library || []).filter(function(m) {
-            return !page.isSpeculativeDraft(m) && !page.isEmbeddingModel(m)
+            return !page.isSpeculativeDraft(m) && !page.isEmbeddingModel(m) && !page.isDiffusionModel(m)
         })
     }
 

@@ -21,6 +21,9 @@ Item {
     property string detailMTP: ""
     property string detailDraft: ""
     property string detailEmbedding: ""
+    property string detailDiffusion: ""
+    property var detailDiffusionGroups: []
+    property string corpus: "llm" // llm|diffusion
     property bool withVision: true
     property bool withDraft: true
     property bool showFilePaths: false
@@ -48,6 +51,13 @@ Item {
     function embeddingLabel(kind) {
         if (kind === "reranker") return "reranker"
         if (kind === "embedding") return "embedding"
+        return ""
+    }
+
+    function diffusionLabel(kind) {
+        if (kind === "video") return "video"
+        if (kind === "both") return "image+video"
+        if (kind === "image") return "image"
         return ""
     }
 
@@ -122,7 +132,8 @@ Item {
         page.searchError = ""
         var q = encodeURIComponent(searchField.text)
         var sort = sortCombo.currentValue
-        api.get("/api/v1/hf/search?q=" + q + "&sort=" + sort + "&limit=40", function(st, data) {
+        var kind = page.corpus === "diffusion" ? "&kind=diffusion" : ""
+        api.get("/api/v1/hf/search?q=" + q + "&sort=" + sort + "&limit=40" + kind, function(st, data) {
             page.searching = false
             if (st === 200) {
                 page.results = (data && data.results) || []
@@ -139,6 +150,8 @@ Item {
         page.detailMTP = ""
         page.detailDraft = ""
         page.detailEmbedding = ""
+        page.detailDiffusion = ""
+        page.detailDiffusionGroups = []
         page.detailDrafts = []
         page.withVision = true
         page.withDraft = true
@@ -155,6 +168,8 @@ Item {
                 page.detailMTP = data.mtp || ""
                 page.detailDraft = data.draft || ""
                 page.detailEmbedding = data.embedding || ""
+                page.detailDiffusion = data.diffusion || ""
+                page.detailDiffusionGroups = data.diffusion_groups || []
                 page.withDraft = (page.detailDrafts || []).length > 0
             } else {
                 page.searchError = (data && (data.detail || data.error)) || ("HTTP " + st)
@@ -187,6 +202,10 @@ Item {
     }
 
     function downloadGroup(group) {
+        if (page.detailDiffusion !== "") {
+            page.downloadDiffusionGroup(group)
+            return
+        }
         var files = group.files.map(function(f) { return { "path": f.path, "size": f.size } })
         var isDraft = !!group.draft
         var hasProjector = group.files.some(function(f) { return f.kind === "projector" })
@@ -214,6 +233,25 @@ Item {
         detailDialog.close()
     }
 
+    // Diffusion checkpoints download as sd.cpp weight files (single
+    // checkpoint or diffusers bundle subset), never as GGUF quant groups.
+    function downloadDiffusionGroup(group) {
+        var files = group.files.map(function(f) { return { "path": f.path, "size": f.size } })
+        api.post("/api/v1/downloads", {
+            "kind": "model",
+            "label": (page.detail ? page.detail.id : "") + " " + group.label,
+            "repo": page.detail.id,
+            "group": group.id,
+            "files": files
+        }, function(st, data) {
+            if (st !== 201)
+                page.searchError = (data && (data.detail || data.error)) || "download failed"
+            else
+                page.downloadQueued((page.detail ? page.detail.id : "Model") + " · " + group.label)
+        })
+        detailDialog.close()
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: AppTheme.pad
@@ -221,16 +259,26 @@ Item {
 
         PageHeader {
             title: "Browse models"
-            subtitle: "Find GGUF models on Hugging Face. Start with a quantization that fits your hardware, then reveal advanced files only when needed."
+            subtitle: "Find GGUF chat models or image/video generators on Hugging Face."
         }
 
         RowLayout {
             Layout.fillWidth: true
             spacing: 8
+            AppComboBox {
+                id: corpusCombo
+                model: [
+                    { "text": "Chat (GGUF)", "value": "llm" },
+                    { "text": "Image / video", "value": "diffusion" }
+                ]
+                textRole: "text"
+                valueRole: "value"
+                onActivated: page.corpus = currentValue
+            }
             SearchField {
                 id: searchField
                 Layout.fillWidth: true
-                placeholderText: "Search Hugging Face for GGUF models…"
+                placeholderText: page.corpus === "diffusion" ? "Search Hugging Face for image/video generators…" : "Search Hugging Face for GGUF models…"
                 searchLabel: "Search Hugging Face models"
                 onAccepted: page.search()
             }
@@ -336,6 +384,12 @@ Item {
                                 tone: AppTheme.success
                                 Layout.minimumWidth: implicitWidth
                             }
+                            Tag {
+                                visible: page.diffusionLabel(modelData.diffusion) !== ""
+                                text: page.diffusionLabel(modelData.diffusion)
+                                tone: AppTheme.accent
+                                Layout.minimumWidth: implicitWidth
+                            }
                             Tag { visible: modelData.gated !== false && modelData.gated !== null; text: "gated"; tone: AppTheme.warning; Layout.minimumWidth: implicitWidth }
                             Tag { visible: modelData.private; text: "private"; tone: AppTheme.danger; Layout.minimumWidth: implicitWidth }
                         }
@@ -409,6 +463,12 @@ Item {
                         visible: page.embeddingLabel(page.detailEmbedding) !== ""
                         text: page.embeddingLabel(page.detailEmbedding)
                         tone: AppTheme.info
+                        Layout.minimumWidth: implicitWidth
+                    }
+                    Tag {
+                        visible: page.diffusionLabel(page.detailDiffusion) !== ""
+                        text: page.diffusionLabel(page.detailDiffusion)
+                        tone: AppTheme.accent
                         Layout.minimumWidth: implicitWidth
                     }
                     AppButton {
@@ -509,7 +569,7 @@ Item {
                 }
 
                 RowLayout {
-                    visible: page.detailGroups.length > 0
+                    visible: page.detailDiffusion === "" && page.detailGroups.length > 0
                     Layout.fillWidth: true
                     spacing: AppTheme.gap
                     AppCheckBox {
@@ -528,6 +588,7 @@ Item {
                 }
 
                 AppGroupBox {
+                    visible: page.detailDiffusion === ""
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     title: "Available files (" + page.filteredDetailGroups().length + " groups)"
@@ -637,6 +698,62 @@ Item {
                                         text: "Download"
                                         primary: true
                                         onClicked: page.downloadGroup(modelData)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Image/video generators: checkpoint + bundle groups with file
+                // roles (checkpoint/vae/encoder), no quant/version gating.
+                AppGroupBox {
+                    visible: page.detailDiffusion !== ""
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    title: "Generator files (" + page.detailDiffusionGroups.length + " groups · " + page.diffusionLabel(page.detailDiffusion) + ")"
+                    ListView {
+                        anchors.fill: parent
+                        clip: true
+                        spacing: 8
+                        model: page.detailDiffusionGroups
+                        delegate: Card {
+                            width: ListView.view.width - 4
+                            implicitHeight: dcol.implicitHeight + 20
+                            ColumnLayout {
+                                id: dcol
+                                anchors.fill: parent
+                                anchors.margins: 10
+                                spacing: 6
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Label { text: modelData.label; color: AppTheme.text; font.weight: Font.DemiBold }
+                                    Tag { visible: (modelData.kind || "") !== ""; text: modelData.kind; tone: AppTheme.accent; Layout.minimumWidth: implicitWidth }
+                                    Item { Layout.fillWidth: true }
+                                    Label {
+                                        text: AppTheme.bytes(modelData.total_bytes)
+                                        color: AppTheme.textDim
+                                        font.pixelSize: AppTheme.fontSmall
+                                    }
+                                }
+                                Repeater {
+                                    model: modelData.files
+                                    Label {
+                                        text: "  " + modelData.path + "  ·  " + modelData.role + "  ·  " + AppTheme.bytes(modelData.size)
+                                        color: AppTheme.textDim
+                                        font.pixelSize: AppTheme.fontSmall
+                                        font.family: "monospace"
+                                        elide: Text.ElideMiddle
+                                        Layout.fillWidth: true
+                                    }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Item { Layout.fillWidth: true }
+                                    AppButton {
+                                        text: "Download"
+                                        primary: true
+                                        onClicked: page.downloadDiffusionGroup(modelData)
                                     }
                                 }
                             }

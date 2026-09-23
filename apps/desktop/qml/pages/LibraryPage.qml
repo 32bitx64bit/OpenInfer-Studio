@@ -15,15 +15,66 @@ Item {
 
     property var models: []
     property var instances: ({})
+    property var mediaServers: ({})
     property var liveActivity: ({})
     property bool scanning: false
     property string filter: ""
     property var selected: null
     property string errorText: ""
 
+    // SD-GGUF family fallback for rows scanned before tensor-signature
+    // support (schema <13): filename tokens like qwen-image / flux.
+    function sdFamilyFallback(m) {
+        if (!m) return ""
+        var path = String(m.primary_path || m.alias || "").toLowerCase()
+        var fams = [
+            ["qwen-image", "Qwen-Image"], ["qwen_image", "Qwen-Image"],
+            ["flux", "FLUX"], ["sdxl", "SDXL"], ["sd-xl", "SDXL"],
+            ["stable-diffusion", "SD"], ["stable_diffusion", "SD"],
+            ["chroma", "Chroma"], ["z-image", "Z-Image"],
+            ["wan2", "Wan"], ["wan-2", "Wan"], ["wanx", "Wan"],
+            ["ltx", "LTX"], ["hunyuanvideo", "HunyuanVideo"],
+            ["hunyuan-video", "HunyuanVideo"]
+        ]
+        for (var i = 0; i < fams.length; i++) {
+            if (path.indexOf(fams[i][0]) >= 0) return fams[i][1]
+        }
+        return ""
+    }
+
+    function sdKindFallback(m) {
+        if (!m) return ""
+        var path = String(m.primary_path || m.alias || "").toLowerCase()
+        var vid = ["wan2", "wan-2", "wanx", "ltx", "hunyuanvideo", "hunyuan-video",
+                   "minimax", "mochi", "cogvideo", "video"]
+        for (var i = 0; i < vid.length; i++) {
+            if (path.indexOf(vid[i]) >= 0) return "video"
+        }
+        return page.sdFamilyFallback(m) !== "" ? "image" : ""
+    }
+
+    function diffusionFamily(m) {
+        if (!m) return ""
+        var meta = m.metadata || {}
+        if (meta.sd_family) return meta.sd_family
+        return page.sdFamilyFallback(m)
+    }
+
+    function diffusionKind(m) {
+        if (!m) return ""
+        var meta = m.metadata || {}
+        if (meta.diffusion_kind) return meta.diffusion_kind
+        return page.sdKindFallback(m)
+    }
+
     function modalityTag(m) {
         if (!m) return ""
         var meta = m.metadata || {}
+        if (page.isDiffusion(m)) {
+            var k = page.diffusionKind(m)
+            return k === "video" ? "video" : "image"
+        }
+        // Block-diffusion LMs (DiffusionGemma) are chat models.
         if (meta.is_diffusion) return "diffusion"
         // MTP capability is a separate tag (mtpTag); keep this for vision/audio
         // and non-MTP speculative draft sidecars (eagle3 / dflash / …).
@@ -47,6 +98,18 @@ Item {
         return "vision"
     }
 
+    // Block-diffusion LMs (DiffusionGemma, is_diffusion without an SD
+    // family/kind label) are chat models — never image/video tags.
+    function isDiffusion(m) {
+        if (!m) return false
+        if (m.modality === "diffusion") return true
+        var meta = m.metadata || {}
+        if (meta.modality === "diffusion") return true
+        if (meta.diffusion_kind || meta.sd_family) return true
+        if (meta.is_diffusion) return false
+        return page.sdFamilyFallback(m) !== ""
+    }
+
     // GGUF NextN / MTP heads (metadata.has_mtp). Distinct from modality.
     function mtpTag(m) {
         if (!m || !m.metadata) return ""
@@ -60,6 +123,7 @@ Item {
     signal openDetail(string modelId)
     signal browseModels()
     signal quantizeModel(string modelId)
+    signal openImageStudio(string modelId)
 
     function openRename(m) {
         if (!m) return
@@ -120,6 +184,49 @@ Item {
                 if (byModel[id]) next[id] = page.liveActivity[id]
             page.liveActivity = next
         })
+        page.reloadMediaServers()
+    }
+
+    // stable-diffusion.cpp servers (image/video). Kept separate from
+    // page.instances (llama-server) since the endpoint, vocabulary and
+    // stop action differ; the delegate merges both into one status UI.
+    function reloadMediaServers() {
+        api.get("/api/v1/media/servers", function(st, data) {
+            // Tolerate 404 / not-yet-implemented backend: no diffusion rows
+            // just show as "not loaded" instead of erroring the page.
+            if (st !== 200) { page.mediaServers = {}; return }
+            var byModel = {}
+            var list = (data && data.servers) || []
+            for (var i = 0; i < list.length; i++) byModel[list[i].model_id] = list[i]
+            page.mediaServers = byModel
+        })
+    }
+
+    // Unified status accessors: merge llama-server instances and sd-server
+    // media servers into one vocabulary (StatusDot / AppTheme.stateColor
+    // already understand both "loading"/"starting" and "ready"/"failed").
+    function hasStatusRow(m) {
+        if (!m) return false
+        if (page.instances[m.id] !== undefined) return true
+        return page.isDiffusion(m) && page.mediaServers[m.id] !== undefined
+    }
+
+    function rowState(m) {
+        if (!m) return ""
+        if (page.instances[m.id] !== undefined) return page.instances[m.id].state
+        if (page.isDiffusion(m) && page.mediaServers[m.id] !== undefined)
+            return page.mediaServers[m.id].state
+        return ""
+    }
+
+    function rowStatusLabel(m) {
+        if (!m) return ""
+        if (page.instances[m.id] !== undefined) return page.statusText(m.id)
+        if (page.isDiffusion(m) && page.mediaServers[m.id] !== undefined) {
+            var st = page.mediaServers[m.id].state
+            return st === "starting" ? "loading" : st
+        }
+        return ""
     }
 
     Connections {
@@ -133,8 +240,13 @@ Item {
                 p[payload.model_id] = payload
                 page.liveActivity = p
             } else if (name === "instance.state_changed" || name === "instance.updated"
-                || name === "library.scanned" || name === "library.model_updated") {
+                || name === "library.scanned" || name === "library.model_updated"
+                || name === "library.model_imported") {
                 page.reload()
+            } else if (name === "media.server_state" || name === "media.server_starting"
+                || name === "media.server_ready" || name === "media.server_error"
+                || name === "media.server_stopped") {
+                page.reloadMediaServers()
             }
         }
     }
@@ -146,6 +258,14 @@ Item {
         if (act && act.busy && (inst.state === "busy" || inst.state === "ready"))
             return "Processing · " + act.decoded_total + " tok · " + act.tokens_per_second.toFixed(1) + " tok/s"
         return inst.state
+    }
+
+    function diffusionCount() {
+        var n = 0
+        for (var i = 0; i < page.models.length; i++) {
+            if (page.isDiffusion(page.models[i])) n++
+        }
+        return n
     }
 
     function filteredModels() {
@@ -168,6 +288,9 @@ Item {
             if (f === "reranker" && m.metadata && m.metadata.is_reranker) return true
             if (f === "ud" && AppTheme.isUnslothDynamicQuant(m.quantization)) return true
             if (f === "oid" && AppTheme.isOpenInferDynamicQuant(m.quantization)) return true
+            if (f === "image" || f === "video" || f === "flux" || f === "qwen-image") {
+                if (page.isDiffusion(m)) return true
+            }
             return false
         })
     }
@@ -188,31 +311,38 @@ Item {
                 subtitle: "Manage local models, load them with safe defaults, or open advanced configuration when you need it."
             }
 
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 8
-                SearchField {
+                RowLayout {
                     Layout.fillWidth: true
-                    placeholderText: "Filter by name, quantization, architecture…"
-                    searchLabel: "Filter local models"
-                    onTextChanged: page.filter = text
-                }
-                AppButton {
-                    text: page.scanning ? "Scanning…" : "Rescan"
-                    enabled: !page.scanning
-                    onClicked: {
-                        page.scanning = true
-                        page.api.post("/api/v1/models/scan", {}, function() {
-                            page.scanning = false
-                            page.reload()
-                        })
+                    spacing: 8
+                    SearchField {
+                        Layout.fillWidth: true
+                        placeholderText: "Filter by name, quantization, architecture…"
+                        searchLabel: "Filter local models"
+                        onTextChanged: page.filter = text
+                    }
+                    AppButton {
+                        text: page.scanning ? "Scanning…" : "Rescan"
+                        enabled: !page.scanning
+                        onClicked: {
+                            page.scanning = true
+                            page.api.post("/api/v1/models/scan", {}, function() {
+                                page.scanning = false
+                                page.reload()
+                            })
+                        }
+                    }
+                    AppButton {
+                        text: "Import file…"
+                        onClicked: importDialog.open()
                     }
                 }
-                AppButton {
-                    text: "Import file…"
-                    onClicked: importDialog.open()
+                Label {
+                    visible: page.diffusionCount() > 0
+                    Layout.fillWidth: true
+                    text: page.diffusionCount() + " image/video generator" + (page.diffusionCount() === 1 ? "" : "s") + " in library — Image Studio ready."
+                    color: AppTheme.success
+                    font.pixelSize: AppTheme.fontSmall
                 }
-            }
 
             Label {
                 visible: page.errorText !== ""
@@ -301,7 +431,26 @@ Item {
                                     text: modelData.quantization
                                     tone: AppTheme.quantTagTone(modelData.quantization)
                                 }
-                                Tag { visible: modelData.architecture !== ""; text: modelData.architecture; tone: AppTheme.accent }
+                Tag {
+                    visible: modelData.architecture !== ""
+                    text: {
+                        // SD-GGUF rows show family (Qwen-Image, FLUX…);
+                        // safetensors checkpoints keep the engine label.
+                        if (page.isDiffusion(modelData)) {
+                            var fam = page.diffusionFamily(modelData)
+                            if (fam !== "") return fam
+                            if (modelData.architecture === "stable-diffusion.cpp") return modelData.architecture
+                            return modelData.architecture
+                        }
+                        return modelData.architecture
+                    }
+                    tone: AppTheme.accent
+                    ToolTip.visible: diffHover.hovered
+                    ToolTip.text: page.isDiffusion(modelData)
+                        ? "Image/video generator checkpoint (stable-diffusion.cpp)."
+                        : ""
+                    HoverHandler { id: diffHover }
+                }
                                 Tag {
                                     visible: page.mtpTag(modelData) !== ""
                                     text: page.mtpTag(modelData)
@@ -340,17 +489,20 @@ Item {
                             }
                         }
 
-                        // State + actions
+                        // State + actions. LLM status comes from page.instances
+                        // (llama-server); diffusion status comes from
+                        // page.mediaServers (sd-server) — merged into one
+                        // status UI via the rowState()/hasStatusRow() helpers.
                         RowLayout {
                             spacing: 6
                             StatusDot {
-                                visible: page.instances[modelData.id] !== undefined
-                                state: page.instances[modelData.id] ? page.instances[modelData.id].state : ""
+                                visible: page.hasStatusRow(modelData)
+                                state: page.rowState(modelData)
                             }
                             Label {
-                                visible: page.instances[modelData.id] !== undefined
-                                text: page.statusText(modelData.id)
-                                color: AppTheme.stateColor(page.instances[modelData.id] ? page.instances[modelData.id].state : "")
+                                visible: page.hasStatusRow(modelData)
+                                text: page.rowStatusLabel(modelData)
+                                color: AppTheme.stateColor(page.rowState(modelData))
                                 font.pixelSize: AppTheme.fontSmall
                                 Behavior on color { ColorAnimation { duration: AppTheme.motion } }
                             }
@@ -361,11 +513,19 @@ Item {
                                 onClicked: page.openDetail(modelData.id)
                             }
                             AppButton {
-                                visible: page.instances[modelData.id] === undefined
-                                    || ["failed", "crashed"].indexOf(page.instances[modelData.id].state) >= 0
+                                visible: !page.hasStatusRow(modelData)
+                                    || ["failed", "crashed"].indexOf(page.rowState(modelData)) >= 0
                                 text: "Load…"
                                 primary: true
+                                // Auto-detects LLM vs image/video and opens
+                                // the matching settings card.
                                 onClicked: loadDialog.openFor(modelData)
+                            }
+                            AppButton {
+                                visible: page.isDiffusion(modelData)
+                                text: "Image Studio…"
+                                flat: true
+                                onClicked: page.openImageStudio(modelData.id)
                             }
                             AppButton {
                                 visible: page.instances[modelData.id] !== undefined
@@ -374,10 +534,25 @@ Item {
                                 onClicked: page.api.post("/api/v1/models/" + modelData.id + "/unload", {}, function() { page.reload() })
                             }
                             AppButton {
+                                visible: page.isDiffusion(modelData) && page.instances[modelData.id] === undefined
+                                    && page.mediaServers[modelData.id] !== undefined
+                                    && ["starting", "ready"].indexOf(page.mediaServers[modelData.id].state) >= 0
+                                text: "Unload"
+                                onClicked: page.api.post("/api/v1/models/" + modelData.id + "/media/server/stop", {},
+                                    function() { page.reloadMediaServers() })
+                            }
+                            AppButton {
                                 visible: page.instances[modelData.id] !== undefined
                                     && ["failed", "crashed"].indexOf(page.instances[modelData.id].state) >= 0
                                 text: "Diagnostics"
                                 onClicked: failureDialog.openFor(modelData.id)
+                            }
+                            AppButton {
+                                visible: page.isDiffusion(modelData) && page.instances[modelData.id] === undefined
+                                    && page.mediaServers[modelData.id] !== undefined
+                                    && page.mediaServers[modelData.id].state === "failed"
+                                text: "Diagnostics"
+                                onClicked: mediaFailureDialog.openFor(page.mediaServers[modelData.id])
                             }
                             IconButton {
                                 iconText: "⋯"
@@ -407,6 +582,7 @@ Item {
                                         onTriggered: Qt.openUrlExternally("file://" + modelData.primary_path.substring(0, modelData.primary_path.lastIndexOf("/")))
                                     }
                                     MenuItem {
+                                        visible: !page.isDiffusion(modelData)
                                         text: "Quantize…"
                                         onTriggered: page.quantizeModel(modelData.id)
                                     }
@@ -569,6 +745,7 @@ Item {
         id: loadDialog
         parent: Overlay.overlay
         api: page.api
+        events: page.events
         onLoaded: page.reload()
     }
 
@@ -581,6 +758,86 @@ Item {
             function() { page.reload() })
         onRetryCpu: page.api.post("/api/v1/models/" + modelId + "/load",
             { "gpu_offload": "none" }, function() { page.reload() })
+    }
+
+    // Diffusion (sd-server) failure diagnostics. Unlike FailureDialog, the
+    // report is already on hand from /api/v1/media/servers (error, log_tail,
+    // log_path) — no separate diagnostics endpoint to call.
+    AppDialog {
+        id: mediaFailureDialog
+        property var server: null
+        parent: Overlay.overlay
+        title: "Image/video server failed"
+        width: Math.min(640, parent ? parent.width - 64 : 640)
+        height: Math.min(520, parent ? parent.height - 64 : 520)
+
+        function openFor(server) {
+            mediaFailureDialog.server = server
+            mediaFailureDialog.open()
+        }
+
+        contentItem: ColumnLayout {
+            spacing: AppTheme.gap
+
+            Label {
+                Layout.fillWidth: true
+                text: mediaFailureDialog.server ? (mediaFailureDialog.server.error || "Unknown error") : ""
+                color: AppTheme.danger
+                font.weight: Font.DemiBold
+                wrapMode: Text.WordWrap
+            }
+
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 2
+                columnSpacing: 16
+                rowSpacing: 4
+                Label { text: "Runtime"; color: AppTheme.textFaint; font.pixelSize: AppTheme.fontSmall }
+                Label {
+                    text: mediaFailureDialog.server ? (mediaFailureDialog.server.runtime_id || "—") : "—"
+                    color: AppTheme.textDim; font.pixelSize: AppTheme.fontSmall
+                }
+                Label { text: "Log file"; color: AppTheme.textFaint; font.pixelSize: AppTheme.fontSmall }
+                Label {
+                    text: mediaFailureDialog.server ? (mediaFailureDialog.server.log_path || "—") : "—"
+                    color: AppTheme.textDim; font.pixelSize: AppTheme.fontSmall
+                    elide: Text.ElideMiddle; Layout.fillWidth: true
+                }
+            }
+
+            AppGroupBox {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                title: "Log (tail)"
+                ScrollView {
+                    anchors.fill: parent
+                    clip: true
+                    TextEdit {
+                        readOnly: true
+                        width: parent.width
+                        text: mediaFailureDialog.server ? (mediaFailureDialog.server.log_tail || "") : ""
+                        color: AppTheme.text
+                        font.family: "monospace"
+                        font.pixelSize: AppTheme.fontSmall
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                AppButton { text: "Close"; onClicked: mediaFailureDialog.close() }
+                AppButton {
+                    text: "Retry"
+                    primary: true
+                    onClicked: {
+                        var mid = mediaFailureDialog.server ? mediaFailureDialog.server.model_id : ""
+                        mediaFailureDialog.close()
+                        if (mid) page.openLoad(mid)
+                    }
+                }
+            }
+        }
     }
 
     ConfirmDialog {
