@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/openinfer/openinfer-studio/internal/gguf"
+	"github.com/openinfer/openinfer-studio/internal/sdmodel"
 )
 
 var now = func() string { return time.Now().UTC().Format(time.RFC3339Nano) }
@@ -180,6 +181,7 @@ type Model struct {
 	LastRuntime   string          `json:"last_runtime"`
 	LastResult    string          `json:"last_result"`
 	Files         []string        `json:"files"` // all shards + projector
+	Modality      string          `json:"modality"`
 	CreatedAt     string          `json:"created_at"`
 }
 
@@ -239,6 +241,116 @@ func (l *Library) RemoveDirectory(id string) error {
 
 var splitSuffix = regexp.MustCompile(`(?i)-\d{5}-of-\d{5}\.gguf$`)
 
+// diffusionWeightExts are non-GGUF weights an sd.cpp checkpoint row can use.
+var diffusionWeightExts = []string{".safetensors", ".ckpt", ".pt", ".pth", ".bin"}
+
+// IsDiffusionWeightPath reports whether a path is an sd.cpp-loadable
+// non-GGUF weight file.
+func IsDiffusionWeightPath(path string) bool {
+	lower := strings.ToLower(path)
+	for _, ext := range diffusionWeightExts {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// ClassifyModality returns the library modality for a scanned primary file:
+// "llm" (GGUF, existing behavior) or "diffusion" (sd.cpp checkpoint).
+func ClassifyModality(primaryPath string) string {
+	if IsDiffusionWeightPath(primaryPath) {
+		return "diffusion"
+	}
+	return "llm"
+}
+
+// modalityFor returns the library modality for a scanned GGUF row: SD
+// image/video checkpoints are "diffusion", everything else stays "llm".
+func modalityFor(isSDGGUF bool) string {
+	if isSDGGUF {
+		return "diffusion"
+	}
+	return "llm"
+}
+
+// canvasLengthFor keeps the block-diffusion-LM canvas length only for
+// actual block-diffusion LMs (DiffusionGemma). SD checkpoints report 0.
+func canvasLengthFor(md *gguf.Metadata, isSDGGUF bool) uint32 {
+	if isSDGGUF {
+		return 0
+	}
+	return md.CanvasLength
+}
+
+// isUnambiguousDiffusionName is the filename fallback for weight files
+// whose header cannot be read. Only names that can never be a pipeline
+// component or an LLM shard qualify; component filenames are already
+// rejected by sdmodel.ComponentRole before this runs.
+func isUnambiguousDiffusionName(path string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	for _, hint := range []string{
+		"unet", "diffusion_model", "model.diffusion", "checkpoint",
+		"-ckpt", "_ckpt", ".ckpt", "pruned", "emaonly", "ema-only",
+		"sd15", "sd-15", "sd1.", "v1-5", "v1.5", "sdxl", "sd-xl", "sd3",
+		"flux", "qwen-image", "qwen_image", "wan2", "wan-2",
+		"hunyuan", "ltx", "minimax", "playground", "illustrious",
+	} {
+		if strings.Contains(base, hint) {
+			return true
+		}
+	}
+	return false
+}
+
+// isStandaloneDiffusionWeight reports whether a non-GGUF weight file is a
+// standalone image/video generator (a library-worthy checkpoint) rather
+// than a pipeline component or an unrelated LLM shard. Component roles,
+// LoRAs and files with no diffusion-tensor evidence are rejected: a VAE,
+// text encoder, CLIP/T5 tower, upscaler or ControlNet must never appear as
+// a loadable image model, and HF LLM safetensors shards must not either.
+func isStandaloneDiffusionWeight(path string) bool {
+	if role := sdmodel.ComponentRole(path, nil); role != "" {
+		return false
+	}
+	tensors, err := sdmodel.TensorNames(path)
+	if err != nil || len(tensors) == 0 {
+		return isUnambiguousDiffusionName(path)
+	}
+	return sdmodel.DiffusionKind(tensors) != ""
+}
+
+// isDiffusionRepoComponent reports whether a GGUF is a pipeline component
+// of a managed diffusion repo (a text-encoder/VAE/CLIP GGUF sitting under
+// components/, vae/ or text_encoders/ of a repo that also holds a diffusion
+// checkpoint) rather than a standalone chat LLM. Plain LLM GGUFs in
+// ordinary model directories are never affected.
+func isDiffusionRepoComponent(path string) bool {
+	lower := strings.ToLower(filepath.ToSlash(path))
+	for _, seg := range []string{"/components/", "/vae/", "/text_encoders/", "/text_encoder/",
+		"/clip_l/", "/clip_g/", "/clip_vision/", "/taesd/", "/controlnet/", "/control_net/", "/lora/"} {
+		if strings.Contains(lower, seg) {
+			return true
+		}
+	}
+	base := strings.ToLower(filepath.Base(path))
+	return sdmodel.ComponentRole(base, nil) != "" && sdmodel.ComponentRole(base, nil) != sdmodel.RoleLoRA
+}
+
+// isPipelineComponentFile reports whether an on-disk weight currently
+// classifies as a diffusion pipeline component (VAE, text encoder, CLIP,
+// LoRA, ControlNet, upscaler) or a non-standalone shard. Such files must
+// never hold their own library row.
+func isPipelineComponentFile(path string) bool {
+	if strings.HasSuffix(strings.ToLower(path), ".gguf") {
+		return isDiffusionRepoComponent(path)
+	}
+	if !IsDiffusionWeightPath(path) {
+		return false
+	}
+	return !isStandaloneDiffusionWeight(path)
+}
+
 // Scan walks all registered directories, parses GGUF headers, groups split
 // sets and pairs projectors, and upserts the library.
 func (l *Library) Scan() (int, error) {
@@ -251,6 +363,7 @@ func (l *Library) Scan() (int, error) {
 		size int64
 	}
 	var ggufs []found
+	var checkpoints []found
 	for _, d := range dirs {
 		root := d["path"].(string)
 		baseDepth := strings.Count(filepath.Clean(root), string(os.PathSeparator))
@@ -269,9 +382,26 @@ func (l *Library) Scan() (int, error) {
 				}
 				return nil
 			}
-			if strings.HasSuffix(strings.ToLower(e.Name()), ".gguf") {
+			lower := strings.ToLower(e.Name())
+			if strings.HasSuffix(lower, ".gguf") {
+				// Pipeline-component GGUFs (a text-encoder GGUF under
+				// components/ of a diffusion repo) are not chat LLMs and
+				// must not become library rows.
+				if isDiffusionRepoComponent(p) {
+					return nil
+				}
 				if st, err := e.Info(); err == nil {
 					ggufs = append(ggufs, found{p, st.Size()})
+				}
+				return nil
+			}
+			// Diffusion checkpoints (sd.cpp): safetensors / ckpt / pt bundles.
+			// Only standalone generators become library rows — pipeline
+			// components (VAE, text encoders, CLIP/T5, LoRA, ControlNet,
+			// upscalers) and HF LLM safetensors shards are skipped.
+			if IsDiffusionWeightPath(e.Name()) {
+				if st, err := e.Info(); err == nil && isStandaloneDiffusionWeight(p) {
+					checkpoints = append(checkpoints, found{p, st.Size()})
 				}
 			}
 			return nil
@@ -315,9 +445,27 @@ func (l *Library) Scan() (int, error) {
 		// community draft names that still use a normal architecture string.
 		md.ApplySpeculativeFlags(primary)
 		md.ApplyEmbeddingFlags(primary)
-		md.ApplyDiffusionFlags(primary)
-		if q := gguf.OverlayDynamicQuant(primary, md.Name, ""); q != "" {
+		// Tensor-name evidence for KV-less SD-GGUF conversions
+		// (e.g. Qwen-Image): diffusion transformer signatures cannot be
+		// seen in KV, so read the tensor table before flagging.
+		tensorNames := diffusionTensorNames(primary)
+		md.ApplyDiffusionFlagsTensors(primary, tensorNames)
+		// Overlay filename quants (Q6_K, …) even on KV-less SD-GGUFs:
+		// general.file_type is absent so Quantization would stay empty,
+		// leaving Library rows without a quant tag.
+		if q := gguf.OverlayDynamicQuant(primary, md.Name, md.Quantization); q != "" {
 			md.Quantization = q
+		}
+		if md.Quantization == "" {
+			if q := diffusionQuantFromName(primary); q != "" {
+				md.Quantization = q
+			}
+		}
+		// SD-GGUF family without tensor evidence yet: keep the name-based
+		// signal inside metadata so the UI can still tag image/video.
+		sdKind := diffusionFamilyKind(primary, md.Name)
+		if sdKind == "" && len(tensorNames) > 0 {
+			sdKind = gguf.SDKindFromTensors(tensorNames)
 		}
 		var total int64
 		for _, f := range files {
@@ -373,6 +521,11 @@ func (l *Library) Scan() (int, error) {
 			hasVision, hasAudio, multimodal = false, false, false
 			proj = ""
 		}
+		// SD-GGUF image/video checkpoints are library diffusion targets,
+		// not chat LLMs: modality "diffusion" and the block-diffusion-LM
+		// flags cleared. is_diffusion + canvas_length stay reserved for
+		// block-diffusion LMs (DiffusionGemma), which load via the LLM path.
+		isSDGGUF := gguf.IsSDCheckpoint(primary, primary, tensorNames)
 		meta := map[string]any{
 			"name": md.Name, "tokenizer": md.Tokenizer,
 			"multimodal": multimodal, "has_vision": hasVision, "has_audio": hasAudio,
@@ -384,8 +537,12 @@ func (l *Library) Scan() (int, error) {
 			"is_reranker":          md.IsReranker,
 			"pooling_type":         md.PoolingType,
 			"embedding_length_out": md.EmbeddingLengthOut,
-			"is_diffusion":         md.IsDiffusion,
-			"canvas_length":        md.CanvasLength,
+			"is_diffusion":         md.IsDiffusion && !isSDGGUF,
+			"canvas_length":        canvasLengthFor(md, isSDGGUF),
+			"modality":             modalityFor(isSDGGUF),
+			"diffusion_kind":       sdKind,
+			"sd_family":            diffusionFamilyName(primary, md.Name),
+			"sd_tensors":           len(tensorNames) > 0 && sdKind != "" && gguf.SDKindFromTensors(tensorNames) != "",
 			"version":              md.Version,
 			"block_count":          md.BlockCount, "head_count": md.HeadCount,
 			"head_count_kv": md.HeadCountKV, "head_count_kv_layers": md.HeadCountKVLayers,
@@ -445,7 +602,55 @@ func (l *Library) Scan() (int, error) {
 		count++
 	}
 
-	// Remove DB rows whose primary file vanished.
+	// Diffusion checkpoints: one library row per weight file (no GGUF
+	// parse — sd.cpp reads safetensors/ckpt directly). Filename + size is
+	// the identity; modality + diffusion kind flow into metadata_json so
+	// the load dialog and Image Studio can branch on them.
+	for _, cp := range checkpoints {
+		id := stableID(cp.path)
+		alias := diffusionAlias(cp.path)
+		kind := diffusionKindHint(cp.path)
+		metaJSON, _ := json.Marshal(map[string]any{
+			"name": alias, "modality": "diffusion", "diffusion_kind": kind,
+			"is_diffusion": false, // GGUF block-diffusion LM flag; checkpoints use modality
+		})
+		_, err = l.db.Exec(`INSERT INTO models
+			(id,alias,primary_path,projector_path,size_bytes,quantization,architecture,parameters,
+			 context_length,metadata_json,created_at,updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+			ON CONFLICT(id) DO UPDATE SET
+			 primary_path=excluded.primary_path,
+			 size_bytes=excluded.size_bytes,
+			 metadata_json=excluded.metadata_json,
+			 updated_at=excluded.updated_at,
+			 alias=CASE
+			   WHEN length(trim(models.alias)) < 4
+			     OR lower(trim(models.alias)) IN ('model','gguf','untitled','unknown','none')
+			   THEN excluded.alias
+			   ELSE models.alias
+			 END`,
+			id, alias, cp.path, "", cp.size, "", "stable-diffusion.cpp", 0,
+			0, string(metaJSON), now(), now())
+		if err != nil {
+			l.log.Warn("upsert diffusion checkpoint failed", "path", cp.path, "err", err)
+			continue
+		}
+		_, _ = l.db.Exec(`DELETE FROM model_files WHERE model_id = ?`, id)
+		_, _ = l.db.Exec(`INSERT INTO model_files(id,model_id,path,role,size_bytes) VALUES (?,?,?,?,?)`,
+			uuid.NewString(), id, cp.path, "primary", cp.size)
+		// Attach a same-directory VAE sidecar when present (sd.cpp --vae).
+		if vae := diffusionVAESidecar(cp.path); vae != "" {
+			if st, err := os.Stat(vae); err == nil {
+				_, _ = l.db.Exec(`INSERT INTO model_files(id,model_id,path,role,size_bytes) VALUES (?,?,?,?,?)`,
+					uuid.NewString(), id, vae, "vae", st.Size())
+			}
+		}
+		count++
+	}
+
+	// Remove DB rows whose primary file vanished, or which now classify as
+	// pipeline components / non-standalone shards (a VAE or text encoder
+	// previously imported as a standalone generator).
 	rows, err := l.db.Query(`SELECT id, primary_path FROM models`)
 	if err == nil {
 		defer rows.Close()
@@ -456,10 +661,15 @@ func (l *Library) Scan() (int, error) {
 			if rows.Scan(&r.id, &r.p) == nil {
 				if _, err := os.Stat(r.p); os.IsNotExist(err) {
 					stale = append(stale, r)
+					continue
+				}
+				if isPipelineComponentFile(r.p) {
+					stale = append(stale, r)
 				}
 			}
 		}
 		for _, s := range stale {
+			_, _ = l.db.Exec(`DELETE FROM model_files WHERE model_id = ?`, s.id)
 			_, _ = l.db.Exec(`DELETE FROM models WHERE id = ?`, s.id)
 		}
 	}
@@ -474,6 +684,189 @@ func (l *Library) Scan() (int, error) {
 // rescans, so settings survive).
 func stableID(path string) string {
 	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("openinfer-model:"+filepath.Clean(path))).String()
+}
+
+// diffusionAlias derives a display name for a checkpoint file.
+func diffusionAlias(path string) string {
+	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	base = strings.ReplaceAll(base, "_", " ")
+	base = strings.ReplaceAll(base, "-", " ")
+	base = strings.Join(strings.Fields(base), " ")
+	if base == "" {
+		return filepath.Base(path)
+	}
+	return base
+}
+
+// diffusionKindHint guesses image vs video from the checkpoint filename.
+// Library rows store this as metadata_json.diffusion_kind; the sd-server
+// capability document is authoritative at generate time.
+func diffusionKindHint(path string) string {
+	lower := strings.ToLower(filepath.Base(path))
+	for _, h := range []string{"wan", "ltx", "hunyuanvideo", "hunyuan-video", "minimax", "mochi", "cogvideo", "svd", "animatediff", "vid", "video"} {
+		if strings.Contains(lower, h) {
+			return "video"
+		}
+	}
+	return "image"
+}
+
+// diffusionQuantFromName extracts a trailing quant token (Q6_K, Q4_K_M,
+// F16, …) from a checkpoint filename for Library tags. SD-GGUF conversions
+// ship no general.file_type KV, so this keeps quant tags populated.
+func diffusionQuantFromName(path string) string {
+	base := filepath.Base(path)
+	if m := aliasQuantRe.FindStringSubmatch(base); len(m) == 2 {
+		return strings.ToUpper(m[1])
+	}
+	return ""
+}
+
+// diffusionTensorNames returns tensor names for a GGUF so KV-less SD-GGUF
+// conversions can be flagged. Only the table is read; payloads untouched.
+// Failures return nil — callers fall back to filename signals.
+func diffusionTensorNames(path string) []string {
+	tensors, _, err := gguf.ListTensors(path)
+	if err != nil || len(tensors) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(tensors))
+	for _, t := range tensors {
+		names = append(names, t.Name)
+	}
+	return names
+}
+
+// diffusionFamilyKind guesses image vs video for a GGUF from family filename
+// tokens (Qwen-Image, Wan, …). Tensor evidence is preferred when available;
+// this keeps a kind label on rows whose tensor table could not be read.
+func diffusionFamilyKind(path, name string) string {
+	blob := strings.ToLower(strings.TrimSpace(name) + " " + filepath.Base(path) + " " + filepath.Dir(path))
+	for _, h := range []string{
+		"wan2", "wan-2", "wanx", "ltx", "hunyuanvideo", "hunyuan-video",
+		"minimax", "hailuo", "mochi", "cogvideo", "text-to-video", "image-to-video",
+		"video-to-video", "svd", "animatediff", "motion-module", "motion_module",
+	} {
+		if strings.Contains(blob, h) {
+			return "video"
+		}
+	}
+	for _, h := range []string{
+		"stable-diffusion", "stable_diffusion", "sdxl", "sd-xl", "sd1.", "sd-1.",
+		"sd2.", "sd-2.", "sd3", "sd-3", "sdxl-turbo", "sd-turbo",
+		"flux", "chroma", "qwen-image", "qwen_image", "z-image", "ideogram", "krea",
+	} {
+		if strings.Contains(blob, h) {
+			return "image"
+		}
+	}
+	return ""
+}
+
+// diffusionFamilyName returns a short family label ("FLUX", "Qwen-Image",
+// "SDXL", …) for tags, or "" when unknown.
+func diffusionFamilyName(path, name string) string {
+	blob := strings.ToLower(strings.TrimSpace(name) + " " + filepath.Base(path))
+	fams := []struct{ token, label string }{
+		{"qwen-image", "Qwen-Image"}, {"qwen_image", "Qwen-Image"},
+		{"flux", "FLUX"}, {"stable-diffusion-xl", "SDXL"}, {"stable_diffusion_xl", "SDXL"},
+		{"sdxl", "SDXL"}, {"stable-diffusion", "SD"}, {"stable_diffusion", "SD"},
+		{"sd3", "SD3"}, {"sd-3", "SD3"}, {"sd2.", "SD2"}, {"sd-2.", "SD2"},
+		{"sd1.", "SD1"}, {"sd-1.", "SD1"}, {"chroma", "Chroma"},
+		{"z-image", "Z-Image"}, {"ideogram", "Ideogram"}, {"krea", "Krea"},
+		{"wan2", "Wan"}, {"wan-2", "Wan"}, {"wanx", "Wan"}, {"ltx", "LTX"},
+		{"hunyuanvideo", "HunyuanVideo"}, {"hunyuan-video", "HunyuanVideo"},
+		{"minimax", "MiniMax"}, {"hailuo", "MiniMax"}, {"mochi", "Mochi"},
+		{"cogvideo", "CogVideo"}, {"svd", "SVD"}, {"animatediff", "AnimateDiff"},
+		{"controlnet", "ControlNet"},
+	}
+	for _, f := range fams {
+		if strings.Contains(blob, f.token) {
+			return f.label
+		}
+	}
+	return ""
+}
+
+// diffusionVAESidecar returns a same-directory VAE file for a checkpoint,
+// or "" when none is present.
+func diffusionVAESidecar(checkpointPath string) string {
+	dir := filepath.Dir(checkpointPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		lower := strings.ToLower(e.Name())
+		if IsDiffusionWeightPath(e.Name()) &&
+			(strings.Contains(lower, "vae") || strings.Contains(lower, "taesd") || strings.Contains(lower, "tae")) {
+			return filepath.Join(dir, e.Name())
+		}
+	}
+	return ""
+}
+
+// IsDiffusionModel reports whether a library model is an sd.cpp image/video
+// target: a safetensors checkpoint row (modality=diffusion), a GGUF with an
+// SD family/kind label, or a GGUF with SD-GGUF transformer signatures.
+// Block-diffusion LMs (DiffusionGemma, is_diffusion without any SD family or
+// kind label) are chat models and explicitly excluded — they load via the
+// LLM path, not sd-server.
+func IsDiffusionModel(m Model) bool {
+	var meta struct {
+		Modality string `json:"modality"`
+		IsDiff   bool   `json:"is_diffusion"`
+		SDKind   string `json:"diffusion_kind"`
+		SDFam    string `json:"sd_family"`
+	}
+	if err := json.Unmarshal(m.Metadata, &meta); err == nil {
+		if meta.Modality == "diffusion" {
+			return true
+		}
+		if meta.SDKind != "" || meta.SDFam != "" {
+			return true
+		}
+		if meta.IsDiff {
+			return false
+		}
+	}
+	if IsDiffusionWeightPath(m.PrimaryPath) {
+		return true
+	}
+	// Path fallback for rows scanned before tensor-signature support.
+	if diffusionFamilyKind(m.PrimaryPath, "") != "" {
+		return true
+	}
+	return false
+}
+
+// DiffusionKind returns the stored image|video hint for a diffusion model.
+func DiffusionKind(m Model) string {
+	var meta struct {
+		Kind  string `json:"diffusion_kind"`
+		SDFam string `json:"sd_family"`
+	}
+	if err := json.Unmarshal(m.Metadata, &meta); err == nil && meta.Kind != "" {
+		return meta.Kind
+	}
+	if k := diffusionFamilyKind(m.PrimaryPath, ""); k != "" {
+		return k
+	}
+	return diffusionKindHint(m.PrimaryPath)
+}
+
+// DiffusionFamily returns the short family label ("FLUX", "Qwen-Image", …).
+func DiffusionFamily(m Model) string {
+	var meta struct {
+		Fam string `json:"sd_family"`
+	}
+	if err := json.Unmarshal(m.Metadata, &meta); err == nil && meta.Fam != "" {
+		return meta.Fam
+	}
+	return diffusionFamilyName(m.PrimaryPath, "")
 }
 
 // List returns all models, favorites first.
@@ -499,6 +892,16 @@ func (l *Library) List() ([]Model, error) {
 		}
 		m.Favorite = fav == 1
 		m.Metadata = json.RawMessage(meta)
+		var mm struct {
+			Modality string `json:"modality"`
+		}
+		if err := json.Unmarshal(m.Metadata, &mm); err == nil && mm.Modality != "" {
+			m.Modality = mm.Modality
+		} else if IsDiffusionWeightPath(m.PrimaryPath) {
+			m.Modality = "diffusion"
+		} else {
+			m.Modality = "llm"
+		}
 		out = append(out, m)
 	}
 	for i := range out {
@@ -690,12 +1093,13 @@ func pruneEmptyParents(filePath, stopAt string) {
 	}
 }
 
-// ImportFile copies a GGUF from disk into the managed models directory (same
-// ownership model as Hugging Face downloads), then rescans the library.
-// Sibling split shards and an mmproj in the same source directory are copied
-// alongside the selected file. The original path is left untouched.
+// ImportFile copies a model from disk into the managed models directory
+// (same ownership model as Hugging Face downloads), then rescans the
+// library. GGUF files copy with sibling split shards and an mmproj;
+// diffusion checkpoints (.safetensors/.ckpt/.pt) copy with a same-directory
+// VAE sidecar. The original path is left untouched.
 //
-// Layout: <managed>/local--<SafeName>/files/<basename.gguf>
+// Layout: <managed>/local--<SafeName>/files/<basename>
 //
 // Files already inside the managed tree are registered in place (no copy).
 func (l *Library) ImportFile(path string) (string, error) {
@@ -707,11 +1111,23 @@ func (l *Library) ImportFile(path string) (string, error) {
 	if err != nil || st.IsDir() {
 		return "", fmt.Errorf("invalid model path %q", abs)
 	}
-	if !strings.HasSuffix(strings.ToLower(abs), ".gguf") {
-		return "", fmt.Errorf("not a GGUF file: %s", abs)
+	lower := strings.ToLower(abs)
+	isGGUF := strings.HasSuffix(lower, ".gguf")
+	isDiffusion := IsDiffusionWeightPath(abs)
+	if !isGGUF && !isDiffusion {
+		return "", fmt.Errorf("not a GGUF or diffusion checkpoint file: %s", abs)
 	}
-	if _, err := gguf.ParseFile(abs); err != nil {
-		return "", fmt.Errorf("not a readable GGUF model: %w", err)
+	if isGGUF {
+		if _, err := gguf.ParseFile(abs); err != nil {
+			return "", fmt.Errorf("not a readable GGUF model: %w", err)
+		}
+	} else {
+		// Diffusion checkpoints: header sniff instead of a GGUF parse.
+		// safetensors = 8-byte LE length + JSON header; ckpt/pt = pickle
+		// or zip container. Zero-byte and text files are rejected.
+		if st.Size() <= 0 {
+			return "", fmt.Errorf("not a readable diffusion checkpoint: %s is empty", abs)
+		}
 	}
 
 	managedClean := filepath.Clean(l.managed)
@@ -858,9 +1274,18 @@ func (l *Library) HighPrecisionFromRepo(repo string) *Model {
 	return q8
 }
 
-// importBundle returns the selected GGUF plus same-directory split shards and
-// an mmproj sibling when present.
+// importBundle returns the selected model plus its companions: same-stem
+// split shards and an mmproj sibling for GGUF; a same-directory VAE sidecar
+// for diffusion checkpoints.
 func importBundle(primary string) ([]string, error) {
+	if IsDiffusionWeightPath(primary) {
+		out := []string{primary}
+		if vae := diffusionVAESidecar(primary); vae != "" {
+			out = append(out, vae)
+		}
+		sort.Strings(out)
+		return out, nil
+	}
 	dir := filepath.Dir(primary)
 	base := filepath.Base(primary)
 	lower := strings.ToLower(base)

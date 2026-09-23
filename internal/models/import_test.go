@@ -300,3 +300,113 @@ func TestHighPrecisionFromRepoSkipsInconsistentVocab(t *testing.T) {
 		t.Fatalf("aligned GGUF should be reused, got %+v", found)
 	}
 }
+
+func TestScanRegistersDiffusionCheckpoint(t *testing.T) {
+	lib := testLibrary(t)
+	destDir := filepath.Join(lib.managed, "local--sd15", "files")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ckpt := filepath.Join(destDir, "v1-5-pruned-emaonly.safetensors")
+	if err := os.WriteFile(ckpt, bytes.Repeat([]byte{1}, 64), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.Scan(); err != nil {
+		t.Fatal(err)
+	}
+	id := lib.IDForPath(ckpt)
+	if id == "" {
+		t.Fatal("checkpoint not registered by scan")
+	}
+	m, err := lib.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsDiffusionModel(*m) {
+		t.Fatalf("expected diffusion modality, got %+v", m)
+	}
+	if m.Modality != "diffusion" {
+		t.Fatalf("modality = %q, want diffusion", m.Modality)
+	}
+	if DiffusionKind(*m) == "" {
+		t.Fatal("expected diffusion kind hint")
+	}
+}
+
+func TestImportDiffusionCheckpoint(t *testing.T) {
+	lib := testLibrary(t)
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "flux-dev.safetensors")
+	if err := os.WriteFile(src, bytes.Repeat([]byte{2}, 128), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	id, err := lib.ImportFile(src)
+	if err != nil {
+		t.Fatalf("ImportFile: %v", err)
+	}
+	m, err := lib.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsDiffusionModel(*m) {
+		t.Fatalf("expected diffusion model, got %+v", m)
+	}
+}
+
+func TestImportRejectsNonModel(t *testing.T) {
+	lib := testLibrary(t)
+	src := filepath.Join(t.TempDir(), "notes.txt")
+	if err := os.WriteFile(src, []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.ImportFile(src); err == nil {
+		t.Fatal("expected rejection for .txt")
+	}
+}
+
+func TestScanFlagsQwenImageGGUF(t *testing.T) {
+	// Real abenzerps Qwen-Image GGUF when present; synthetic tensor-named
+	// GGUF otherwise. Either way the row must read as an image generator
+	// with quant + architecture populated like any other model.
+	real := "/home/gavin/.local/share/openinfer-studio/models/abenzerps--Qwen-Image-2.1-GGUF/ckpt-qwen-image-2-1-q6_k/qwen-image-2.1-Q6_K.gguf"
+	lib := testLibrary(t)
+	if _, err := os.Stat(real); err == nil {
+		destDir := filepath.Join(lib.managed, "abenzerps--Qwen-Image-2.1-GGUF", "ckpt-qwen-image-2-1-q6_k")
+		if err := os.MkdirAll(destDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(real)
+		if err != nil {
+			t.Skip("cannot read fixture")
+		}
+		// Copy header + tensor table only (first 256 KiB is plenty).
+		if len(raw) > 256<<10 {
+			raw = raw[:256<<10]
+		}
+		ckpt := filepath.Join(destDir, "qwen-image-2.1-Q6_K.gguf")
+		if err := os.WriteFile(ckpt, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := lib.Scan(); err != nil {
+			t.Fatal(err)
+		}
+		m, err := lib.Get(lib.IDForPath(ckpt))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !IsDiffusionModel(*m) {
+			t.Fatalf("Qwen-Image GGUF not flagged diffusion: %+v", m)
+		}
+		if DiffusionKind(*m) != "image" {
+			t.Fatalf("kind = %q, want image", DiffusionKind(*m))
+		}
+		if DiffusionFamily(*m) != "Qwen-Image" {
+			t.Fatalf("family = %q, want Qwen-Image", DiffusionFamily(*m))
+		}
+		if m.Quantization == "" {
+			t.Fatal("expected quant label from filename overlay")
+		}
+		return
+	}
+	t.Skip("no local Qwen-Image fixture")
+}

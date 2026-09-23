@@ -11,7 +11,7 @@ import (
 // MetadataSchemaVersion is bumped whenever Scan persists new architecture
 // fields that older library rows may lack (SWA patterns, hybrid interval, etc.).
 // EnsureFresh rescans when the stored schema version differs.
-const MetadataSchemaVersion = "11"
+const MetadataSchemaVersion = "13"
 
 // EnsureFresh runs Scan when the persisted metadata schema is outdated or
 // when on-disk GGUF files look newer/different than the library rows.
@@ -128,7 +128,11 @@ func (l *Library) discoverPrimaries() (map[string]primaryInfo, error) {
 				return nil
 			}
 			if !strings.HasSuffix(strings.ToLower(e.Name()), ".gguf") {
-				return nil
+				// Diffusion checkpoints count as primaries too so new
+				// safetensors drops trigger a rescan.
+				if !IsDiffusionWeightPath(e.Name()) {
+					return nil
+				}
 			}
 			lower := strings.ToLower(e.Name())
 			if strings.Contains(lower, "mmproj") || strings.Contains(lower, "mm-proj") {
@@ -148,8 +152,8 @@ func (l *Library) discoverPrimaries() (map[string]primaryInfo, error) {
 		stem := g.path
 		if splitSuffix.MatchString(stem) {
 			stem = splitSuffix.ReplaceAllString(stem, "")
-		} else {
-			stem = strings.TrimSuffix(stem, ".gguf")
+		} else if strings.HasSuffix(strings.ToLower(stem), ".gguf") {
+			stem = strings.TrimSuffix(stem, filepath.Ext(stem))
 		}
 		groups[stem] = append(groups[stem], g)
 	}
