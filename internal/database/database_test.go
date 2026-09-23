@@ -17,7 +17,7 @@ func TestMigrationsApply(t *testing.T) {
 	for _, table := range []string{"settings", "models", "runtimes", "downloads",
 		"download_files", "instances", "conversations", "conversation_messages",
 		"model_presets", "server_profiles", "diagnostic_events",
-		"quant_jobs", "imatrices"} {
+		"quant_jobs", "imatrices", "media_jobs"} {
 		var name string
 		err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name)
 		if err != nil {
@@ -40,8 +40,8 @@ func TestMigrationsIdempotent(t *testing.T) {
 	defer db2.Close()
 	var n int
 	db2.QueryRow(`SELECT COUNT(1) FROM schema_migrations`).Scan(&n)
-	if n != 3 {
-		t.Errorf("migrations recorded = %d, want 3", n)
+	if n != 4 {
+		t.Errorf("migrations recorded = %d, want 4", n)
 	}
 }
 
