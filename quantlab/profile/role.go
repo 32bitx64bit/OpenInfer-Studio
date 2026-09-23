@@ -268,3 +268,7 @@ func swigluHalf(name string) string {
 	}
 	return ""
 }
+
+// LayerIndex parses a GGUF-style "blk.N." (or layers.N / layer.N) index.
+// Exported for the depth-aware sensitivity model.
+func LayerIndex(name string) int { return layerIndex(name) }

@@ -239,7 +239,7 @@ func bruteForceCalibrated(t *testing.T, bank *core.TensorBank, cands []core.DTyp
 	return best
 }
 
-func TestSolveCalibratedDropsPolicyFloorsForProbedRoles(t *testing.T) {
+func TestSolveCalibratedKeepsPolicyFloors(t *testing.T) {
 	bank := &core.TensorBank{SourcePath: "/m.gguf", ModelID: "cal", Tensors: []core.TensorDesc{
 		{Name: "output.weight", DType: core.DTypeF16, Shape: []uint64{256, 1024}, Length: 524288, Elements: 262144},
 		{Name: "blk.0.attn_q.weight", DType: core.DTypeF16, Shape: []uint64{256, 256}, Length: 131072, Elements: 65536},
@@ -256,30 +256,43 @@ func TestSolveCalibratedDropsPolicyFloorsForProbedRoles(t *testing.T) {
 	if floor, ok := set.Floor("output.weight"); !ok || floor != core.DTypeQ6_K {
 		t.Fatalf("fixture: expected a Q6_K output floor, got %v %v", floor, ok)
 	}
-	// Output measured as nearly insensitive, attention as very sensitive.
+	// Output measured as nearly insensitive, attention as very sensitive:
+	// the probe must not be able to harvest the protected head.
 	sens := &Sensitivity{Roles: map[string]RoleSensitivity{
 		"output": {Role: "output", ProbeDType: core.DTypeQ3_K, KLD: 0.001, Elements: 262144},
 		"attn_q": {Role: "attn_q", ProbeDType: core.DTypeQ3_K, KLD: 1.0, Elements: 65536},
 	}}
-	q4o, _ := core.DTypeQ4_K_T.ExactBytes(262144)
+	q6o, _ := core.DTypeQ6_K.ExactBytes(262144)
 	q8a, _ := core.DTypeQ8_0.ExactBytes(65536)
-	res, err := Solve(Request{Bank: bank, Anchors: set, Candidates: cands, BudgetBytes: q4o + q8a, ExactLoss: exact, Sensitivity: sens})
+	q4o, _ := core.DTypeQ4_K_T.ExactBytes(262144)
+	res, err := Solve(Request{Bank: bank, Anchors: set, Candidates: cands, BudgetBytes: q6o + q8a, ExactLoss: exact, Sensitivity: sens})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := targetOf(t, res, "output.weight"); anchor.Rank(got) <= anchor.Rank(core.DTypeQ6_K) {
-		t.Errorf("output = %s; the measured-insensitive head should drop below the Q6_K policy floor", got)
+	if got := targetOf(t, res, "output.weight"); anchor.Rank(got) > anchor.Rank(core.DTypeQ6_K) {
+		t.Errorf("output = %s violates the Q6_K policy floor", got)
 	}
 	if got := targetOf(t, res, "blk.0.attn_q.weight"); got != core.DTypeQ8_0 {
 		t.Errorf("attn_q = %s, want Q8_0", got)
 	}
+	kept := false
 	for _, a := range res.Profile.Anchors {
 		if a.Matches("output.weight") {
-			t.Errorf("profile still records a floor on the probed output head: %+v", a)
+			kept = true
 		}
 	}
-	// The default (uncalibrated) path keeps honoring the floor.
-	res, err = Solve(Request{Bank: bank, Anchors: set, Candidates: cands, BudgetBytes: q4o + q8a + 1<<20, ExactLoss: exact})
+	if !kept {
+		t.Error("profile dropped the policy floor on the probed output head")
+	}
+	// A budget that cannot cover the floor is infeasible, not silently
+	// harvested below it.
+	if _, err := Solve(Request{Bank: bank, Anchors: set, Candidates: cands, BudgetBytes: q4o + q8a, ExactLoss: exact, Sensitivity: sens}); err == nil {
+		t.Error("expected infeasible budget below the policy floor")
+	} else if _, ok := err.(*InfeasibleError); !ok {
+		t.Errorf("error type = %T", err)
+	}
+	// The default (uncalibrated) path keeps honoring the floor too.
+	res, err = Solve(Request{Bank: bank, Anchors: set, Candidates: cands, BudgetBytes: q6o + q8a, ExactLoss: exact})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,5 +348,80 @@ func TestSolveCalibratedPinsUnprobedRoles(t *testing.T) {
 		t.Error("expected infeasible error")
 	} else if _, ok := err.(*InfeasibleError); !ok {
 		t.Errorf("error type = %T", err)
+	}
+}
+
+func TestDepthBuckets(t *testing.T) {
+	if DepthBuckets(7) != nil {
+		t.Error("7 layers should have no buckets")
+	}
+	b := DepthBuckets(8)
+	if len(b) != 6 {
+		t.Fatalf("8 layers: %d buckets, want 6", len(b))
+	}
+	if b[0] != [2]int{0, 0} {
+		t.Errorf("first bucket = %v, want [0 0]", b[0])
+	}
+	if b[5] != [2]int{7, 7} {
+		t.Errorf("last bucket = %v, want [7 7]", b[5])
+	}
+	// Middle buckets cover 1..6 contiguously.
+	pos := 1
+	for _, bk := range b[1:5] {
+		if bk[0] != pos {
+			t.Errorf("bucket start %d, want %d", bk[0], pos)
+		}
+		pos = bk[1] + 1
+	}
+	if pos != 7 {
+		t.Errorf("middle buckets end at %d, want 7", pos)
+	}
+}
+
+func TestComputeDepthModelShares(t *testing.T) {
+	bank := &core.TensorBank{ModelID: "m", Tensors: []core.TensorDesc{
+		{Name: "blk.0.attn_q.weight", DType: core.DTypeF16, Shape: []uint64{64, 64}, Elements: 4096},
+		{Name: "blk.4.attn_q.weight", DType: core.DTypeF16, Shape: []uint64{64, 64}, Elements: 4096},
+		{Name: "blk.7.attn_q.weight", DType: core.DTypeF16, Shape: []uint64{64, 64}, Elements: 4096},
+	}}
+	sens := map[string]RoleSensitivity{
+		"attn_q": {Role: "attn_q", KLD: 0.30, Elements: 12288, ProbeDType: core.DTypeQ3_K},
+	}
+	buckets := DepthBuckets(8)
+	measured := map[string]float64{
+		"depth-0-0": 0.10, // first layer is 2× the average
+		"depth-3-4": 0.05, // middle layers average
+		"depth-7-7": 0.15, // last layer is 3× the average
+	}
+	dm := ComputeDepthModel(bank, buckets, sens, measured, 0.002)
+	if dm == nil {
+		t.Fatal("nil depth model")
+	}
+	if err := (&Sensitivity{Roles: sens, Depth: dm}).Validate(); err != nil {
+		t.Fatal(err)
+	}
+	// Share normalization: role total is preserved.
+	total := 0.0
+	for _, v := range dm.Shares {
+		total += v
+	}
+	if diff := total - 0.30; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("share total %v, want 0.30", total)
+	}
+	// First/last layers get higher-or-equal share than middle of same role.
+	s0 := dm.Shares["blk.0.attn_q.weight"]
+	sMid := dm.Shares["blk.4.attn_q.weight"]
+	s7 := dm.Shares["blk.7.attn_q.weight"]
+	if s0 < sMid {
+		t.Errorf("layer-0 share %v < mid %v", s0, sMid)
+	}
+	if s7 < sMid {
+		t.Errorf("layer-7 share %v < mid %v", s7, sMid)
+	}
+	// ρ clamping: measured/predicted = 3.0 for first bucket → clamped to 4.0.
+	for _, b := range dm.Buckets {
+		if b.Factor < 0.25 || b.Factor > 4.0 {
+			t.Errorf("bucket %d-%d factor %v outside [0.25,4]", b.First, b.Last, b.Factor)
+		}
 	}
 }

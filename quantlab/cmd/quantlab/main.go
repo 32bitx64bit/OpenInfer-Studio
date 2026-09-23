@@ -31,7 +31,7 @@ usage:
                    [-scale-fold] [-no-scale-fold] [-hadamard] [-no-hadamard]
                    [-csk] [-no-csk] [-fti] [-no-fti] [-probe-kld] [-no-probe-kld]
                    [-sensitivity] [-no-sensitivity]
-                   [-legacy-exact-table]
+                   [-legacy-exact-table] [-no-depth-probes]
   quantlab resume  -state-dir <dir> -run <id> [-stage-limit <n>] [-dry-run]
   quantlab status  -state-dir <dir> -run <id>
 `
@@ -94,6 +94,7 @@ func cmdPlan(args []string, stdout io.Writer) error {
 	sensitivity := fs.Bool("sensitivity", false, "force per-role KLD sensitivity probes for the solver (default-on for profiled/deep)")
 	noSensitivity := fs.Bool("no-sensitivity", false, "disable sensitivity probes (solver falls back to heuristic role priors)")
 	legacyExact := fs.Bool("legacy-exact-table", false, "force the Go exact-loss table instead of measuring with llama-quantize (A/B testing)")
+	noDepthProbes := fs.Bool("no-depth-probes", false, "disable depth-bucket sensitivity probes")
 	runID := fs.String("run", "", "run id (default: run-<unixtime>)")
 	dryRun := fs.Bool("dry-run", false, "validate and plan without writing artifacts")
 	if err := fs.Parse(args); err != nil {
@@ -150,6 +151,7 @@ func cmdPlan(args []string, stdout io.Writer) error {
 		Sensitivity:       *sensitivity,
 		NoSensitivity:     *noSensitivity,
 		LegacyExactTable:  *legacyExact,
+		NoDepthProbes:     *noDepthProbes,
 	})
 	return err
 }

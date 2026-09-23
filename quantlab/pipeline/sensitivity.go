@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,6 +37,11 @@ const (
 	// its highest-fidelity rung instead of probed: its bytes cannot move
 	// the budget, so any allocation would give it top fidelity anyway.
 	minProbeShare = 0.002
+	// minProbeMargin is the smallest background-corrected role KLD a probe
+	// must clear to be trusted. Below it the measurement is noise (probes
+	// routinely report roles at or under the background), so the role keeps
+	// this conservative share instead of looking free to compress.
+	minProbeMargin = 0.5
 	// backgroundDType is the near-lossless rung every non-probed tensor
 	// takes in a probe model.
 	backgroundDType = core.DTypeQ8_0
@@ -50,6 +56,10 @@ type sensitivityState struct {
 	Background *float64                    `json:"background,omitempty"`
 	Probes     map[string]sensitivityProbe `json:"probes"`
 	Pinned     []string                    `json:"pinned,omitempty"`
+	// DepthVersion and Buckets track depth-bucket probes separately so
+	// changing the depth policy does not invalidate role probes.
+	DepthVersion int                         `json:"depthVersion,omitempty"`
+	Buckets      map[string]sensitivityProbe `json:"buckets,omitempty"`
 }
 
 type sensitivityProbe struct {
@@ -67,6 +77,16 @@ func (e *Engine) sensitivityPath() string {
 
 func (e *Engine) probeDir() string { return filepath.Join(e.anchorDir(), "probes") }
 
+// dropProbeScratch removes probe scratch after a failed probe run. Pause and
+// resume use cancellation and keep the scratch resumable; any real failure
+// must not leave gigabytes behind.
+func (e *Engine) dropProbeScratch(err error) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	os.RemoveAll(e.probeDir())
+}
+
 func (e *Engine) probeLogitsPath() string {
 	return filepath.Join(e.workDir(), "baseline-logits-probe.bin")
 }
@@ -74,6 +94,8 @@ func (e *Engine) probeLogitsPath() string {
 // sensitivityEnabled reports whether solve calibrates role sensitivities.
 // Probes need the exact loss table (the per-tensor rung shape), a KLD
 // harness (llama-perplexity + corpus), and the effort or Extra opt-in.
+// Either the evaluation corpus or the disjoint search holdout satisfies the
+// corpus requirement.
 func (e *Engine) sensitivityEnabled() bool {
 	if e.Extra.NoSensitivity {
 		return false
@@ -82,8 +104,13 @@ func (e *Engine) sensitivityEnabled() bool {
 		return false
 	}
 	cfg := e.Run.Config
-	if cfg.EvalCorpus == "" || cfg.Tools.LlamaPerplexity == "" || cfg.Tools.LlamaQuantize == "" {
+	if cfg.Tools.LlamaPerplexity == "" || cfg.Tools.LlamaQuantize == "" {
 		return false
+	}
+	if cfg.EvalCorpus == "" {
+		if _, ok := e.searchCorpusPath(); !ok {
+			return false
+		}
 	}
 	if e.Extra.Sensitivity {
 		return true
@@ -92,8 +119,10 @@ func (e *Engine) sensitivityEnabled() bool {
 }
 
 // probeEvalConfig is the short KLD evaluation used for every probe: the
-// run's corpus and context with the effort's probe chunk count, never more
-// chunks than the final validation uses.
+// tuning-only search holdout when one exists (so probes never tune on the
+// final evaluation corpus), else the run's evaluation corpus, with the
+// context and the effort's probe chunk count — never more chunks than the
+// final validation uses.
 func (e *Engine) probeEvalConfig() orchestrate.EvalConfig {
 	cfg := e.Run.Config
 	chunks := e.effortProfile().ProbeChunks
@@ -103,13 +132,28 @@ func (e *Engine) probeEvalConfig() orchestrate.EvalConfig {
 	if e.Extra.Chunks > 0 && e.Extra.Chunks < chunks {
 		chunks = e.Extra.Chunks
 	}
+	corpus := cfg.EvalCorpus
+	if path, ok := e.searchCorpusPath(); ok {
+		corpus = path
+	} else {
+		e.warnProbeSharedCorpus()
+	}
 	return orchestrate.EvalConfig{
-		CorpusPath: cfg.EvalCorpus,
+		CorpusPath: corpus,
 		CtxSize:    cfg.CtxSize,
 		Chunks:     chunks,
 		Threads:    cfg.Threads,
 		NGPULayers: -1,
 	}
+}
+
+// warnProbeSharedCorpus prints the shared-corpus warning once per engine.
+func (e *Engine) warnProbeSharedCorpus() {
+	if e.probeSharedCorpusWarned {
+		return
+	}
+	e.probeSharedCorpusWarned = true
+	e.printf("  sensitivity: no distinct search corpus; probes share the evaluation corpus\n")
 }
 
 // sensitivitySignature identifies what the probe results depend on: the
@@ -240,22 +284,34 @@ func (e *Engine) calibrateSensitivity(ctx context.Context, bank *core.TensorBank
 			return nil, nil
 		}
 		if err := e.runSensitivityProbes(ctx, bank, set, evalCfg, capsP, st, todo, kind); err != nil {
-			return nil, err
+			// A too-short search holdout only surfaces from the tool: fall
+			// back to the evaluation corpus and re-probe under a fresh
+			// signature so the measurements stay corpus-consistent.
+			if errors.Is(err, errEvalCorpusTooShort) && evalCfg.CorpusPath != e.Run.Config.EvalCorpus {
+				e.warnProbeSharedCorpus()
+				os.RemoveAll(e.probeDir())
+				evalCfg.CorpusPath = e.Run.Config.EvalCorpus
+				signature, serr := e.sensitivitySignature(bank, evalCfg)
+				if serr != nil {
+					return nil, serr
+				}
+				st = &sensitivityState{Version: 1, Signature: signature, Probes: map[string]sensitivityProbe{}}
+				if err := e.runSensitivityProbes(ctx, bank, set, evalCfg, capsP, st, todo, kind); err != nil {
+					e.dropProbeScratch(err)
+					return nil, err
+				}
+			} else {
+				// Probe scratch is model-sized; drop it on failure too
+				// (cancellation keeps it so pause/resume can pick up).
+				e.dropProbeScratch(err)
+				return nil, err
+			}
 		}
 	}
-	// Probe scratch is model-sized; free it before the quantize stage.
-	os.RemoveAll(e.probeDir())
-
 	sens := &profile.Sensitivity{Background: *st.Background, Roles: map[string]profile.RoleSensitivity{}, Pinned: st.Pinned}
 	for _, g := range todo {
 		p := st.Probes[g.Role]
-		kld := p.KLD - sens.Background
-		if floor := 0.1 * sens.Background; kld < floor {
-			kld = floor
-		}
-		if kld < 1e-6 {
-			kld = 1e-6
-		}
+		kld := calibratedRoleKLD(p.KLD, sens.Background)
 		var sum float64
 		for _, name := range g.Tensors {
 			sum += table[name][p.ProbeDType]
@@ -268,7 +324,166 @@ func (e *Engine) calibrateSensitivity(ctx context.Context, bank *core.TensorBank
 	if err := sens.Validate(); err != nil {
 		return nil, err
 	}
+	// Depth-bucket probes: redistribute each role's KLD across layers.
+	// Runs before probe-dir cleanup because it reuses the background anchor.
+	if e.depthProbesEnabled() {
+		saveFn := func() error { return e.writeJSON(e.sensitivityPath(), st) }
+		dm := e.runDepthProbes(ctx, bank, set, evalCfg, capsP, st, sens, todo, kind, saveFn)
+		if dm != nil {
+			sens.Depth = dm
+			if err := sens.Validate(); err != nil {
+				return nil, err
+			}
+		}
+	}
+	// Probe scratch is model-sized; free it before the quantize stage.
+	os.RemoveAll(e.probeDir())
 	return sens, nil
+}
+
+// depthProbesEnabled reports whether depth-bucket probes run alongside
+// role probes.
+func (e *Engine) depthProbesEnabled() bool {
+	if e.Extra.NoDepthProbes {
+		return false
+	}
+	return e.effortProfile().DepthProbes
+}
+
+// runDepthProbes evaluates one probe per depth bucket and returns the
+// fitted depth model. Returns nil when the model has too few layers or
+// the probes fail (fail-open: the flat model is used).
+func (e *Engine) runDepthProbes(ctx context.Context, bank *core.TensorBank, set *anchor.Set,
+	evalCfg orchestrate.EvalConfig, capsP *orchestrate.Capabilities,
+	st *sensitivityState, sens *profile.Sensitivity,
+	todo []profile.RoleGroup, kind map[string]core.DType,
+	save func() error) *profile.DepthModel {
+
+	// Determine layer count from calibrated tensors.
+	maxLayer := -1
+	for _, g := range todo {
+		for _, name := range g.Tensors {
+			if l := profile.LayerIndex(name); l > maxLayer {
+				maxLayer = l
+			}
+		}
+	}
+	n := maxLayer + 1
+	buckets := profile.DepthBuckets(n)
+	if len(buckets) == 0 {
+		return nil
+	}
+	// Clear stale depth state if the bucket edges changed.
+	bucketKey := func(b [2]int) string { return fmt.Sprintf("depth-%d-%d", b[0], b[1]) }
+	needClear := st.DepthVersion != 1
+	if !needClear && st.Buckets != nil {
+		if len(st.Buckets) != len(buckets) {
+			needClear = true
+		} else {
+			for _, b := range buckets {
+				if _, ok := st.Buckets[bucketKey(b)]; !ok {
+					needClear = true
+					break
+				}
+			}
+		}
+	}
+	if needClear {
+		st.DepthVersion = 1
+		st.Buckets = map[string]sensitivityProbe{}
+	}
+	if st.Buckets == nil {
+		st.Buckets = map[string]sensitivityProbe{}
+	}
+
+	bgDir := filepath.Join(e.probeDir(), "background")
+	// Map every calibrated tensor name → role probe dtype.
+	probeDTypeOf := map[string]core.DType{}
+	for _, g := range todo {
+		d := kind[g.Role]
+		for _, name := range g.Tensors {
+			probeDTypeOf[name] = d
+		}
+	}
+
+	missing := 0
+	for _, b := range buckets {
+		if _, ok := st.Buckets[bucketKey(b)]; !ok {
+			missing++
+		}
+	}
+	if missing > 0 {
+		if err := os.MkdirAll(e.probeDir(), 0o755); err != nil {
+			return nil
+		}
+		done := 0
+		for _, b := range buckets {
+			key := bucketKey(b)
+			if _, ok := st.Buckets[key]; ok {
+				done++
+				continue
+			}
+			e.obsProgress(core.StageSolve, float64(done)/float64(len(buckets)),
+				fmt.Sprintf("sensitivity: depth %d-%d", b[0], b[1]))
+			// Probed group: every calibrated tensor in this bucket at its
+			// role's probe dtype. Everything else goes to Q8_0.
+			probedDTypes := map[string]core.DType{}
+			keep := map[string]struct{}{}
+			for name, d := range probeDTypeOf {
+				l := profile.LayerIndex(name)
+				if l >= b[0] && l <= b[1] {
+					probedDTypes[name] = d
+					keep[name] = struct{}{}
+				}
+			}
+			if len(probedDTypes) == 0 {
+				done++
+				continue
+			}
+			// One keep-set per distinct probe dtype.
+			byDType := map[core.DType]map[string]struct{}{}
+			for name, d := range probedDTypes {
+				if byDType[d] == nil {
+					byDType[d] = map[string]struct{}{}
+				}
+				byDType[d][name] = struct{}{}
+			}
+			var dts []core.DType
+			for d := range byDType {
+				dts = append(dts, d)
+			}
+			sort.Slice(dts, func(i, j int) bool { return dts[i] < dts[j] })
+			depthDir := filepath.Join(e.probeDir(), key)
+			if err := e.runSparseTrimmedAnchorJobs(ctx, dts,
+				func(d core.DType) (map[string]struct{}, error) { return copyKeep(byDType[d]), nil },
+				depthDir, "meta.json"); err != nil {
+				e.printf("  sensitivity: depth %s probe failed: %v\n", key, err)
+				done++
+				continue
+			}
+			m, err := e.evalProbeModel(ctx, bank, set, evalCfg, capsP, e.probeLogitsPath(), key, probedDTypes,
+				[]string{bgDir, depthDir})
+			os.RemoveAll(depthDir)
+			if err != nil {
+				e.printf("  sensitivity: depth %s eval failed: %v\n", key, err)
+				done++
+				continue
+			}
+			st.Buckets[key] = sensitivityProbe{
+				Role: key, KLD: m.MeanKLD, Perplexity: m.MeanKLD,
+			}
+			if err := save(); err != nil {
+				return nil
+			}
+			done++
+		}
+	}
+
+	measured := map[string]float64{}
+	for key, p := range st.Buckets {
+		measured[key] = p.KLD
+	}
+	return profile.ComputeDepthModel(bank, buckets, sens.Roles, measured, sens.Background)
 }
 
 // runSensitivityProbes materializes the background anchor, the probe
@@ -308,7 +523,7 @@ func (e *Engine) runSensitivityProbes(ctx context.Context, bank *core.TensorBank
 	done := 0
 	if st.Background == nil {
 		e.obsProgress(core.StageSolve, float64(done)/float64(steps), "sensitivity: background KLD")
-		m, err := e.evalProbeModel(ctx, bank, set, evalCfg, capsP, logits, "background", nil, "", []string{bgDir})
+		m, err := e.evalProbeModel(ctx, bank, set, evalCfg, capsP, logits, "background", nil, []string{bgDir})
 		if err != nil {
 			return err
 		}
@@ -330,14 +545,16 @@ func (e *Engine) runSensitivityProbes(ctx context.Context, bank *core.TensorBank
 		e.obsProgress(core.StageSolve, float64(done)/float64(steps), fmt.Sprintf("sensitivity: probing %s", g.Role))
 		roleDir := filepath.Join(e.probeDir(), "role-"+sanitizeRole(g.Role))
 		keep := map[string]struct{}{}
+		probedDTypes := map[string]core.DType{}
 		for _, name := range g.Tensors {
 			keep[name] = struct{}{}
+			probedDTypes[name] = d
 		}
 		if err := e.runSparseTrimmedAnchorJobs(ctx, []core.DType{d},
 			func(core.DType) (map[string]struct{}, error) { return copyKeep(keep), nil }, roleDir, "meta.json"); err != nil {
 			return fmt.Errorf("sensitivity probe %s: %w", g.Role, err)
 		}
-		m, err := e.evalProbeModel(ctx, bank, set, evalCfg, capsP, logits, g.Role, keep, d, []string{bgDir, roleDir})
+		m, err := e.evalProbeModel(ctx, bank, set, evalCfg, capsP, logits, g.Role, probedDTypes, []string{bgDir, roleDir})
 		if err != nil {
 			return err
 		}
@@ -356,20 +573,21 @@ func (e *Engine) runSensitivityProbes(ctx context.Context, bank *core.TensorBank
 	return nil
 }
 
-// evalProbeModel assembles a probe GGUF (group tensors at probeDType,
-// other quantizable tensors at the background rung, preserved tensors as
-// stored) from the given anchor directories and measures its KLD against
-// the probe baseline logits. The probe file is removed afterwards.
+// evalProbeModel assembles a probe GGUF (probed tensors at their target
+// dtype, other quantizable tensors at the background rung, preserved
+// tensors as stored) from the given anchor directories and measures its
+// KLD against the probe baseline logits. probedDTypes maps tensor name →
+// quant target; nil means no probed tensors (pure background).
 func (e *Engine) evalProbeModel(ctx context.Context, bank *core.TensorBank, set *anchor.Set,
 	evalCfg orchestrate.EvalConfig, capsP *orchestrate.Capabilities, logits, label string,
-	group map[string]struct{}, probeDType core.DType, anchorDirs []string) (orchestrate.EvalMetrics, error) {
+	probedDTypes map[string]core.DType, anchorDirs []string) (orchestrate.EvalMetrics, error) {
 	assignments := make([]core.QuantAssignment, 0, len(bank.Tensors))
 	for _, t := range bank.Tensors {
 		target := t.DType
 		if t.Quantizable() && !set.Preserved(t) {
 			target = backgroundDType
-			if _, ok := group[t.Name]; ok {
-				target = probeDType
+			if d, ok := probedDTypes[t.Name]; ok {
+				target = d
 			}
 		}
 		assignments = append(assignments, core.QuantAssignment{TensorName: t.Name, Target: target})
@@ -424,6 +642,21 @@ func (e *Engine) evalProbeModel(ctx context.Context, bank *core.TensorBank, set 
 	return m, nil
 }
 
+// calibratedRoleKLD is the background-corrected role KLD the solver
+// consumes. Measurements at or under the background are probe noise (a
+// 4-chunk run routinely reports roles below it), so they keep a conservative
+// share instead of making the role look free to harvest.
+func calibratedRoleKLD(measured, background float64) float64 {
+	kld := measured - background
+	if kld < minProbeMargin*background {
+		kld = minProbeMargin * background
+	}
+	if kld < 1e-6 {
+		kld = 1e-6
+	}
+	return kld
+}
+
 // printSensitivity logs the calibrated model: per role, the background-
 // corrected KLD at the probe rung and the implied KLD per unit of exact
 // wSSE (how far raw wSSE is from a commensurable loss).
@@ -444,6 +677,12 @@ func (e *Engine) printSensitivity(s *profile.Sensitivity) {
 	}
 	if len(s.Pinned) > 0 {
 		e.printf("    pinned to top fidelity: %v\n", s.Pinned)
+	}
+	if s.Depth != nil && len(s.Depth.Buckets) > 0 {
+		for _, b := range s.Depth.Buckets {
+			e.printf("    layers %d-%d  rho=%.2f (measured %.5f, predicted %.5f)\n",
+				b.First, b.Last, b.Factor, b.MeasuredKLD, b.PredictedKLD)
+		}
 	}
 }
 

@@ -60,6 +60,10 @@ type EffortProfile struct {
 	// cross-tensor loss model. Profiled/deep on; fast off.
 	// Extra.NoSensitivity opts out.
 	SensitivityProbes bool
+	// DepthProbes adds a few depth-bucket probes on top of role probes and
+	// redistributes each role's KLD across layers. Profiled/deep on;
+	// fast off. Extra.NoDepthProbes opts out.
+	DepthProbes bool
 	// ProbeChunks is the KLD chunk count for each sensitivity probe eval.
 	ProbeChunks int
 }
@@ -156,6 +160,7 @@ func EffortFor(e Effort) (EffortProfile, error) {
 			ExactEstimator:    true,
 			SolverFTI:         true,
 			SensitivityProbes: true,
+			DepthProbes:       true,
 			ProbeChunks:       2,
 		}, nil
 	case EffortDeep:
@@ -170,6 +175,7 @@ func EffortFor(e Effort) (EffortProfile, error) {
 			ExactEstimator:    true,
 			SolverFTI:         true,
 			SensitivityProbes: true,
+			DepthProbes:       true,
 			ProbeChunks:       4,
 		}, nil
 	}

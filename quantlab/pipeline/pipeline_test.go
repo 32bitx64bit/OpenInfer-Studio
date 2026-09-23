@@ -315,6 +315,8 @@ type fakeRunner struct {
 	kldForModel func(path string) (float64, bool)
 	// evaluated records every model path handed to a KLD evaluation.
 	evaluated []string
+	// corpora records every corpus path (-f) used by llama-perplexity.
+	corpora []string
 }
 
 func newFakeRunner(t *testing.T) *fakeRunner {
@@ -353,6 +355,7 @@ func (f *fakeRunner) Run(ctx context.Context, iv orchestrate.Invocation) (orches
 		_ = model
 		f.pplRuns++
 		f.lastPPLArgv = append([]string(nil), iv.Argv...)
+		f.corpora = append(f.corpora, perplexityCorpus(iv.Argv))
 		if compare {
 			f.evaluated = append(f.evaluated, model)
 			if f.omitKLD {
@@ -435,6 +438,15 @@ func parsePerplexityArgv(argv []string) (model, logits string, compare bool) {
 		}
 	}
 	return model, logits, compare
+}
+
+func perplexityCorpus(argv []string) string {
+	for i := 0; i < len(argv); i++ {
+		if argv[i] == "-f" && i+1 < len(argv) {
+			return argv[i+1]
+		}
+	}
+	return ""
 }
 
 // --- shared test fixtures -----------------------------------------------------

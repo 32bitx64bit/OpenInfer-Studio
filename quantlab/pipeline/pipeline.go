@@ -78,6 +78,8 @@ type ExtraConfig struct {
 	// LegacyExactTable forces the Go exact-loss table instead of the
 	// measured one (A/B testing).
 	LegacyExactTable bool `json:"legacyExactTable,omitempty"`
+	// NoDepthProbes disables depth-bucket sensitivity probes.
+	NoDepthProbes bool `json:"noDepthProbes,omitempty"`
 	// FoldedSourcePath / FoldedImatrixPath record the fold redirect once
 	// applied (persisted sidecar; resume-safe).
 	FoldedSourcePath  string `json:"foldedSourcePath,omitempty"`
@@ -131,6 +133,9 @@ type Engine struct {
 	hashMu     sync.Mutex
 	fileHashes map[string]cachedFileHash
 
+	// probeSharedCorpusWarned suppresses repeat warnings when probes must
+	// share the final evaluation corpus.
+	probeSharedCorpusWarned bool
 }
 
 type cachedFileHash struct {

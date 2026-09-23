@@ -215,3 +215,63 @@ func TestFastEffortSkipsSensitivityProbes(t *testing.T) {
 		t.Fatalf("-no-sensitivity solve ran %d KLD evaluations", len(f2.runner.evaluated))
 	}
 }
+
+func TestCalibratedRoleKLDFloorsNoise(t *testing.T) {
+	// Below or at background: keep the conservative share, never zero/free.
+	if got := calibratedRoleKLD(0.001, 0.004); got != minProbeMargin*0.004 {
+		t.Errorf("below-background KLD = %v, want %v", got, minProbeMargin*0.004)
+	}
+	if got := calibratedRoleKLD(0.004, 0.004); got != minProbeMargin*0.004 {
+		t.Errorf("at-background KLD = %v, want %v", got, minProbeMargin*0.004)
+	}
+	// Just under the margin floors too.
+	if got := calibratedRoleKLD(0.004+0.49*0.004, 0.004); got != minProbeMargin*0.004 {
+		t.Errorf("sub-margin KLD = %v, want floor", got)
+	}
+	// Above the margin the measurement is used as-is.
+	if got := calibratedRoleKLD(0.010, 0.004); got != 0.006 {
+		t.Errorf("measured-above-margin KLD = %v, want 0.006", got)
+	}
+}
+
+// Probes must tune on the disjoint search holdout, not the final evaluation
+// corpus. When a distinct search.txt exists next to evaluation.txt, probe
+// evals use it; the final evaluation still scores evaluation.txt.
+func TestProbesUseSearchCorpus(t *testing.T) {
+	f := newFixture(t, 230000)
+	finiteF16Payloads(t, f.src)
+	f.runner.kldForModel = probeKLD(t)
+	r := f.planEffort("corpus", "profiled", nil)
+
+	// Materialize the tuning holdout after planning: searchCorpusPath
+	// discovers search.txt next to EvalCorpus when Config.SearchCorpus is
+	// empty (backward-compatible path).
+	evalDir := filepath.Dir(r.Config.EvalCorpus)
+	searchPath := filepath.Join(evalDir, "search.txt")
+	if err := os.WriteFile(searchPath, []byte("search holdout text for probe tuning only\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	e := f.engine(r)
+	e.StageLimit = 3 // assemble, anchor, solve
+	if err := e.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every probe and baseline eval must use search.txt, never evaluation.txt.
+	evalAbs, _ := filepath.Abs(r.Config.EvalCorpus)
+	searchAbs, _ := filepath.Abs(searchPath)
+	foundSearch := false
+	for _, c := range f.runner.corpora {
+		cAbs, _ := filepath.Abs(c)
+		if cAbs == evalAbs {
+			t.Errorf("probe/eval shared the final evaluation corpus %s", c)
+		}
+		if cAbs == searchAbs {
+			foundSearch = true
+		}
+	}
+	if !foundSearch {
+		t.Errorf("no evaluation used the search corpus %s; corpora=%v", searchPath, f.runner.corpora)
+	}
+}

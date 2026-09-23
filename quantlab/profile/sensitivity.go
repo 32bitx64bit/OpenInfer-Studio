@@ -90,6 +90,26 @@ type RoleSensitivity struct {
 	Tensors  []string `json:"tensors,omitempty"`
 }
 
+// DepthBucket records the measured vs predicted KLD ratio for one
+// contiguous layer range.
+type DepthBucket struct {
+	First        int     `json:"first"`
+	Last         int     `json:"last"`
+	MeasuredKLD  float64 `json:"measuredKLD"`
+	PredictedKLD float64 `json:"predictedKLD"`
+	Factor       float64 `json:"factor"`
+}
+
+// DepthModel redistributes each role's probe-measured KLD across layers
+// using a few depth-bucket probes. The model is separable: a per-bucket
+// factor ρ scales every tensor in the bucket, then each role's total is
+// renormalized so it still equals its measured KLD at the probe rung.
+type DepthModel struct {
+	Buckets []DepthBucket `json:"buckets,omitempty"`
+	// Shares maps tensor name → per-weight share_t (KLD × ρ / Z).
+	Shares map[string]float64 `json:"shares,omitempty"`
+}
+
 // Sensitivity is the probe-calibrated cross-tensor loss model. It replaces
 // the heuristic role priors: every role's marginal KLD at a common probe
 // rung was measured on this model, so losses of different roles are
@@ -103,6 +123,9 @@ type Sensitivity struct {
 	// solver keeps them at their highest-fidelity legal option, which is
 	// what any byte-aware allocation would do with them anyway.
 	Pinned []string `json:"pinned,omitempty"`
+	// Depth, when present, redistributes each role's KLD across layers
+	// using measured depth-bucket probes.
+	Depth *DepthModel `json:"depth,omitempty"`
 }
 
 // Validate checks the model is usable by the solver.
@@ -125,6 +148,13 @@ func (s *Sensitivity) Validate() error {
 		}
 		if !r.ProbeDType.IsQuant() {
 			return fmt.Errorf("profile: sensitivity role %q: probe dtype %q is not a quant type", k, r.ProbeDType)
+		}
+	}
+	if s.Depth != nil {
+		for name, v := range s.Depth.Shares {
+			if !(v > 0) || math.IsInf(v, 0) || math.IsNaN(v) {
+				return fmt.Errorf("profile: depth share %q = %v is not finite positive", name, v)
+			}
 		}
 	}
 	return nil
@@ -192,6 +222,11 @@ func (s *Sensitivity) Loss(t core.TensorDesc, d core.DType, row map[core.DType]f
 		return 0, false
 	}
 	share := r.KLD * float64(t.Elements) / float64(r.Elements)
+	if s.Depth != nil {
+		if v, ok := s.Depth.Shares[t.Name]; ok {
+			share = v
+		}
+	}
 	return share * w / ref, true
 }
 
@@ -261,3 +296,114 @@ next:
 // well above measurement noise yet still in the regime where wSSE tracks
 // KLD; Q4_0 covers 32-block-only shapes.
 var DefaultProbeDTypes = []core.DType{core.DTypeQ3_K, core.DTypeQ4_0}
+
+// DepthBuckets computes the layer-bucket edges for depth probes: {0},
+// four contiguous groups of layers 1..n-2, and {n-1}. Returns nil when
+// n < 8 (too few layers for meaningful buckets).
+func DepthBuckets(n int) [][2]int {
+	if n < 8 {
+		return nil
+	}
+	mid := n - 2 // layers 1..n-2
+	base := mid / 4
+	extra := mid % 4
+	buckets := [][2]int{{0, 0}}
+	start := 1
+	for i := 0; i < 4; i++ {
+		sz := base
+		if i < extra {
+			sz++
+		}
+		buckets = append(buckets, [2]int{start, start + sz - 1})
+		start += sz
+	}
+	buckets = append(buckets, [2]int{n - 1, n - 1})
+	return buckets
+}
+
+// ComputeDepthModel builds the depth model from per-bucket measured KLD
+// results and the depth-flat prediction. buckets are the layer edges;
+// measured maps "depth-<first>-<last>" → background-corrected KLD.
+// groups and sensitivities provide the depth-flat prediction per tensor.
+func ComputeDepthModel(bank *core.TensorBank, buckets [][2]int,
+	sens map[string]RoleSensitivity, measured map[string]float64,
+	background float64) *DepthModel {
+	if len(buckets) == 0 || len(measured) == 0 {
+		return nil
+	}
+	type tinfo struct {
+		name  string
+		elems uint64
+		role  string
+	}
+	var tensors []tinfo
+	for _, t := range bank.Tensors {
+		if !t.Quantizable() {
+			continue
+		}
+		role := RoleKey(t.Name)
+		if _, ok := sens[role]; !ok {
+			continue
+		}
+		tensors = append(tensors, tinfo{t.Name, t.Elements, role})
+	}
+	// ρ_b = clamp(M_b / P_b, 0.25, 4.0).
+	dm := &DepthModel{Shares: map[string]float64{}}
+	for _, b := range buckets {
+		key := fmt.Sprintf("depth-%d-%d", b[0], b[1])
+		mb, ok := measured[key]
+		if !ok {
+			continue
+		}
+		var pb float64
+		for _, ti := range tensors {
+			l := LayerIndex(ti.name)
+			if l < b[0] || l > b[1] {
+				continue
+			}
+			r := sens[ti.role]
+			pb += r.KLD * float64(ti.elems) / float64(r.Elements)
+		}
+		if !(pb > 0) {
+			continue
+		}
+		f := mb / pb
+		if f < 0.25 {
+			f = 0.25
+		}
+		if f > 4.0 {
+			f = 4.0
+		}
+		dm.Buckets = append(dm.Buckets, DepthBucket{
+			First: b[0], Last: b[1],
+			MeasuredKLD: mb, PredictedKLD: pb, Factor: f,
+		})
+	}
+	if len(dm.Buckets) == 0 {
+		return nil
+	}
+	// share_t = KLD_r · E_t · ρ_{b(t)} / Z_r.
+	bucketFactor := func(layer int) float64 {
+		for _, b := range dm.Buckets {
+			if layer >= b.First && layer <= b.Last {
+				return b.Factor
+			}
+		}
+		return 1
+	}
+	zr := map[string]float64{}
+	for _, ti := range tensors {
+		rho := bucketFactor(LayerIndex(ti.name))
+		zr[ti.role] += float64(ti.elems) * rho
+	}
+	for _, ti := range tensors {
+		r := sens[ti.role]
+		z := zr[ti.role]
+		if !(z > 0) {
+			z = 1
+		}
+		rho := bucketFactor(LayerIndex(ti.name))
+		dm.Shares[ti.name] = r.KLD * float64(ti.elems) * rho / z
+	}
+	return dm
+}
