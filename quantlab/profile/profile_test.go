@@ -666,3 +666,70 @@ func TestEnumerateOptionsOmitsIQWithoutImatrix(t *testing.T) {
 		t.Fatal("ffn_up without imatrix row was offered IQ2_S")
 	}
 }
+
+// IQ4_XS is a 256-element superblock. A tensor whose ne0 is divisible by 32
+// but not 256 (e.g. 2880-wide or 896-wide models) must never be offered
+// IQ4_XS: llama-quantize would fall back to another type and anchor
+// verification would abort the run.
+func TestIQ4XSNotOfferedOnPartialSuperblock(t *testing.T) {
+	td := core.TensorDesc{
+		Name: "blk.0.ffn_down.weight", DType: core.DTypeF16,
+		Shape: []uint64{2880, 4}, Length: 23040, Elements: 11520,
+	}
+	est := NewFallbackEstimator(map[string]ImatrixStats{
+		td.Name: aggregateImatrix([]float32{1, 2, 3, 4, 5, 6, 7, 8}, nil, true),
+	})
+	cands := []core.DType{core.DTypeIQ4_XS, core.DTypeIQ4_NL, core.DTypeQ4_K_T, core.DTypeQ8_0}
+	opts, err := EnumerateOptions(td, cands, nil, nil, est, DefaultConfidencePenalty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range opts {
+		if o.Target == core.DTypeIQ4_XS {
+			t.Fatal("EnumerateOptions offered IQ4_XS on ne0=2880")
+		}
+	}
+	// Calibrated enumerator: same legality rule.
+	row := map[core.DType]float64{
+		core.DTypeIQ4_XS: 1, core.DTypeIQ4_NL: 2,
+		core.DTypeQ4_K_T: 3, core.DTypeQ8_0: 0.1,
+	}
+	sens := &Sensitivity{
+		Background: 0.001,
+		Roles: map[string]RoleSensitivity{
+			RoleKey(td.Name): {
+				Role: RoleKey(td.Name), ProbeDType: core.DTypeQ4_K_T,
+				KLD: 0.3, Elements: td.Elements, Tensors: []string{td.Name},
+			},
+		},
+	}
+	if err := sens.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	opts, err = enumerateCalibrated(td, cands, &anchor.Set{}, est, sens, row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range opts {
+		if o.Target == core.DTypeIQ4_XS {
+			t.Fatal("enumerateCalibrated offered IQ4_XS on ne0=2880")
+		}
+	}
+	// A 256-aligned tensor still sees it.
+	td256 := td
+	td256.Shape = []uint64{2560, 4}
+	td256.Elements = 10240
+	opts, err = EnumerateOptions(td256, cands, nil, nil, est, DefaultConfidencePenalty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, o := range opts {
+		if o.Target == core.DTypeIQ4_XS {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("IQ4_XS dropped on ne0=2560")
+	}
+}

@@ -229,7 +229,7 @@ func TestDTypeGeometryAndExactBytes(t *testing.T) {
 		{DTypeQ8_0, BlockGeometry{32, 34}}, {DTypeQ8_1, BlockGeometry{32, 40}}, {DTypeQ2_K, BlockGeometry{256, 84}}, {DTypeQ3_K, BlockGeometry{256, 110}},
 		{DTypeQ4_K_T, BlockGeometry{256, 144}}, {DTypeQ5_K_T, BlockGeometry{256, 176}}, {DTypeQ6_K, BlockGeometry{256, 210}}, {DTypeQ8_K, BlockGeometry{256, 292}},
 		{DTypeIQ2_XXS, BlockGeometry{256, 66}}, {DTypeIQ2_XS, BlockGeometry{256, 74}}, {DTypeIQ3_XXS, BlockGeometry{256, 98}}, {DTypeIQ1_S, BlockGeometry{256, 50}},
-		{DTypeIQ4_NL, BlockGeometry{32, 18}}, {DTypeIQ3_S, BlockGeometry{256, 110}}, {DTypeIQ2_S, BlockGeometry{256, 82}}, {DTypeIQ4_XS, BlockGeometry{32, 17}}, {DTypeIQ1_M, BlockGeometry{256, 56}},
+		{DTypeIQ4_NL, BlockGeometry{32, 18}}, {DTypeIQ3_S, BlockGeometry{256, 110}}, {DTypeIQ2_S, BlockGeometry{256, 82}}, {DTypeIQ4_XS, BlockGeometry{256, 136}}, {DTypeIQ1_M, BlockGeometry{256, 56}},
 	} {
 		got, ok := tc.d.Geometry()
 		if !ok || got != tc.g {
@@ -294,5 +294,18 @@ func TestRequiresImatrix(t *testing.T) {
 	}
 	if DTypeQ4_K_T.RequiresImatrix() || DTypeF16.RequiresImatrix() {
 		t.Error("K/float types must not require imatrix")
+	}
+}
+
+func TestIQ4XSExactBytes(t *testing.T) {
+	// block_iq4_xs is 136 bytes per 256 elements.
+	for _, k := range []uint64{1, 2, 8, 16} {
+		b, ok := DTypeIQ4_XS.ExactBytes(256 * k)
+		if !ok || b != 136*k {
+			t.Fatalf("IQ4_XS ExactBytes(%d) = %d,%v want %d", 256*k, b, ok, 136*k)
+		}
+	}
+	if g, _ := DTypeIQ4_XS.Geometry(); g.BlockSize != 256 || g.TypeSize != 136 {
+		t.Fatalf("IQ4_XS geometry = %+v, want {256 136}", g)
 	}
 }

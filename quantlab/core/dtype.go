@@ -225,8 +225,12 @@ var geometryTable = map[DType]BlockGeometry{
 	DTypeQ3_K:   {256, 110},
 	DTypeQ2_K:   {256, 84},
 
-	DTypeIQ4_NL:  {32, 18},
-	DTypeIQ4_XS:  {32, 17},
+	DTypeIQ4_NL: {32, 18},
+	// IQ4_XS is one 256-element superblock: f16 d, u16 scales_h, u8 scales_l[4],
+	// u8 qs[128] = 136 bytes. The old {32,17} geometry let the solver offer it
+	// on tensors whose ne0 is not a multiple of 256, which llama-quantize then
+	// rejects at verify time.
+	DTypeIQ4_XS:  {256, 136},
 	DTypeIQ3_XXS: {256, 98},
 	DTypeIQ3_S:   {256, 110},
 	DTypeIQ2_XXS: {256, 66},
