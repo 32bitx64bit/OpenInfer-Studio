@@ -132,6 +132,7 @@ type SearchResult struct {
 	MTP         string    `json:"mtp,omitempty"`        // "" | "mtp" | "mtp-draft"
 	Draft       string    `json:"draft,omitempty"`      // "" | dflash | eagle3 | dspark | mtp-draft | draft
 	Embedding   string    `json:"embedding,omitempty"`  // "" | "embedding" | "reranker"
+	Diffusion   string    `json:"diffusion,omitempty"`  // "" | "image" | "video" | "both"
 }
 
 // hfModel mirrors the /api/models payload fields we use.
@@ -159,16 +160,33 @@ type hfSafetensors struct {
 	Total      int64            `json:"total"`
 }
 
-// Search queries GGUF model repositories.
+// Search queries model repositories. kind selects the corpus:
+// "" | "llm" → GGUF text models (legacy default), "diffusion" →
+// image/video generators (diffusers pipeline tags + family tokens).
 func (c *Client) Search(ctx context.Context, query, sort string, limit int) ([]SearchResult, error) {
+	return c.SearchKind(ctx, query, sort, limit, "")
+}
+
+// SearchKind is Search with an explicit corpus selector.
+func (c *Client) SearchKind(ctx context.Context, query, sort string, limit int, kind string) ([]SearchResult, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 30
 	}
 	q := url.Values{}
 	q.Set("search", query)
-	q.Set("filter", "gguf")
 	q.Set("limit", strconv.Itoa(limit))
 	q.Set("full", "true")
+	if strings.EqualFold(kind, "diffusion") {
+		// Generator corpus: query the diffusers pipelines plus the known
+		// families so tag-less single-file checkpoints still surface.
+		// pipeline_tag narrows to one tag, so prefer library + search terms.
+		q.Set("filter", "diffusers")
+		if strings.TrimSpace(query) == "" {
+			q.Set("search", "stable diffusion flux sdxl wan ltx")
+		}
+	} else {
+		q.Set("filter", "gguf")
+	}
 	switch sort {
 	case "downloads", "likes", "lastModified", "trending":
 		q.Set("sort", sort)
@@ -200,6 +218,7 @@ func (c *Client) Search(ctx context.Context, query, sort string, limit int) ([]S
 			MTP:        DetectMTP(m.ID, m.Tags, files),
 			Draft:      DetectDraftSidecar(m.ID, m.Tags, files),
 			Embedding:  DetectEmbedding(m.ID, m.PipelineTag, m.Tags, files),
+			Diffusion:  DetectDiffusion(m.ID, m.PipelineTag, m.Tags, files),
 		})
 	}
 	return out, nil

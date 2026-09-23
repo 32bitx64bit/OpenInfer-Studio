@@ -120,7 +120,8 @@ func (h *handlers) hfSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	sort := r.URL.Query().Get("sort")
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	res, err := h.d.HF.Search(r.Context(), q, sort, limit)
+	kind := r.URL.Query().Get("kind")
+	res, err := h.d.HF.SearchKind(r.Context(), q, sort, limit, kind)
 	if err != nil {
 		status := 502
 		if ae, ok := err.(interface{ HTTPStatus() int }); ok {
@@ -147,12 +148,14 @@ func (h *handlers) hfRepo(w http.ResponseWriter, r *http.Request) {
 	modalities := huggingface.DetectModalities(info.ID, info.PipelineTag, info.Tags, filePaths)
 	writeJSON(w, 200, map[string]any{
 		"repo": info, "groups": groups, "projectors": projectors,
-		"drafts":        drafts,
-		"modalities":    modalities,
-		"mtp":           huggingface.DetectMTP(info.ID, info.Tags, filePaths),
-		"draft":         huggingface.DetectDraftSidecar(info.ID, info.Tags, filePaths),
-		"embedding":     huggingface.DetectEmbedding(info.ID, info.PipelineTag, info.Tags, filePaths),
-		"download_base": h.d.Layout.Models,
+		"drafts":           drafts,
+		"modalities":       modalities,
+		"mtp":              huggingface.DetectMTP(info.ID, info.Tags, filePaths),
+		"draft":            huggingface.DetectDraftSidecar(info.ID, info.Tags, filePaths),
+		"embedding":        huggingface.DetectEmbedding(info.ID, info.PipelineTag, info.Tags, filePaths),
+		"diffusion":        huggingface.DetectDiffusion(info.ID, info.PipelineTag, info.Tags, filePaths),
+		"diffusion_groups": huggingface.GroupDiffusionFiles(info.Files),
+		"download_base":    h.d.Layout.Models,
 	})
 }
 
