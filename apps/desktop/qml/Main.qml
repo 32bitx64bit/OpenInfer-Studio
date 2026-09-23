@@ -54,6 +54,13 @@ ApplicationWindow {
             case "runtime.installed":
                 window.toast("Runtime installed: " + (payload.id || ""), "success")
                 break
+            case "media.server_state":
+            case "media.server_starting":
+            case "media.server_ready":
+            case "media.server_error":
+            case "media.server_stopped":
+                window.refreshMediaServers()
+                break
             case "library.scanned":
                 break
             case "log.entry":
@@ -63,6 +70,11 @@ ApplicationWindow {
     }
 
     property var instances: []
+    // stable-diffusion.cpp (image/video) servers — kept separate from
+    // window.instances (llama-server) so the chat model picker and other
+    // instances consumers are unaffected; the active-models indicator
+    // combines both.
+    property var mediaServers: []
     property var hardware: null
     property var recommendation: null
     property int downloadCount: 0
@@ -74,7 +86,7 @@ ApplicationWindow {
     readonly property bool compactNav: window.width < 1060
 
     function routeIndex(route) {
-        var routes = ["chat", "models", "library", "developer", "runtimes", "quantize",
+        var routes = ["chat", "models", "library", "media", "developer", "runtimes", "quantize",
                       "downloads", "logs", "settings", "model-detail"]
         return routes.indexOf(route)
     }
@@ -118,6 +130,14 @@ ApplicationWindow {
     function refreshInstances() {
         api.get("/api/v1/instances", function(st, data) {
             if (st === 200 && data) window.instances = data.instances || []
+        })
+        window.refreshMediaServers()
+    }
+    function refreshMediaServers() {
+        // Tolerate 404 / not-yet-implemented backend: fall back to empty
+        // rather than erroring the active-models indicator.
+        api.get("/api/v1/media/servers", function(st, data) {
+            window.mediaServers = (st === 200 && data) ? (data.servers || []) : []
         })
     }
     function refreshActivityBadge() {
@@ -241,12 +261,19 @@ ApplicationWindow {
                     spacing: 8
 
                     Row {
-                        visible: window.currentRoute !== "chat" && window.instances.length > 0
+                        visible: window.currentRoute !== "chat"
+                            && (window.instances.length > 0 || window.mediaServers.length > 0)
                         spacing: 6
                         Text {
-                            text: window.instances.filter(function(i) {
-                                return ["ready", "busy", "loading", "starting"].indexOf(i.state) >= 0
-                            }).length + " active model" + (window.instances.length === 1 ? "" : "s")
+                            text: {
+                                var n = window.instances.filter(function(i) {
+                                    return ["ready", "busy", "loading", "starting"].indexOf(i.state) >= 0
+                                }).length
+                                n += window.mediaServers.filter(function(s) {
+                                    return ["ready", "starting"].indexOf(s.state) >= 0
+                                }).length
+                                return n + " active model" + (n === 1 ? "" : "s")
+                            }
                             color: AppTheme.textDim
                             font.pixelSize: AppTheme.fontSmall
                             anchors.verticalCenter: parent.verticalCenter
@@ -314,7 +341,8 @@ ApplicationWindow {
                         model: [
                             { "label": "Chat", "route": "chat", "glyph": "◌" },
                             { "label": "Browse models", "route": "models", "glyph": "⌕" },
-                            { "label": "My library", "route": "library", "glyph": "▦" }
+                            { "label": "My library", "route": "library", "glyph": "▦" },
+                            { "label": "Image Studio", "route": "media", "glyph": "◍" }
                         ]
                         delegate: NavButton {
                             text: modelData.label
@@ -414,6 +442,19 @@ ApplicationWindow {
                         quantizePage.prefillModel(modelId)
                         window.goTo("quantize")
                     }
+                    onOpenImageStudio: function(modelId) {
+                        mediaPage.selectedModelId = modelId
+                        window.goTo("media")
+                    }
+                }
+                MediaPage {
+                    id: mediaPage
+                    api: api
+                    events: events
+                    // LoadConfigDialog lives inside LibraryPage and parents to
+                    // Overlay.overlay, so it shows fine without navigating —
+                    // same pattern as ChatPage.onConfigureModel above.
+                    onLoadModel: function(modelId) { libraryPage.openLoad(modelId) }
                 }
                 DeveloperPage { api: api; events: events }
                 RuntimesPage  { api: api; events: events; recommendation: window.recommendation }
