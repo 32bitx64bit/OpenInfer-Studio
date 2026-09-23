@@ -29,6 +29,7 @@
         <file>qml/components/ConfirmDialog.qml</file>
         <file>qml/components/DialogEnter.qml</file>
         <file>qml/components/DialogExit.qml</file>
+        <file>qml/components/DualStepper.qml</file>
         <file>qml/components/FormField.qml</file>
         <file>qml/components/StatusDot.qml</file>
         <file>qml/components/ChatMessageContent.qml</file>
@@ -38,6 +39,7 @@
         <file>qml/pages/ChatPage.qml</file>
         <file>qml/pages/DiscoverPage.qml</file>
         <file>qml/pages/LibraryPage.qml</file>
+        <file>qml/pages/MediaPage.qml</file>
         <file>qml/pages/DeveloperPage.qml</file>
         <file>qml/pages/RuntimesPage.qml</file>
         <file>qml/pages/QuantizationPage.qml</file>
