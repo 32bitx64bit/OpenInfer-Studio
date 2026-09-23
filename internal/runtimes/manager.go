@@ -195,6 +195,15 @@ func (m *Manager) HelpOutput(id string) (string, error) {
 // Install stages, verifies and atomically installs an official release
 // asset. progress events are emitted via the downloads manager.
 func (m *Manager) Install(ctx context.Context, rel Release, match AssetMatch) (string, error) {
+	if rel.Kind == "diffusion" {
+		return m.installDiffusion(ctx, rel, match)
+	}
+	return m.installLLM(ctx, rel, match)
+}
+
+// installLLM stages, verifies and atomically installs an official
+// llama.cpp release asset.
+func (m *Manager) installLLM(ctx context.Context, rel Release, match AssetMatch) (string, error) {
 	staging, err := os.MkdirTemp(filepath.Dir(m.dir), ".staging-*")
 	if err != nil {
 		return "", err
@@ -289,6 +298,126 @@ func (m *Manager) Install(ctx context.Context, rel Release, match AssetMatch) (s
 	return runtimeID, nil
 }
 
+// installDiffusion stages, verifies and atomically installs an official
+// stable-diffusion.cpp release asset. Windows CUDA builds ship a separate
+// cudart bundle; it is downloaded and extracted into the same tree so the
+// loader finds its DLLs without PATH changes.
+func (m *Manager) installDiffusion(ctx context.Context, rel Release, match AssetMatch) (string, error) {
+	staging, err := os.MkdirTemp(filepath.Dir(m.dir), ".staging-sd-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(staging)
+
+	archivePath := filepath.Join(staging, match.Asset.Name)
+	specs := []downloads.FileSpec{{URL: match.Asset.DownloadURL, DestPath: archivePath, Size: match.Asset.Size}}
+	// Pair the Windows CUDA cudart bundle when present in the same release.
+	cudartURL, cudartName := diffusionCudartAsset(rel)
+	if cudartURL != "" && match.Backend == BackendCUDA && runtime.GOOS == "windows" {
+		specs = append(specs, downloads.FileSpec{
+			URL: cudartURL, DestPath: filepath.Join(staging, cudartName),
+		})
+	}
+	id, err := m.dl.Enqueue("runtime", "stable-diffusion.cpp "+rel.Tag+" "+match.Backend, staging,
+		specs, map[string]any{"release": rel.Tag, "backend": match.Backend, "kind": "diffusion"})
+	if err != nil {
+		return "", fmt.Errorf("enqueue runtime download: %w", err)
+	}
+	if _, err := m.dl.WaitComplete(ctx, id); err != nil {
+		return "", fmt.Errorf("runtime download failed: %w", err)
+	}
+
+	sum, err := sha256File(archivePath)
+	if err != nil {
+		return "", err
+	}
+
+	extractDir := filepath.Join(staging, "extracted")
+	if err := os.MkdirAll(extractDir, 0o755); err != nil {
+		return "", err
+	}
+	if _, err := ExtractArchive(archivePath, extractDir); err != nil {
+		return "", fmt.Errorf("extracting runtime: %w", err)
+	}
+	if cudartURL != "" && match.Backend == BackendCUDA && runtime.GOOS == "windows" {
+		if _, err := ExtractArchive(filepath.Join(staging, cudartName), extractDir); err != nil {
+			return "", fmt.Errorf("extracting cudart bundle: %w", err)
+		}
+	}
+
+	exe, err := findDiffusionExecutable(extractDir)
+	if err != nil {
+		return "", err
+	}
+	if runtime.GOOS != "windows" {
+		_ = os.Chmod(exe, 0o755)
+	}
+
+	versionOut, helpOut, err := probeDiffusionRuntime(exe)
+	if err != nil {
+		return "", fmt.Errorf("runtime smoke test failed: %w", err)
+	}
+	caps := ParseCapabilities(helpOut)
+
+	runtimeID := fmt.Sprintf("sd-%s-%s-%s-%s", rel.Tag, runtime.GOOS, runtime.GOARCH, match.Backend)
+	if _, err := m.Get(runtimeID); err == nil {
+		runtimeID = runtimeID + "-" + uuid.NewString()[:8]
+	}
+	finalDir := filepath.Join(m.dir, runtimeID)
+
+	man := Manifest{
+		RuntimeID: runtimeID, Source: "official-release", ReleaseID: rel.Tag,
+		Build: "stable-diffusion.cpp-" + rel.Tag, Platform: runtime.GOOS, Architecture: runtime.GOARCH,
+		Backend: match.Backend, DownloadURLIdentity: match.Asset.DownloadURL,
+		ArchiveSHA256: sum, InstalledAt: now(),
+		ExecutablePath: exe, VersionOutput: versionOut,
+		Capabilities: map[string]any{"flags": caps, "engine": "stable-diffusion.cpp"},
+	}
+
+	relExe, err := filepath.Rel(extractDir, exe)
+	if err == nil {
+		man.ExecutablePath = filepath.Join(finalDir, relExe)
+	}
+
+	if err := os.WriteFile(filepath.Join(extractDir, "help.txt"), []byte(helpOut), 0o644); err != nil {
+		return "", err
+	}
+	manBytes, _ := json.MarshalIndent(man, "", "  ")
+	if err := os.WriteFile(filepath.Join(extractDir, "manifest.json"), manBytes, 0o644); err != nil {
+		return "", err
+	}
+
+	if err := os.MkdirAll(m.dir, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.Rename(extractDir, finalDir); err != nil {
+		return "", fmt.Errorf("installing runtime into place: %w", err)
+	}
+
+	if err := m.record(man, helpOut, caps, finalDir); err != nil {
+		os.RemoveAll(finalDir)
+		return "", err
+	}
+	m.log.Info("diffusion runtime installed", "id", runtimeID, "backend", match.Backend)
+	if m.events != nil {
+		m.events.Publish("runtime.installed", map[string]any{"id": runtimeID, "backend": match.Backend, "kind": "diffusion"})
+	}
+	return runtimeID, nil
+}
+
+// diffusionCudartAsset finds the Windows cudart companion bundle inside an
+// sd.cpp release (skipped by ResolveAssets as a non-installable asset).
+func diffusionCudartAsset(rel Release) (url, name string) {
+	for _, a := range rel.Assets {
+		lower := strings.ToLower(a.Name)
+		if strings.Contains(lower, "cudart") &&
+			(strings.HasSuffix(lower, ".zip") || strings.HasSuffix(lower, ".tar.gz")) {
+			return a.DownloadURL, a.Name
+		}
+	}
+	return "", ""
+}
+
 func (m *Manager) record(man Manifest, helpOut string, caps []string, dir string) error {
 	tx, err := m.db.Begin()
 	if err != nil {
@@ -342,7 +471,11 @@ func (m *Manager) ImportCustom(path string) (string, error) {
 func (m *Manager) importCustomExecutable(exePath string) (string, error) {
 	versionOut, helpOut, err := probeRuntime(exePath)
 	if err != nil {
-		return "", fmt.Errorf("custom runtime failed smoke test: %w", err)
+		// sd-server / sd-cli custom builds probe with the same rules.
+		versionOut, helpOut, err = probeDiffusionRuntime(exePath)
+		if err != nil {
+			return "", fmt.Errorf("custom runtime failed smoke test: %w", err)
+		}
 	}
 	caps := ParseCapabilities(helpOut)
 	backend := DetectBackend(versionOut, []string{exePath}, filepath.Dir(exePath))
@@ -382,7 +515,11 @@ func (m *Manager) importCustomArchive(archivePath string) (string, error) {
 		return "", fmt.Errorf("extracting archive: %w", err)
 	}
 
+	// Accept llama-server archives and stable-diffusion.cpp (sd-server) ones.
 	exe, err := findServerExecutable(extractDir)
+	if err != nil {
+		exe, err = findDiffusionExecutable(extractDir)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -391,6 +528,9 @@ func (m *Manager) importCustomArchive(archivePath string) (string, error) {
 	}
 
 	versionOut, helpOut, err := probeRuntime(exe)
+	if err != nil {
+		versionOut, helpOut, err = probeDiffusionRuntime(exe)
+	}
 	if err != nil {
 		return "", fmt.Errorf("custom runtime failed smoke test: %w", err)
 	}
@@ -518,28 +658,67 @@ func (m *Manager) HealthCheck(id string) (bool, string, error) {
 
 // findServerExecutable locates llama-server inside an extracted tree.
 func findServerExecutable(root string) (string, error) {
-	want := "llama-server"
+	return findNamedExecutable(root, serverExeNames(), "llama-server")
+}
+
+// findDiffusionExecutable locates sd-server (or sd-cli fallback) inside an
+// extracted stable-diffusion.cpp tree.
+func findDiffusionExecutable(root string) (string, error) {
+	return findNamedExecutable(root, diffusionExeNames(), "sd-server")
+}
+
+// serverExeNames returns the platform executable names for llama-server.
+func serverExeNames() []string {
 	if runtime.GOOS == "windows" {
-		want = "llama-server.exe"
+		return []string{"llama-server.exe"}
 	}
-	var found string
+	return []string{"llama-server"}
+}
+
+// diffusionExeNames returns the platform executable names for sd.cpp,
+// preferred first (sd-server daemon, then sd-cli one-shot fallback).
+func diffusionExeNames() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"sd-server.exe", "sd_cli.exe", "sd-cli.exe"}
+	}
+	return []string{"sd-server", "sd_cli", "sd-cli"}
+}
+
+func findNamedExecutable(root string, wants []string, label string) (string, error) {
+	want := map[string]bool{}
+	for _, w := range wants {
+		want[strings.ToLower(w)] = true
+	}
+	var preferred, fallback string
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && strings.EqualFold(d.Name(), want) {
-			found = p
+		if d.IsDir() {
+			return nil
+		}
+		if !want[strings.ToLower(d.Name())] {
+			return nil
+		}
+		if preferred == "" && strings.EqualFold(d.Name(), wants[0]) {
+			preferred = p
 			return io.EOF // stop walk early
+		}
+		if fallback == "" {
+			fallback = p
 		}
 		return nil
 	})
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
-	if found == "" {
-		return "", fmt.Errorf("archive does not contain a llama-server executable")
+	if preferred != "" {
+		return preferred, nil
 	}
-	return found, nil
+	if fallback != "" {
+		return fallback, nil
+	}
+	return "", fmt.Errorf("archive does not contain a %s executable", label)
 }
 
 // LibPathEnv returns environment entries putting the executable's own
@@ -563,6 +742,17 @@ func LibPathEnv(exe string) []string {
 
 // probeRuntime runs `llama-server --version` and `--help` with a timeout.
 func probeRuntime(exe string) (version, help string, err error) {
+	return probeExe(exe)
+}
+
+// probeDiffusionRuntime runs `sd-server --version` and `--help` with the
+// same timeout rules. Some sd.cpp builds exit non-zero for --help; output
+// is still accepted when present.
+func probeDiffusionRuntime(exe string) (version, help string, err error) {
+	return probeExe(exe)
+}
+
+func probeExe(exe string) (version, help string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	vcmd := exec.CommandContext(ctx, exe, "--version")

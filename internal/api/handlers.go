@@ -314,9 +314,20 @@ func (h *handlers) listRuntimes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) listReleases(w http.ResponseWriter, r *http.Request) {
-	rels, err := h.d.RT.Feed().Latest(r.Context())
+	kind := r.URL.Query().Get("kind")
+	var rels []runtimes.Release
+	var err error
+	if kind == "diffusion" {
+		rels, err = h.d.RT.Feed().LatestDiffusion(r.Context())
+	} else {
+		rels, err = h.d.RT.Feed().Latest(r.Context())
+	}
 	if err != nil {
-		writeErr(w, 502, "checking llama.cpp releases failed", err)
+		if kind == "diffusion" {
+			writeErr(w, 502, "checking stable-diffusion.cpp releases failed", err)
+		} else {
+			writeErr(w, 502, "checking llama.cpp releases failed", err)
+		}
 		return
 	}
 	hw := h.hardwareInfo()
@@ -349,11 +360,18 @@ func (h *handlers) installRuntime(w http.ResponseWriter, r *http.Request) {
 		Tag     string `json:"tag"`
 		Asset   string `json:"asset"` // asset name
 		Backend string `json:"backend"`
+		Kind    string `json:"kind"` // ""|llm|diffusion
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	rels, err := h.d.RT.Feed().Latest(r.Context())
+	var rels []runtimes.Release
+	var err error
+	if req.Kind == "diffusion" {
+		rels, err = h.d.RT.Feed().LatestDiffusion(r.Context())
+	} else {
+		rels, err = h.d.RT.Feed().Latest(r.Context())
+	}
 	if err != nil {
 		writeErr(w, 502, "checking releases failed", err)
 		return
@@ -362,6 +380,10 @@ func (h *handlers) installRuntime(w http.ResponseWriter, r *http.Request) {
 	for i := range rels {
 		if rels[i].Tag == req.Tag {
 			rel = &rels[i]
+			// Tag the feed kind so Install stages the sd.cpp pipeline.
+			if req.Kind == "diffusion" {
+				rel.Kind = "diffusion"
+			}
 			break
 		}
 	}

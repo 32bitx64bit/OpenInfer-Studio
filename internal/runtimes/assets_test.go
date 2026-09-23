@@ -21,6 +21,16 @@ func TestClassifyAsset(t *testing.T) {
 		{"llama-b6801-bin-macos-x64.zip", "darwin", "amd64", BackendMetal},
 		{"llama-b6801-bin-win-x64.zip", "windows", "amd64", BackendCPU},
 		{"llama-b6801-bin-ubuntu-sycl-x64.zip", "linux", "amd64", BackendSYCL},
+		{"sd-8b62a5c-bin-win-cpu-x64.zip", "windows", "amd64", BackendCPU},
+		{"sd-8b62a5c-bin-win-cuda12-x64.zip", "windows", "amd64", BackendCUDA},
+		{"sd-8b62a5c-bin-win-vulkan-x64.zip", "windows", "amd64", BackendVulkan},
+		{"sd-8b62a5c-bin-win-rocm-7.1-x64.zip", "windows", "amd64", BackendHIP},
+		{"sd-8b62a5c-bin-linux-cpu-x64.zip", "linux", "amd64", BackendCPU},
+		{"sd-8b62a5c-bin-linux-cuda12-x64.zip", "linux", "amd64", BackendCUDA},
+		{"sd-8b62a5c-bin-linux-vulkan-x64.zip", "linux", "amd64", BackendVulkan},
+		{"sd-8b62a5c-bin-linux-rocm-7.1-x64.zip", "linux", "amd64", BackendHIP},
+		{"sd-8b62a5c-bin-macOS-arm64.zip", "darwin", "arm64", BackendMetal},
+		{"cudart-sd-bin-win-cu12-x64.zip", "windows", "amd64", BackendCUDA},
 	}
 	for _, c := range cases {
 		p, a, b := ClassifyAsset(c.name)
