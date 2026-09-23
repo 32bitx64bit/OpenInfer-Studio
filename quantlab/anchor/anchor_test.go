@@ -38,8 +38,8 @@ func TestNormsStructurallyPreservedNoFloor(t *testing.T) {
 	if !s.Preserved(weird) {
 		t.Error("2D norm-pattern tensor not preserved")
 	}
-	if _, ok := s.Floor("token_embd.weight"); ok {
-		t.Error("embedding received a hard floor; must be a soft prior")
+	if f, ok := s.Floor("token_embd.weight"); !ok || f != core.DTypeQ6_K {
+		t.Errorf("embedding floor = %v,%v want Q6_K", f, ok)
 	}
 	if f, ok := s.Floor("output.weight"); !ok || f != core.DTypeQ6_K {
 		t.Errorf("output head floor = %v,%v want Q6_K", f, ok)
@@ -113,9 +113,35 @@ func TestOnlyExplicitAndCalibrationAreHard(t *testing.T) {
 	if f, ok := s.Floor("blk.0.attn_q.weight"); !ok || f != core.DTypeQ8_0 {
 		t.Errorf("calibration floor = %v,%v", f, ok)
 	}
-	// User-supplied embedding-kind anchor is demoted to a prior, not a floor.
-	if _, ok := s.Floor("token_embd.weight"); ok {
-		t.Error("embedding-kind anchor became a hard floor")
+	// User-supplied embedding-kind anchors are demoted to priors; only the
+	// policy embedding floor applies.
+	if f, ok := s.Floor("token_embd.weight"); !ok || f != core.DTypeQ6_K {
+		t.Errorf("embedding floor = %v,%v want policy Q6_K", f, ok)
+	}
+}
+
+func TestEmbeddingFloorEasesAtLowBPW(t *testing.T) {
+	bank := testBank()
+	s, err := Derive(bank, nil, PolicyForBPW(3.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := s.Floor("token_embd.weight"); !ok || f != core.DTypeQ4_K_T {
+		t.Errorf("3.5 bpw embedding floor = %v,%v want Q4_K", f, ok)
+	}
+	s, err = Derive(bank, nil, PolicyForBPW(2.0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := s.Floor("token_embd.weight"); !ok || f != core.DTypeQ3_K {
+		t.Errorf("2.0 bpw embedding floor = %v,%v want Q3_K", f, ok)
+	}
+	s, err = Derive(bank, nil, PolicyForBPW(5.0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := s.Floor("token_embd.weight"); !ok || f != core.DTypeQ6_K {
+		t.Errorf("5.0 bpw embedding floor = %v,%v want Q6_K", f, ok)
 	}
 }
 
@@ -154,7 +180,7 @@ func TestCheckViolations(t *testing.T) {
 	p := &core.Profile{
 		ID: "p",
 		Assignments: []core.QuantAssignment{
-			{TensorName: "token_embd.weight", Target: core.DTypeQ4_K_T, BitsPerWeight: 4.5},     // soft prior only: no violation
+			{TensorName: "token_embd.weight", Target: core.DTypeQ8_0, BitsPerWeight: 8.5},       // above the embedding floor: no violation
 			{TensorName: "blk.0.ffn_down.weight", Target: core.DTypeQ4_K_T, BitsPerWeight: 4.5}, // below hard floor
 		},
 	}
@@ -320,6 +346,9 @@ func TestDefaultPolicyValuePriorSoft(t *testing.T) {
 	if p.RouterFloor != core.DTypeQ5_K_T {
 		t.Fatalf("router floor %s", p.RouterFloor)
 	}
+	if p.EmbeddingFloor != core.DTypeQ6_K {
+		t.Fatalf("embedding floor %s", p.EmbeddingFloor)
+	}
 	if p.ValueWeight != p.EmbeddingWeight {
 		t.Fatalf("value weight %v != embedding %v", p.ValueWeight, p.EmbeddingWeight)
 	}
@@ -460,5 +489,40 @@ func TestExpertDownPriorWeaker(t *testing.T) {
 	}
 	if pe >= pd {
 		t.Errorf("expert down penalty %v should be below dense down %v", pe, pd)
+	}
+}
+
+// Tied-embedding models have no output.weight: token_embd doubles as the
+// lm_head and must receive the higher-fidelity of the embedding and output
+// floors (llama.cpp applies output-tensor rules to token_embd in that case).
+func TestTiedEmbeddingGetsOutputFloor(t *testing.T) {
+	bank := testBank()
+	// Drop output.weight (index 1); token_embd is then the tied lm_head.
+	bank.Tensors = append(bank.Tensors[:1:1], bank.Tensors[2:]...)
+	s, err := Derive(bank, nil, PolicyForBPW(2.2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := s.Floor("token_embd.weight"); !ok || f != core.DTypeQ4_K_T {
+		t.Errorf("tied embedding floor at 2.2 bpw = %v,%v want Q4_K (not Q3_K)", f, ok)
+	}
+	s, err = Derive(bank, nil, PolicyForBPW(3.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := s.Floor("token_embd.weight"); !ok || f != core.DTypeQ5_K_T {
+		t.Errorf("tied embedding floor at 3.5 bpw = %v,%v want Q5_K", f, ok)
+	}
+	// With a separate output head the embedding keeps its own floor.
+	full := testBank()
+	s, err = Derive(full, nil, PolicyForBPW(2.2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, ok := s.Floor("token_embd.weight"); !ok || f != core.DTypeQ3_K {
+		t.Errorf("untied embedding floor at 2.2 bpw = %v,%v want Q3_K", f, ok)
+	}
+	if f, ok := s.Floor("output.weight"); !ok || f != core.DTypeQ4_K_T {
+		t.Errorf("output floor at 2.2 bpw = %v,%v want Q4_K", f, ok)
 	}
 }

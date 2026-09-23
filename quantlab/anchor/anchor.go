@@ -9,10 +9,13 @@
 //     Quantizable linear-attn projections (ssm_out, attn_qkv, attn_gate)
 //     receive the same attention soft prior as softmax Q/K/V — convert
 //     layout, not a model-family special case.
-//   - Embeddings receive a Q6_K soft prior. The output head (output.weight /
-//     lm_head) is a hard floor (Q6_K, easing to Q5_K/Q4_K at low target bpw)
-//     so token logits — especially EOS vs continue — stay sharp. Attention
-//     projections receive Q5_K; attention V gets an extra Q6_K ValuePrior.
+//   - Embeddings receive a Q6_K soft prior and a hard floor (Q6_K, easing to
+//     Q5_K/Q4_K/Q3_K at low target bpw): rare-token input rows barely move
+//     corpus KLD but degrade generation, so the calibrated solver must not
+//     harvest them away. The output head (output.weight / lm_head) is a hard
+//     floor (Q6_K, easing to Q5_K/Q4_K at low target bpw) so token logits —
+//     especially EOS vs continue — stay sharp. Attention projections receive
+//     Q5_K; attention V gets an extra Q6_K ValuePrior.
 //     FFN down gets a separate DownPrior (Q6 historically; weaker Q4/Q5
 //     at low target bpw). Solvers fold priors into the loss landscape;
 //     they never hard-pin those tensors.
@@ -51,6 +54,11 @@ type Policy struct {
 	ExpertDownWeight float64
 	// RouterFloor is the hard minimum dtype for MoE routers (ffn_gate_inp).
 	RouterFloor core.DType
+	// EmbeddingFloor is the hard minimum dtype for token embeddings. Like
+	// OutputFloor it exists for generation quality, not corpus KLD: a
+	// Q2_K/Q3_XXS embedding table passes a short validation corpus while
+	// rare-token rows collapse.
+	EmbeddingFloor core.DType
 	// OutputFloor is the hard minimum dtype for the lm_head / output.weight.
 	// llama.cpp recipes keep this tensor high even at Q2; a soft prior is
 	// harvested on huge vocabs and the model then stops mid-generation.
@@ -69,6 +77,7 @@ type Policy struct {
 func DefaultPolicy() Policy {
 	return Policy{
 		EmbeddingPrior:    core.DTypeQ6_K,
+		EmbeddingFloor:    core.DTypeQ6_K,
 		AttentionPrior:    core.DTypeQ5_K_T,
 		ValuePrior:        core.DTypeQ6_K,
 		DownPrior:         core.DTypeQ6_K, // historical: same as ValuePrior when bpw is unset
@@ -93,10 +102,11 @@ func PolicyForBPW(bpw float64) Policy {
 	return DefaultPolicy().ApplyTargetBPW(bpw)
 }
 
-// ApplyTargetBPW returns a copy of p with FFN-down priors scaled to bpw.
-// Embeddings stay Q6_K; non-V attention stays Q5_K; V stays Q6_K.
-// The output-head floor eases Q6_K → Q5_K → Q4_K at tighter budgets.
-// Downs are never hard-pinned to Q6.
+// ApplyTargetBPW returns a copy of p with embedding/output floors and
+// FFN-down priors scaled to bpw. Embedding and V priors stay Q6_K;
+// non-V attention stays Q5_K. The output-head and embedding floors ease
+// Q6_K → Q5_K → Q4_K/Q3_K at tighter budgets. Downs are never hard-pinned
+// to Q6.
 func (p Policy) ApplyTargetBPW(bpw float64) Policy {
 	p = p.withDefaults()
 	if bpw <= 0 {
@@ -114,8 +124,10 @@ func (p Policy) ApplyTargetBPW(bpw float64) Policy {
 		p.DownPrior = core.DTypeQ4_K_T
 		p.DownWeight = 0.25
 		p.ExpertDownWeight = 0.12
+		p.EmbeddingFloor = core.DTypeQ4_K_T
 		if bpw <= 2.5 {
 			p.OutputFloor = core.DTypeQ4_K_T
+			p.EmbeddingFloor = core.DTypeQ3_K
 		} else {
 			p.OutputFloor = core.DTypeQ5_K_T
 		}
@@ -123,6 +135,7 @@ func (p Policy) ApplyTargetBPW(bpw float64) Policy {
 		p.DownPrior = core.DTypeQ5_K_T
 		p.DownWeight = 0.35
 		p.ExpertDownWeight = 0.18
+		p.EmbeddingFloor = core.DTypeQ5_K_T
 	}
 	return p
 }
@@ -161,6 +174,9 @@ func (p Policy) withDefaults() Policy {
 	}
 	if p.OutputFloor == "" {
 		p.OutputFloor = d.OutputFloor
+	}
+	if p.EmbeddingFloor == "" {
+		p.EmbeddingFloor = d.EmbeddingFloor
 	}
 	if p.EmbeddingPatterns == nil {
 		p.EmbeddingPatterns = d.EmbeddingPatterns
@@ -228,6 +244,9 @@ func Derive(bank *core.TensorBank, explicit []core.Anchor, pol Policy) (*Set, er
 	if pol.OutputFloor != "" && (!pol.OutputFloor.Valid() || !pol.OutputFloor.IsQuant()) {
 		return nil, fmt.Errorf("anchor: invalid output floor dtype %q", pol.OutputFloor)
 	}
+	if pol.EmbeddingFloor != "" && (!pol.EmbeddingFloor.Valid() || !pol.EmbeddingFloor.IsQuant()) {
+		return nil, fmt.Errorf("anchor: invalid embedding floor dtype %q", pol.EmbeddingFloor)
+	}
 	s := &Set{NormPatterns: pol.NormPatterns}
 	for _, a := range explicit {
 		if err := a.Validate(); err != nil {
@@ -270,6 +289,24 @@ func Derive(bank *core.TensorBank, explicit []core.Anchor, pol Policy) (*Set, er
 	}
 
 	linear := linearAttnLayers(bank)
+	// Tied-embedding models have no separate output head: llama.cpp applies
+	// output-tensor rules to token_embd in that case, so the embedding floor
+	// must be the higher-fidelity of the two or the logit head degrades.
+	hasOutput := false
+	for _, t := range bank.Tensors {
+		if classify(t.Name, linear) == roleOutput {
+			hasOutput = true
+			break
+		}
+	}
+	embedFloor := pol.EmbeddingFloor
+	embedReason := "token embeddings"
+	if !hasOutput && pol.OutputFloor != "" {
+		if embedFloor == "" || Rank(pol.OutputFloor) < Rank(embedFloor) {
+			embedFloor = pol.OutputFloor
+			embedReason = "tied token embeddings (output head)"
+		}
+	}
 	var preserved []string
 	for _, t := range bank.Tensors {
 		role := classify(t.Name, linear)
@@ -295,6 +332,11 @@ func Derive(bank *core.TensorBank, explicit []core.Anchor, pol Policy) (*Set, er
 			s.Priors = append(s.Priors, Prior{
 				Kind: core.AnchorAttention, Pattern: t.Name,
 				DType: pol.DownPrior, Weight: w,
+			})
+		case role == roleEmbed && t.Quantizable() && embedFloor != "":
+			s.Hard = append(s.Hard, core.Anchor{
+				Kind: core.AnchorExplicit, Name: t.Name,
+				MinDType: embedFloor, Reason: embedReason,
 			})
 		case role == roleOutput && t.Quantizable() && pol.OutputFloor != "":
 			s.Hard = append(s.Hard, core.Anchor{
