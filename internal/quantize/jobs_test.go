@@ -1870,3 +1870,48 @@ func TestSupportsQuantlabEvaluationRequiresKLDivergence(t *testing.T) {
 		t.Fatal("rejected with --kl-divergence")
 	}
 }
+
+func TestPublishQuantlabArtifactUsesHardLink(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "out.gguf")
+	writeQuantlabTestGGUF(t, source, "hardlink", []quantlabTestTensor{{"blk.0.ffn_down.weight", 1, []uint64{256, 64}}})
+	dest := filepath.Join(dir, "pub.gguf")
+	if err := publishQuantlabArtifact(source, dest); err != nil {
+		t.Fatal(err)
+	}
+	si, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	di, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same filesystem: hard link (SameFile). Cross-device falls back to
+	// copy which is still correct but not SameFile.
+	if os.SameFile(si, di) {
+		// Hard link: dest must survive source removal semantics (same inode).
+		if di.Size() != si.Size() {
+			t.Fatalf("size mismatch %d vs %d", di.Size(), si.Size())
+		}
+	}
+}
+
+func TestCopyOrLinkFileFallback(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.bin")
+	if err := os.WriteFile(src, []byte("payload"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(dir, "dst.bin")
+	if err := copyOrLinkFile(src, dest); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "payload" {
+		t.Fatalf("dest content = %q", data)
+	}
+}

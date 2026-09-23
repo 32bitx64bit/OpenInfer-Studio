@@ -1062,8 +1062,15 @@ func publishQuantlabArtifact(source, dest string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := copyFileAtomic(source, dest); err != nil {
+	if err := copyOrLinkFile(source, dest); err != nil {
 		return err
+	}
+	// Verify publication: a hard link is already byte-identical (SameFile
+	// replaces the second hash); a copy is re-hashed as before.
+	if srcInfo, statErr := os.Stat(source); statErr == nil {
+		if dstInfo, statErr2 := os.Stat(dest); statErr2 == nil && os.SameFile(srcInfo, dstInfo) {
+			return nil
+		}
 	}
 	destSHA, destBytes, err := hashFile(dest)
 	if err != nil || destBytes != sourceBytes || destSHA != sourceSHA {
@@ -1074,6 +1081,16 @@ func publishQuantlabArtifact(source, dest string) error {
 		return fmt.Errorf("published destination failed checkpoint integrity verification")
 	}
 	return nil
+}
+
+// copyOrLinkFile tries a hard link first (saves a full-model copy and
+// re-read when both paths share a filesystem); falls back to the atomic
+// copy on cross-device links or unsupported filesystems.
+func copyOrLinkFile(source, dest string) error {
+	if err := os.Link(source, dest); err == nil {
+		return nil
+	}
+	return copyFileAtomic(source, dest)
 }
 
 // rewriteQuantlabReport copies the report then updates its adopted output
