@@ -89,9 +89,15 @@ func (e *Engine) exactLossSignature(bank *core.TensorBank) (string, error) {
 	if bank == nil {
 		return "", fmt.Errorf("pipeline: exact-loss signature needs a tensor bank")
 	}
+	measured := !e.Extra.LegacyExactTable && !e.probeKLDEnabled()
 	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "v2\x00%s\x00%s\x00probe=%t\x00solverfti=%t\x00sketches=v1\x00",
-		bank.ModelID, bank.SHA256, e.probeKLDEnabled(), e.solverFTIEnabled())
+	_, _ = fmt.Fprintf(h, "v2\x00%s\x00%s\x00probe=%t\x00solverfti=%t\x00sketches=v1\x00measured=v1\x00measuredSampleElements=%d\x00measured=%t\x00",
+		bank.ModelID, bank.SHA256, e.probeKLDEnabled(), e.solverFTIEnabled(), measuredSampleElements, measured)
+	if measured {
+		if qSHA, err := e.cachedFileSHA(e.Run.Config.Tools.LlamaQuantize); err == nil {
+			_, _ = fmt.Fprintf(h, "llamaQuantize=%s\x00", qSHA)
+		}
+	}
 	payloadSHA, err := e.payloadIdentitySHA()
 	if err != nil {
 		return "", err

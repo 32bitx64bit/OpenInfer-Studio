@@ -484,3 +484,9 @@ func (e *FallbackEstimator) HasExactLoss(name string, target core.DType) bool {
 	_, ok = m[target]
 	return ok
 }
+
+// LookupImatrix resolves alternate .weight suffixes, mirroring
+// FallbackEstimator.stats. Exported for the measured-loss builder.
+func LookupImatrix(imatrix map[string]ImatrixStats, name string) (ImatrixStats, bool) {
+	return lookupImatrix(imatrix, name)
+}

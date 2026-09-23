@@ -62,6 +62,7 @@ type PlanOptions struct {
 	NoProbeKLD            bool
 	Sensitivity           bool
 	NoSensitivity         bool
+	LegacyExactTable      bool
 }
 
 // Plan validates everything, builds calibration corpora when needed, derives
@@ -248,7 +249,8 @@ func Plan(opts PlanOptions) (*state.Run, error) {
 		opts.ExactEstimatorOff || opts.ScaleFold || opts.NoScaleFold ||
 		opts.Hadamard || opts.NoHadamard || opts.CSK || opts.NoCSK ||
 		opts.FTI || opts.NoFTI || opts.ProbeKLD || opts.NoProbeKLD ||
-		opts.Sensitivity || opts.NoSensitivity {
+		opts.Sensitivity || opts.NoSensitivity ||
+		opts.LegacyExactTable {
 		e := &Engine{Store: store, Run: r, Extra: ExtraConfig{
 			Chunks:                chunks,
 			ExactEstimatorOff:     opts.ExactEstimatorOff,
@@ -265,6 +267,7 @@ func Plan(opts PlanOptions) (*state.Run, error) {
 			NoProbeKLD:            opts.NoProbeKLD,
 			Sensitivity:           opts.Sensitivity,
 			NoSensitivity:         opts.NoSensitivity,
+			LegacyExactTable:      opts.LegacyExactTable,
 		}}
 		if err := e.saveExtra(); err != nil {
 			return nil, fmt.Errorf("pipeline: write extra config: %w", err)

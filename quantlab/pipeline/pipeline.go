@@ -75,6 +75,9 @@ type ExtraConfig struct {
 	Encode         bool `json:"encode,omitempty"`
 	FreqVQ         bool `json:"freqVQ,omitempty"`
 	ExpertCentroid bool `json:"expertCentroid,omitempty"`
+	// LegacyExactTable forces the Go exact-loss table instead of the
+	// measured one (A/B testing).
+	LegacyExactTable bool `json:"legacyExactTable,omitempty"`
 	// FoldedSourcePath / FoldedImatrixPath record the fold redirect once
 	// applied (persisted sidecar; resume-safe).
 	FoldedSourcePath  string `json:"foldedSourcePath,omitempty"`
@@ -127,6 +130,7 @@ type Engine struct {
 
 	hashMu     sync.Mutex
 	fileHashes map[string]cachedFileHash
+
 }
 
 type cachedFileHash struct {
@@ -263,6 +267,7 @@ func (e *Engine) Resume(ctx context.Context) error {
 // the next resume.
 func (e *Engine) cleanupScratch() {
 	os.RemoveAll(e.anchorDir())
+	os.RemoveAll(filepath.Join(e.workDir(), "measure"))
 	if matches, err := filepath.Glob(filepath.Join(e.workDir(), "baseline-logits*.bin*")); err == nil {
 		for _, path := range matches {
 			os.Remove(path)
@@ -606,41 +611,90 @@ func (e *Engine) stageSolve(ctx context.Context) error {
 				return fmt.Errorf("pipeline: exact loss identity: %w", err)
 			}
 			var partialMu sync.Mutex
-			table, err := profile.BuildExactLossTableCfg(tableBank, req.Candidates, imatrix,
-				func(done, total int64) {
-					if total <= 0 {
-						return
-					}
-					frac := float64(done) / float64(total)
-					if frac > 1 {
-						frac = 1
-					}
-					e.obsProgress(core.StageSolve, frac, "computing exact loss table")
-				}, profile.ExactConfig{
-					ProbeKLD: e.probeKLDEnabled(),
-					Context:  ctx,
-					Existing: existing,
-					OnTensor: func(name string, losses map[core.DType]float64) error {
-						partialMu.Lock()
-						defer partialMu.Unlock()
-						copyLosses := make(map[core.DType]float64, len(losses))
-						for d, v := range losses {
-							copyLosses[d] = v
-						}
-						partial[name] = copyLosses
-						return e.saveExactLossWithSignature(bank, signature, partial)
-					},
-				})
-			if err != nil {
-				return fmt.Errorf("pipeline: exact loss table: %w", err)
+			savePartial := func(t map[string]map[core.DType]float64) error {
+				partialMu.Lock()
+				defer partialMu.Unlock()
+				return e.saveExactLossWithSignature(bank, signature, t)
 			}
+
+			// Candidate policy: IQ1 rungs only at very tight budgets.
+			cands := append([]core.DType(nil), req.Candidates...)
+			if cfg.TargetBPW > 0 && cfg.TargetBPW <= 2.5 {
+				for _, d := range []core.DType{core.DTypeIQ1_M, core.DTypeIQ1_S} {
+					found := false
+					for _, c := range cands {
+						if c == d {
+							found = true
+							break
+						}
+					}
+					if !found {
+						cands = append(cands, d)
+					}
+				}
+			}
+
+			var table map[string]map[core.DType]float64
+			if !e.Extra.LegacyExactTable && !e.probeKLDEnabled() {
+				mtable, unmeasured, merr := e.buildMeasuredLossTable(ctx, tableBank, cands, imatrix, existing, savePartial)
+				if merr != nil {
+					return fmt.Errorf("pipeline: measured loss table: %w", merr)
+				}
+				table = mtable
+				if len(unmeasured) > 0 {
+					drop := map[core.DType]bool{}
+					for _, d := range unmeasured {
+						drop[d] = true
+					}
+					filtered := cands[:0]
+					for _, d := range cands {
+						if !drop[d] {
+							filtered = append(filtered, d)
+						}
+					}
+					cands = filtered
+					req.Candidates = cands
+				}
+			} else {
+				// Legacy Go path (forced or probe-KLD blend needs
+				// in-process data).
+				var lerr error
+				table, lerr = profile.BuildExactLossTableCfg(tableBank, cands, imatrix,
+					func(done, total int64) {
+						if total <= 0 {
+							return
+						}
+						frac := float64(done) / float64(total)
+						if frac > 1 {
+							frac = 1
+						}
+						e.obsProgress(core.StageSolve, frac, "computing exact loss table")
+					}, profile.ExactConfig{
+						ProbeKLD: e.probeKLDEnabled(),
+						Context:  ctx,
+						Existing: existing,
+						OnTensor: func(name string, losses map[core.DType]float64) error {
+							partialMu.Lock()
+							defer partialMu.Unlock()
+							copyLosses := make(map[core.DType]float64, len(losses))
+							for d, v := range losses {
+								copyLosses[d] = v
+							}
+							partial[name] = copyLosses
+							return e.saveExactLossWithSignature(bank, signature, partial)
+						},
+					})
+				if lerr != nil {
+					return fmt.Errorf("pipeline: exact loss table: %w", lerr)
+				}
+			}
+			req.ExactLoss = table
 			covered := 0
 			for _, m := range table {
 				if len(m) > 0 {
 					covered++
 				}
 			}
-			req.ExactLoss = table
 			if err := e.saveExactLossWithSignature(bank, signature, table); err != nil {
 				return fmt.Errorf("pipeline: persist exact loss table: %w", err)
 			}
