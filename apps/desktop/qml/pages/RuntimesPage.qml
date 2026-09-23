@@ -13,9 +13,12 @@ Item {
 
     property var installed: []
     property var releases: []
+    property var sdReleases: []
     property bool checking: false
+    property bool checkingSD: false
     property string backendFilter: ""   // user override for asset resolution
     property string errorText: ""
+    property string sdErrorText: ""
     property var runtimeDownloads: []   // active runtime downloads
     property var liveProgress: ({})
     property var pendingInstalls: []    // downloaded, extracting/verifying
@@ -40,6 +43,29 @@ Item {
             page.checking = false
             if (st === 200) page.releases = (data && data.releases) || []
             else page.errorText = (data && (data.detail || data.error)) || ("HTTP " + st)
+        })
+    }
+
+    function checkSDReleases() {
+        page.checkingSD = true
+        page.sdErrorText = ""
+        var q = "?kind=diffusion" + (page.backendFilter !== "" ? "&backend=" + page.backendFilter : "")
+        api.get("/api/v1/runtimes/releases" + q, function(st, data) {
+            page.checkingSD = false
+            if (st === 200) page.sdReleases = (data && data.releases) || []
+            else page.sdErrorText = (data && (data.detail || data.error)) || ("HTTP " + st)
+        })
+    }
+
+    function installRelease(tag, asset, backend, kind) {
+        var body = { "tag": tag, "asset": asset, "backend": backend }
+        if (kind === "diffusion") body.kind = "diffusion"
+        page.api.post("/api/v1/runtimes/install", body, function(st, data) {
+            if (st !== 202) {
+                var msg = (data && (data.detail || data.error)) || "install failed"
+                if (kind === "diffusion") page.sdErrorText = msg
+                else page.errorText = msg
+            }
         })
     }
 
@@ -292,96 +318,37 @@ Item {
                 }
             }
 
-            // Release discovery
-            AppGroupBox {
-                Layout.fillWidth: true
-                title: "Official llama.cpp releases"
-                ColumnLayout {
-                    width: parent.width
-                    spacing: 8
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-                        Label { text: "Backend:"; color: AppTheme.textDim }
-                        AppComboBox {
-                            model: [
-                                { "text": "Auto (recommended)", "value": "" },
-                                { "text": "CPU", "value": "cpu" },
-                                { "text": "Vulkan", "value": "vulkan" },
-                                { "text": "CUDA", "value": "cuda" },
-                                { "text": "HIP/ROCm", "value": "hip" },
-                                { "text": "Metal", "value": "metal" },
-                                { "text": "SYCL", "value": "sycl" }
-                            ]
-                            textRole: "text"; valueRole: "value"
-                            onActivated: function(i) { page.backendFilter = model[i].value }
-                        }
-                        AppButton {
-                            text: page.checking ? "Checking…" : "Check for releases"
-                            enabled: !page.checking
-                            primary: true
-                            onClicked: page.checkReleases()
-                        }
-                        Item { Layout.fillWidth: true }
-                        AppButton {
-                            text: "Import custom build…"
-                            onClicked: importRuntimeDialog.open()
-                        }
-                    }
-                    Label {
-                        visible: page.errorText !== ""
-                        Layout.fillWidth: true
-                        text: page.errorText
-                        color: AppTheme.danger
-                        wrapMode: Text.WordWrap
-                    }
-                    Repeater {
-                        model: page.releases
-                        delegate: Card {
-                            id: relCard
-                            property string relTag: modelData.tag
-                            Layout.fillWidth: true
-                            implicitHeight: relCol.implicitHeight + 16
-                            ColumnLayout {
-                                id: relCol
-                                anchors.fill: parent
-                                anchors.margins: 8
-                                spacing: 6
-                                RowLayout {
-                                    Label { text: modelData.tag; color: AppTheme.text; font.weight: Font.DemiBold }
-                                    Label { text: modelData.published_at.substring(0, 10); color: AppTheme.textFaint; font.pixelSize: AppTheme.fontSmall }
-                                    Item { Layout.fillWidth: true }
-                                }
-                                Repeater {
-                                    model: (modelData.matches || []).slice(0, 5)
-                                    delegate: RowLayout {
-                                        Layout.fillWidth: true
-                                        spacing: 8
-                                        Label {
-                                            text: modelData.asset.name
-                                            color: AppTheme.textDim
-                                            font.pixelSize: AppTheme.fontSmall
-                                            elide: Text.ElideMiddle
-                                            Layout.fillWidth: true
-                                        }
-                                        Tag { text: modelData.backend; tone: AppTheme.accent }
-                                        Label { text: AppTheme.bytes(modelData.asset.size); color: AppTheme.textFaint; font.pixelSize: AppTheme.fontSmall }
-                                        AppButton {
-                                            text: "Install"
-                                            onClicked: page.api.post("/api/v1/runtimes/install", {
-                                                "tag": relCard.relTag, "asset": modelData.asset.name,
-                                                "backend": modelData.backend
-                                            }, function(st, data) {
-                                                if (st !== 202)
-                                                    page.errorText = (data && (data.detail || data.error)) || "install failed"
-                                            })
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            // Release discovery — one shared card component per engine, same
+            // layout: backend filter + check/import row, error line, then
+            // release cards with asset rows.
+            ReleaseList {
+                engineTitle: "llama.cpp"
+                engineKind: ""
+                checking: page.checking
+                releases: page.releases
+                errorText: page.errorText
+                checkLabel: "Check for releases"
+                pageBackendFilter: page.backendFilter
+                onPageBackendFilterChanged: page.backendFilter = pageBackendFilter
+                onCheck: page.checkReleases()
+                onInstall: function(tag, asset, backend) { page.installRelease(tag, asset, backend, "") }
+                onImportCustom: importRuntimeDialog.open()
+            }
+
+            // stable-diffusion.cpp releases (image/video engine)
+            ReleaseList {
+                engineTitle: "stable-diffusion.cpp"
+                engineKind: "diffusion"
+                engineNote: "Image and video generator engine (SD · SDXL · FLUX · Wan). Same install pipeline as llama.cpp, including the Windows CUDA cudart bundle."
+                checking: page.checkingSD
+                releases: page.sdReleases
+                errorText: page.sdErrorText
+                checkLabel: "Check for sd.cpp releases"
+                pageBackendFilter: page.backendFilter
+                onPageBackendFilterChanged: page.backendFilter = pageBackendFilter
+                onCheck: page.checkSDReleases()
+                onInstall: function(tag, asset, backend) { page.installRelease(tag, asset, backend, "diffusion") }
+                onImportCustom: importRuntimeDialog.open()
             }
         }
     }
@@ -429,9 +396,9 @@ Item {
 
     FileDialog {
         id: importRuntimeDialog
-        title: "Select llama-server or archive"
+        title: "Select llama-server, sd-server, or archive"
         nameFilters: [
-            "llama-server or archive (llama-server* *.zip *.tar.gz *.tgz)",
+            "Server or archive (llama-server* sd-server* sd-cli* sd_cli* *.zip *.tar.gz *.tgz)",
             "All files (*)"
         ]
         onAccepted: page.api.post("/api/v1/runtimes/import",
