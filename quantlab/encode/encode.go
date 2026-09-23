@@ -175,6 +175,9 @@ func readFloat(src *tensorbank.Source, file *tensorbank.File, ti tensorbank.Tens
 
 // gptqCompensate applies block-GPTQ error feedback along each row using
 // activation sketches. The packer then RTN-quantizes the compensated weights.
+// When sketches are absent the Hessian is synthetic independent Gaussians,
+// whose off-diagonal terms are noise; error propagation is then diagonal-only
+// (each column's error is measured but not redistributed into neighbours).
 func gptqCompensate(w []float32, ne0 int, sketches [][]float32, imp []float32, d core.DType) {
 	if ne0 <= 0 || len(w)%ne0 != 0 || !qtype.PackSupported(d) {
 		return
@@ -195,8 +198,10 @@ func gptqCompensate(w []float32, ne0 int, sketches [][]float32, imp []float32, d
 				continue
 			}
 			if b+bs >= ne0 {
-				copy(blk, rec) // last block: keep reconstruction? No, keep compensated original for packer.
-				continue
+				continue // last block: nothing to propagate into
+			}
+			if len(sketches) == 0 {
+				continue // no Hessian: diagonal-only, never propagate noise
 			}
 			next := row[b+bs : b+2*bs]
 			for i := 0; i < bs; i++ {
