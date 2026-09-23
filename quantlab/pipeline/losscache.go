@@ -86,7 +86,11 @@ func (e *Engine) ingestSearchLossCache() error {
 	if c == nil {
 		c = profile.NewCache(bank.ModelID, bank.SHA256)
 	}
-	n, err := profile.IngestKLDHistory(c, e.Run.SearchHistory, e.Run.MoveGroups, e.Run.RunID, e.stamp())
+	elements := make(map[string]uint64, len(bank.Tensors))
+	for _, t := range bank.Tensors {
+		elements[t.Name] = t.Elements
+	}
+	n, err := profile.IngestKLDHistory(c, e.Run.SearchHistory, e.Run.MoveGroups, elements, e.Run.RunID, e.stamp())
 	if err != nil {
 		e.printf("  loss-cache: ingest skipped: %v\n", err)
 		return nil

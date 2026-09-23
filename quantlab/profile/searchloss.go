@@ -19,9 +19,12 @@ const (
 // IngestKLDHistory writes measured CandidateLoss entries from accepted KLD
 // search steps into c. Solo (and pair) promotions attribute the
 // incumbent-relative KLD improvement across the group's tensors at their To
-// dtypes. Unknown GroupIDs, empty history, and eval-error/scan/prune steps
-// are skipped. Returns the number of cache writes (including replacements).
-func IngestKLDHistory(c *Cache, history []kld.Step, groups []core.MoveGroup, runID string, at time.Time) (int, error) {
+// dtypes, normalized by element count so the stored loss is per-weight (the
+// same units EnumerateOptions multiplies back by lossScale). Unknown
+// GroupIDs, empty history, missing element counts, and
+// eval-error/scan/prune steps are skipped. Returns the number of cache
+// writes (including replacements).
+func IngestKLDHistory(c *Cache, history []kld.Step, groups []core.MoveGroup, elements map[string]uint64, runID string, at time.Time) (int, error) {
 	if c == nil || len(history) == 0 {
 		return 0, nil
 	}
@@ -90,10 +93,14 @@ func IngestKLDHistory(c *Cache, history []kld.Step, groups []core.MoveGroup, run
 			return moves[i].To < moves[j].To
 		})
 		for _, m := range moves {
+			nEl := elements[m.TensorName]
+			if nEl == 0 {
+				continue
+			}
 			cl := CandidateLoss{
 				TensorName: m.TensorName,
 				Target:     m.To,
-				Loss:       share,
+				Loss:       share / float64(nEl),
 				Evidence:   EvidenceMeasured,
 				Confidence: conf,
 				Prov:       &prov,

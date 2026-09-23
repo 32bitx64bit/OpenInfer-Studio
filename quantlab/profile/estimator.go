@@ -155,9 +155,41 @@ func NewFallbackEstimator(imatrix map[string]ImatrixStats) *FallbackEstimator {
 	return e
 }
 
+// realRelativeError maps each dtype to its measured importance-weighted
+// error ÷ Q3_K error, averaged over attn_q/attn_v/ffn_up/2×ffn_down on a
+// real BF16 model with imatrix (llama.cpp b11026). These ratios replace the
+// old 0.1·(8.5/bpw)² curve which was far too flat (it said Q6_K has 0.27×
+// the error of Q3_K when it is really 0.015×).
+var realRelativeError = map[core.DType]float64{
+	core.DTypeQ8_0:    0.0018,
+	core.DTypeQ6_K:    0.015,
+	core.DTypeQ5_1:    0.049,
+	core.DTypeQ5_K_T:  0.057,
+	core.DTypeQ5_0:    0.084,
+	core.DTypeQ4_1:    0.21,
+	core.DTypeQ4_K_T:  0.22,
+	core.DTypeIQ4_NL:  0.265,
+	core.DTypeIQ4_XS:  0.275,
+	core.DTypeQ4_0:    0.34,
+	core.DTypeIQ3_S:   0.82,
+	core.DTypeQ3_K:    1.00,
+	core.DTypeIQ3_XXS: 1.33,
+	core.DTypeIQ2_S:   2.80,
+	core.DTypeQ2_K:    2.90,
+	core.DTypeIQ2_XS:  3.80,
+	core.DTypeIQ2_XXS: 5.00,
+	core.DTypeIQ1_M:   8.3,
+	core.DTypeIQ1_S:   10.6,
+}
+
 // baseSeverity is the heuristic relative distortion of a dtype at unit
-// sensitivity: quadratic in the Q8_0/bpw ratio.
+// sensitivity. Dtypes in the measured table use 0.611 × ratio (0.611 is the
+// old formula's value at Q3_K, keeping Q3_K unchanged). Missing dtypes fall
+// back to the old quadratic bpw curve.
 func baseSeverity(d core.DType) float64 {
+	if r, ok := realRelativeError[d.BaseTensorType()]; ok {
+		return 0.611 * r
+	}
 	bpw, ok := d.BitsPerWeight()
 	if !ok || bpw <= 0 {
 		return 1
@@ -169,7 +201,8 @@ func baseSeverity(d core.DType) float64 {
 // codebookFactor is a small per-family multiplier so Pareto selection can
 // prefer IQ rungs on spiky / concentrated tensors and K-quants on regular
 // ones at similar bpw (CBMK-G), without pretending bits-per-weight is
-// quality. HEURISTIC.
+// quality. The flat-tensor baseline is neutral (1.0) because family
+// differences are now carried by the measured severity table.
 func codebookFactor(d core.DType, spikiness, entropy float64) float64 {
 	s := spikiness
 	if s < 1 {
@@ -184,11 +217,11 @@ func codebookFactor(d core.DType, spikiness, entropy float64) float64 {
 	// Concentrated importance (low entropy) is the Gini/outlier cue for IQ.
 	iqPref := math.Max(spikeNorm, conc)
 	if d.RequiresImatrix() {
-		// IQ: slight penalty when flat, discount when spiky/concentrated.
-		return 1.06 - 0.24*iqPref
+		// IQ: slight discount when spiky/concentrated, neutral when flat.
+		return 1.0 - 0.12*iqPref
 	}
-	// K-quant / legacy: slight preference when regular, mild penalty when spiky.
-	return 0.96 + 0.12*iqPref
+	// K-quant / legacy: slight preference when regular, neutral when flat.
+	return 1.0 + 0.06*iqPref
 }
 
 // depthFactor parses "blk.N." and decays sensitivity with depth; tensors

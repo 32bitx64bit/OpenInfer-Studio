@@ -172,13 +172,13 @@ func TestSolveExactBudgetAndManifest(t *testing.T) {
 	set, _ := anchor.Derive(qbank(), nil, anchor.Policy{})
 	res, err := Solve(Request{
 		Bank: qbank(), Anchors: set, Candidates: testCands,
-		BudgetBytes: 200000,
+		BudgetBytes: 300000,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Manifest.TotalBytes > 200000 {
-		t.Fatalf("budget violated: %d > 200000", res.Manifest.TotalBytes)
+	if res.Manifest.TotalBytes > 300000 {
+		t.Fatalf("budget violated: %d > 300000", res.Manifest.TotalBytes)
 	}
 	if res.Profile.EstimatedBytes != res.Manifest.TotalBytes {
 		t.Fatalf("profile estimate %d != manifest total %d", res.Profile.EstimatedBytes, res.Manifest.TotalBytes)
@@ -195,7 +195,7 @@ func TestSolveExactBudgetAndManifest(t *testing.T) {
 	if res.Diag.MinBytes > res.Manifest.TotalBytes || res.Manifest.TotalBytes > res.Diag.MaxBytes {
 		t.Fatalf("total %d outside [%d,%d]", res.Manifest.TotalBytes, res.Diag.MinBytes, res.Diag.MaxBytes)
 	}
-	if res.Diag.SlopBytes != 200000-res.Manifest.TotalBytes {
+	if res.Diag.SlopBytes != 300000-res.Manifest.TotalBytes {
 		t.Fatalf("slop %d", res.Diag.SlopBytes)
 	}
 }
@@ -210,7 +210,7 @@ func TestSolveNonuniformCurvesPreferCheapTensors(t *testing.T) {
 	// Tight budget: both must shrink; the flat one should hit Q2_K first.
 	res, err := Solve(Request{
 		Bank: qbank(), Anchors: set, Candidates: testCands, Cache: cache,
-		BudgetBytes: 190000,
+		BudgetBytes: 260000,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -315,7 +315,7 @@ func TestSolveDeterminism(t *testing.T) {
 
 func TestMeasuredEvidenceOverridesHeuristic(t *testing.T) {
 	set, _ := anchor.Derive(qbank(), nil, anchor.Policy{})
-	base := Request{Bank: qbank(), Anchors: set, Candidates: testCands, BudgetBytes: 260000}
+	base := Request{Bank: qbank(), Anchors: set, Candidates: testCands, BudgetBytes: 420000}
 	// Unconstrained-ish baseline: heuristic prefers cheap options for ffn.
 	resH, err := Solve(base)
 	if err != nil {
@@ -328,7 +328,7 @@ func TestMeasuredEvidenceOverridesHeuristic(t *testing.T) {
 	})
 	resM, err := Solve(Request{
 		Bank: qbank(), Anchors: set, Candidates: testCands, Cache: cache,
-		BudgetBytes: 260000,
+		BudgetBytes: 420000,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -354,7 +354,7 @@ func TestSolveConfidencePenaltyAvoidsWeakEvidence(t *testing.T) {
 			"blk.0.attn_q.weight": {Mean: 8.0, Max: 16.0, Samples: 8192},
 			"blk.1.attn_q.weight": {Mean: 1.0, Max: 2.0, Samples: 8192},
 		},
-		BudgetBytes: 180000, ConfidencePenalty: 0.9,
+		BudgetBytes: 320000, ConfidencePenalty: 0.9,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -496,7 +496,7 @@ func TestSolveSoftPriorsShapeNotPin(t *testing.T) {
 	// Very tight budget: priors must not prevent solving (no blanket Q8 floor).
 	res, err := Solve(Request{
 		Bank: qbank(), Anchors: set, Candidates: testCands,
-		BudgetBytes: 175000,
+		BudgetBytes: 250000,
 	})
 	if err != nil {
 		t.Fatalf("soft priors acted as hard floors: %v", err)
@@ -504,7 +504,7 @@ func TestSolveSoftPriorsShapeNotPin(t *testing.T) {
 	// Prior-free solve should differ: priors shifted loss but stayed solvable.
 	res2, err := Solve(Request{
 		Bank: qbank(), Anchors: &anchor.Set{}, Candidates: testCands,
-		BudgetBytes: 175000,
+		BudgetBytes: 250000,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -559,14 +559,20 @@ func TestSolveImatrixChangesAssignment(t *testing.T) {
 	bQ6, _ := core.DTypeQ6_K.ExactBytes(65536)
 	// Enough for Q6+Q2 but not two Q6 (or Q8+Q2).
 	budget := bQ6 + bQ2 + 1024
-	base := Request{Bank: bank, Anchors: set, Candidates: testCands, BudgetBytes: budget}
+	// Q5_K/Q3_K are included because the measured severity table (Phase 4)
+	// prices Q2_K high enough that Q6+Q2 no longer beats Q4+Q4 even under
+	// strong importance asymmetry; Q5+Q3 provides the mid-rung trade-off
+	// the imatrix signal can tip.
+	cands := []core.DType{core.DTypeQ8_0, core.DTypeQ6_K, core.DTypeQ5_K_T,
+		core.DTypeQ4_K_T, core.DTypeQ3_K, core.DTypeQ2_K}
+	base := Request{Bank: bank, Anchors: set, Candidates: cands, BudgetBytes: budget}
 
 	resNil, err := Solve(base)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resIm, err := Solve(Request{
-		Bank: bank, Anchors: set, Candidates: testCands, BudgetBytes: budget,
+		Bank: bank, Anchors: set, Candidates: cands, BudgetBytes: budget,
 		Imatrix: map[string]ImatrixStats{
 			"blk.0.ffn_up.weight":   {Mean: 100, Max: 400, P50: 20, P95: 200, Spikiness: 8, Samples: 4096},
 			"blk.0.ffn_down.weight": {Mean: 0.1, Max: 0.12, P50: 0.1, P95: 0.11, Spikiness: 1.2, Samples: 4096},

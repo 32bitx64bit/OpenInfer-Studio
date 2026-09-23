@@ -168,10 +168,15 @@ func TestIQPreferredOnLowEntropy(t *testing.T) {
 	}
 	td := weightTD("blk.2.ffn_down.weight", 256, 256)
 	est := NewFallbackEstimator(map[string]ImatrixStats{td.Name: st})
-	lK, _ := est.Estimate(td, core.DTypeQ4_K_T)
-	lIQ, _ := est.Estimate(td, core.DTypeIQ4_NL)
+	// IQ3_S vs Q3_K: the measured severity table already prices IQ3_S 18%
+	// below Q3_K at the same size, and the codebook factor reinforces that
+	// on concentrated tensors. IQ4_NL vs Q4_K is now neutral-to-slightly-
+	// negative in the measured table (0.265 vs 0.22) so the codebook nudge
+	// alone cannot flip it.
+	lK, _ := est.Estimate(td, core.DTypeQ3_K)
+	lIQ, _ := est.Estimate(td, core.DTypeIQ3_S)
 	if !(lIQ < lK) {
-		t.Fatalf("concentrated tensor: IQ4_NL loss %v should be below Q4_K %v", lIQ, lK)
+		t.Fatalf("concentrated tensor: IQ3_S loss %v should be below Q3_K %v", lIQ, lK)
 	}
 }
 
@@ -313,13 +318,17 @@ func TestIngestKLDHistoryWritesMeasuredCache(t *testing.T) {
 			{TensorName: "blk.0.ffn_down.weight", From: core.DTypeQ2_K, To: core.DTypeQ4_K_T},
 		},
 	}}
+	elements := map[string]uint64{
+		"blk.0.attn_v.weight":   1000,
+		"blk.0.ffn_down.weight": 3000,
+	}
 	hist := []kld.Step{
 		{Kind: "baseline", KLD: 1.0},
 		{Kind: "scan"},
 		{Kind: "eval-error", Error: "boom"},
 		{Kind: "solo", Accepted: true, KLD: 0.4, GroupIDs: []string{"g1"}},
 	}
-	n, err := IngestKLDHistory(c, hist, groups, "run-1", at)
+	n, err := IngestKLDHistory(c, hist, groups, elements, "run-1", at)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,10 +345,17 @@ func TestIngestKLDHistoryWritesMeasuredCache(t *testing.T) {
 	if cl.Confidence < 0.6 || cl.Confidence > 0.8 {
 		t.Fatalf("confidence %v, want 0.6–0.8", cl.Confidence)
 	}
-	if cl.Loss != 0.3 { // (1.0-0.4)/2
-		t.Fatalf("attributed loss %v, want 0.3", cl.Loss)
+	// Per-weight contract: (1.0-0.4)/2 shared over 2 moves = 0.3 per tensor
+	// total, stored divided by the tensor's element count so EnumerateOptions
+	// can multiply back by lossScale exactly once.
+	if diff := cl.Loss - 0.3/1000; diff > 1e-15 || diff < -1e-15 {
+		t.Fatalf("attributed loss %v, want %v (per-weight)", cl.Loss, 0.3/1000)
 	}
-	if _, err := IngestKLDHistory(c, nil, nil, "run-1", at); err != nil {
+	cl2, _ := c.Get("blk.0.ffn_down.weight", core.DTypeQ4_K_T)
+	if diff := cl2.Loss - 0.3/3000; diff > 1e-15 || diff < -1e-15 {
+		t.Fatalf("ffn_down loss %v, want %v (per-weight)", cl2.Loss, 0.3/3000)
+	}
+	if _, err := IngestKLDHistory(c, nil, nil, nil, "run-1", at); err != nil {
 		t.Fatal(err)
 	}
 }
