@@ -134,13 +134,68 @@ func ChooseAlpha(src *tensorbank.Source, clusters []Cluster,
 			continue
 		}
 		cl.Alpha = AlphaGrid[sel]
-		cl.Scales = scalesFor(ChannelImportance(imatrix, cl, shapesForCluster(file, cl)), cl.Alpha)
+		scales := scalesFor(ChannelImportance(imatrix, cl, shapesForCluster(file, cl)), cl.Alpha)
+		cl.Scales = clampScalesF16(src, file, cl, scales)
 		cl.ErrBefore = before
 		cl.ErrAfter = after
 		cl.Probe = probe
 		out = append(out, cl)
 	}
 	return out, nil
+}
+
+// f16MaxFinite is the largest finite IEEE half (65504); the safety clamp
+// stops at 60000 so a later multiply cannot round to Inf.
+const f16SafetyMax = 60000.0
+
+// clampScalesF16 limits each channel's fold scale so no F16 consumer weight
+// exceeds the finite half range after scaling. The clamped scale is what
+// Apply folds into the consumers, the norm, and the imatrix, so the cluster
+// stays exactly consistent. Consumers already in F32/BF16 need no clamp.
+func clampScalesF16(src *tensorbank.Source, file *tensorbank.File, cl Cluster, scales []float32) []float32 {
+	need := false
+	for _, name := range cl.Consumers {
+		if ti, ok := file.FindTensor(name); ok && ti.DType == core.DTypeF16 {
+			need = true
+			break
+		}
+	}
+	if !need {
+		return scales
+	}
+	maxAbs := make([]float64, len(scales))
+	for _, name := range cl.Consumers {
+		ti, ok := file.FindTensor(name)
+		if !ok || ti.DType != core.DTypeF16 {
+			continue
+		}
+		ne0 := ti.Shape[0]
+		rows := ti.Elements / ne0
+		rowBytes := ne0 * 2
+		buf := make([]byte, rowBytes)
+		for r := uint64(0); r < rows; r++ {
+			if _, err := src.ReadAt(buf, file.PayloadOffset(ti)+int64(r*rowBytes)); err != nil {
+				return scales
+			}
+			for c := uint64(0); c < ne0 && c < uint64(len(maxAbs)); c++ {
+				v := math.Abs(float64(f16ToF32(le16(buf[c*2:]))))
+				if v > maxAbs[c] {
+					maxAbs[c] = v
+				}
+			}
+		}
+	}
+	out := append([]float32(nil), scales...)
+	for c := range out {
+		if maxAbs[c] <= 0 {
+			continue
+		}
+		limit := f16SafetyMax / maxAbs[c]
+		if float64(out[c]) > limit {
+			out[c] = float32(limit)
+		}
+	}
+	return out
 }
 
 // shapesForCluster resolves the shape descriptors of a cluster's consumers.

@@ -191,9 +191,23 @@ func writeScalar(p []byte, d core.DType, v float64) {
 	case core.DTypeF32:
 		put32(p, math.Float32bits(float32(v)))
 	case core.DTypeF16:
+		// Never emit Inf/NaN: a channel whose scaled magnitude exceeds the
+		// F16 range is clamped to the largest finite half instead.
+		if math.IsNaN(v) {
+			v = 0
+		}
+		if v > 65504 {
+			v = 65504
+		} else if v < -65504 {
+			v = -65504
+		}
 		put16(p, qtype.F16Bits(float32(v)))
 	case core.DTypeBF16:
-		put16(p, uint16(math.Float32bits(float32(v))>>16))
+		f32 := float32(v)
+		if math.IsNaN(float64(f32)) {
+			f32 = 0
+		}
+		put16(p, uint16(math.Float32bits(f32)>>16))
 	}
 }
 

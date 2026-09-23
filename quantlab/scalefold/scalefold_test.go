@@ -172,7 +172,10 @@ func prod(s []uint64) uint64 {
 
 func TestDiscover(t *testing.T) {
 	_, bank := foldToyBank()
-	clusters := Discover(bank)
+	clusters, skipped := Discover(bank)
+	if len(skipped) != 0 {
+		t.Errorf("unexpected skipped norms: %v", skipped)
+	}
 	if len(clusters) != 2 {
 		t.Fatalf("want 2 clusters (attn + ffn), got %d: %+v", len(clusters), clusters)
 	}
@@ -402,5 +405,59 @@ func TestApplyImatrix(t *testing.T) {
 		if math.Abs(float64(got-want)) > 1e-5 {
 			t.Fatalf("in_sum2[%d] = %v, want %v", i, got, want)
 		}
+	}
+}
+
+// Gemma2/3's post_attention_norm (attention output) and Qwen3-Next's
+// post_ffw_norm must never form clusters: only attn_norm and ffn_norm are
+// input norms safe to fold.
+func TestDiscoverSkipsPostNorms(t *testing.T) {
+	D := uint64(256)
+	ts := map[string]struct {
+		Shape []uint64
+	}{
+		"blk.0.attn_norm.weight":           {[]uint64{D}},
+		"blk.0.post_attention_norm.weight": {[]uint64{D}},
+		"blk.0.ffn_norm.weight":            {[]uint64{D}},
+		"blk.0.post_ffw_norm.weight":       {[]uint64{D}},
+		"blk.0.attn_q.weight":              {[]uint64{D, 8}},
+		"blk.0.attn_v.weight":              {[]uint64{D, 8}},
+		"blk.0.ffn_gate.weight":            {[]uint64{D, 16}},
+		"blk.0.ffn_up.weight":              {[]uint64{D, 16}},
+	}
+	bank := &core.TensorBank{SourcePath: "toy", ModelID: "post-norm-test"}
+	for name, tv := range ts {
+		bank.Tensors = append(bank.Tensors, core.TensorDesc{
+			Name: name, DType: core.DTypeF32, Shape: append([]uint64(nil), tv.Shape...),
+			Elements: prod(tv.Shape), Length: prod(tv.Shape) * 4,
+		})
+	}
+	clusters, skipped := Discover(bank)
+	if len(clusters) != 2 {
+		t.Fatalf("want 2 clusters (attn_norm + ffn_norm), got %d: %+v", len(clusters), clusters)
+	}
+	for _, c := range clusters {
+		switch c.Norm {
+		case "blk.0.attn_norm.weight":
+			if len(c.Consumers) != 2 {
+				t.Errorf("attn_norm consumers = %v, want [attn_q attn_v]", c.Consumers)
+			}
+		case "blk.0.ffn_norm.weight":
+			if len(c.Consumers) != 2 {
+				t.Errorf("ffn_norm consumers = %v, want [ffn_gate ffn_up]", c.Consumers)
+			}
+		default:
+			t.Errorf("unexpected cluster norm %s", c.Norm)
+		}
+	}
+	wantSkipped := map[string]bool{"post_attention_norm": true, "post_ffw_norm": true}
+	for _, s := range skipped {
+		if !wantSkipped[s] {
+			t.Errorf("unexpected skipped norm %q", s)
+		}
+		delete(wantSkipped, s)
+	}
+	for s := range wantSkipped {
+		t.Errorf("norm %q not reported skipped", s)
 	}
 }

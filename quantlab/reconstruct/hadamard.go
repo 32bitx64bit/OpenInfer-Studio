@@ -43,7 +43,7 @@ func applyHadamard(ctx context.Context, src *tensorbank.Source, outPath string) 
 			Name: t.Name, DType: t.DType, Shape: t.Shape, Elements: t.Elements, Length: t.Length,
 		})
 	}
-	clusters := scalefold.Discover(bank)
+	clusters, _ := scalefold.Discover(bank)
 	if len(clusters) == 0 {
 		return hadamardResult{dim: d, reason: "no RMSNorm clusters to absorb γ"}, nil
 	}

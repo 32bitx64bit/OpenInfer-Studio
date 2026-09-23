@@ -113,11 +113,14 @@ func isWriteResidual(name string) bool {
 
 // ReadsResidual reports whether a model tensor (or its imatrix base name)
 // reads the residual stream and should have its input-channel importance
-// flattened after a residual Hadamard.
+// flattened after a residual Hadamard. This mirrors hadamard.kindOf's
+// right-rotation predicate exactly: residual readers, embeddings, and the
+// output head all have their ne0 Hadamard-rotated, so their imatrix
+// in_sum2 must be flattened too.
 func ReadsResidual(name string) bool {
 	name = strings.TrimSuffix(name, ".in_sum2")
 	name = strings.TrimSuffix(name, ".counts")
-	return isReadResidual(name)
+	return isReadResidual(name) || isEmbedding(name) || isOutputHead(name)
 }
 
 func residualWidth(file *tensorbank.File) int {

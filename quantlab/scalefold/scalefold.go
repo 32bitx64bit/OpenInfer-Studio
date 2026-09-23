@@ -78,17 +78,42 @@ func isNormTensor(t core.TensorDesc) bool {
 	return strings.HasSuffix(low, ".weight")
 }
 
-// clusterKind identifies which norm family a name belongs to: "attn" feeds
-// attention projections, "ffn"/"mlp" feed SwiGLU gate/up.
+// localStem is the layer-local norm identity ("attn_norm",
+// "post_attention_norm") after stripping any blk.N. prefix and the
+// .weight suffix.
+func localStem(name string) string {
+	n := strings.ToLower(name)
+	for _, pre := range []string{"blk.", "layers.", "layer."} {
+		i := strings.Index(n, pre)
+		if i < 0 {
+			continue
+		}
+		rest := n[i+len(pre):]
+		j := 0
+		for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+			j++
+		}
+		if j < len(rest) && rest[j] == '.' {
+			n = rest[j+1:]
+			break
+		}
+	}
+	return strings.TrimSuffix(n, ".weight")
+}
+
+// clusterKind identifies which norm family a name belongs to: "attn" is
+// exactly the attention input norm (stem "attn_norm"), "ffn" exactly the
+// FFN input norm (stem "ffn_norm"). Post-attention / post-FFN norms are
+// deliberately excluded: on Gemma2/3 they scale the attention *output* and
+// on Qwen3-Next "post_attention_norm" means pre-FFN, so looser name
+// matching folds scales into the wrong tensors and corrupts the model.
 func clusterKind(name string) string {
-	low := strings.ToLower(name)
-	switch {
-	case strings.Contains(low, "attn"), strings.Contains(low, "attention"):
+	switch localStem(name) {
+	case "attn_norm":
 		return "attn"
-	case strings.Contains(low, "ffn"), strings.Contains(low, "mlp"):
+	case "ffn_norm":
 		return "ffn"
 	}
-	// Neutral names (norm1, ln_1, ...): cannot attribute safely.
 	return ""
 }
 
@@ -129,19 +154,21 @@ func consumerKind(name string) string {
 	return "ffn"
 }
 
-// Discover finds fold clusters in the bank: for each 1-D norm weight with a
-// name-attributable family, all same-layer whitelisted projections whose
-// contiguous (input) dimension equals the norm length and whose payloads
-// are float. A consumer pair missing its norm (or vice versa) simply yields
-// no cluster.
+// Discover finds fold clusters in the bank: for each 1-D norm weight whose
+// layer-local stem is exactly attn_norm or ffn_norm, all same-layer
+// whitelisted projections whose contiguous (input) dimension equals the
+// norm length and whose payloads are float. It also returns the distinct
+// layer-local stems of skipped norms so callers can log them once. A
+// consumer pair missing its norm (or vice versa) simply yields no cluster.
 //
 // The result is independent of architecture details discovered by name
 // alone; no per-model configuration is required.
-func Discover(bank *core.TensorBank) []Cluster {
+func Discover(bank *core.TensorBank) ([]Cluster, []string) {
 	if bank == nil {
-		return nil
+		return nil, nil
 	}
 	byLayer := map[string][]core.TensorDesc{}
+	skipped := map[string]bool{}
 	for _, t := range bank.Tensors {
 		byLayer[layerPrefix(t.Name)] = append(byLayer[layerPrefix(t.Name)], t)
 	}
@@ -168,6 +195,7 @@ func Discover(bank *core.TensorBank) []Cluster {
 		for _, n := range norms {
 			kind := clusterKind(n.Name)
 			if kind == "" {
+				skipped[localStem(n.Name)] = true
 				continue
 			}
 			var cl Cluster
@@ -185,7 +213,12 @@ func Discover(bank *core.TensorBank) []Cluster {
 			out = append(out, cl)
 		}
 	}
-	return out
+	var skipList []string
+	for s := range skipped {
+		skipList = append(skipList, s)
+	}
+	sort.Strings(skipList)
+	return out, skipList
 }
 
 // channelImportanceOne builds the per-input-channel importance vector for

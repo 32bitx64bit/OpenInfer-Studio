@@ -167,11 +167,17 @@ func (e *Engine) stageFold(ctx context.Context) error {
 	}
 	probe := core.DTypeQ4_K_T
 	if e.DryRun {
-		clusters := scalefold.Discover(e.Run.Bank)
+		clusters, skipped := scalefold.Discover(e.Run.Bank)
 		e.printf("plan: scale-fold, %d clusters discovered\n", len(clusters))
+		if len(skipped) > 0 {
+			e.printf("plan: scale-fold: skipped norms %v\n", skipped)
+		}
 		return nil
 	}
-	clusters := scalefold.Discover(e.Run.Bank)
+	clusters, skipped := scalefold.Discover(e.Run.Bank)
+	if len(skipped) > 0 {
+		e.printf("  scale-fold: skipped norms %v\n", skipped)
+	}
 	if len(clusters) == 0 {
 		e.printf("  scale-fold: no eligible norm/consumer clusters; skipped\n")
 		return nil
