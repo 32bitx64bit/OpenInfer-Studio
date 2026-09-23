@@ -216,7 +216,10 @@ func TestUnsupportedType(t *testing.T) {
 	}
 }
 
-func TestIQ3SBeatsQ3KOnSpikyBlock(t *testing.T) {
+// The corrected Q3_K fit (llama.cpp make_qx_quants) must track
+// high-importance outliers instead of collapsing them; the previous min/max
+// reference produced ~18x the weighted error on this block.
+func TestQ3KFitsSpikyBlock(t *testing.T) {
 	block := make([]float32, 256)
 	imp := make([]float32, 256)
 	for i := range block {
@@ -228,24 +231,21 @@ func TestIQ3SBeatsQ3KOnSpikyBlock(t *testing.T) {
 		imp[i*32] = 20
 	}
 	q3 := append([]float32(nil), block...)
-	iq := append([]float32(nil), block...)
-	e3, err := QuantizeDequant(core.DTypeQ3_K, q3, imp)
-	if err != nil {
+	if _, err := QuantizeDequant(core.DTypeQ3_K, q3, imp); err != nil {
 		t.Fatal(err)
 	}
-	ei, err := QuantizeDequant(core.DTypeIQ3_S, iq, imp)
-	if err != nil {
-		t.Fatal(err)
+	for i := 0; i < 8; i++ {
+		if got := math.Abs(float64(q3[i*32]) - 3); got > 0.5 {
+			t.Errorf("outlier %d reconstructed as %v, want within 0.5 of 3", i, q3[i*32])
+		}
 	}
-	var w3, wi float64
+	var w3 float64
 	for i := range block {
 		d3 := float64(block[i]) - float64(q3[i])
-		di := float64(block[i]) - float64(iq[i])
 		w3 += float64(imp[i]) * d3 * d3
-		wi += float64(imp[i]) * di * di
 	}
-	if wi > w3 {
-		t.Errorf("IQ3_S weighted sse %v (unweighted %v) should beat Q3_K %v (%v) on outlier block", wi, ei, w3, e3)
+	if w3 > 1.0 {
+		t.Errorf("weighted Q3_K sse %v > 1.0; the fit lost the outliers", w3)
 	}
 }
 
@@ -258,5 +258,82 @@ func BenchmarkQ6KBlock(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		blockRoundTrip(core.DTypeQ6_K, block, nil)
+	}
+}
+
+// IQ4_XS shares IQ4_NL's nonlinear levels but snaps each 32-element
+// sub-block scale through a 6-bit quantization of the f16 super-scale, so
+// its round-trip error on a random block is never below IQ4_NL's.
+func TestIQ4XSNotBetterThanIQ4NL(t *testing.T) {
+	rng := rand.New(rand.NewSource(11))
+	for trial := 0; trial < 8; trial++ {
+		block := make([]float32, 256)
+		for i := range block {
+			block[i] = float32(rng.NormFloat64()) * float32(1+rng.Float64())
+		}
+		imp := make([]float32, 256)
+		for i := range imp {
+			imp[i] = float32(0.5 + rng.Float64())
+		}
+		xs := append([]float32(nil), block...)
+		nl := append([]float32(nil), block...)
+		eXS, err := QuantizeDequant(core.DTypeIQ4_XS, xs, imp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// IQ4_NL quantizes 32-element blocks; compare on the same data.
+		var eNL float64
+		for off := 0; off < 256; off += 32 {
+			part := append([]float32(nil), nl[off:off+32]...)
+			e, err := QuantizeDequant(core.DTypeIQ4_NL, part, imp[off:off+32])
+			if err != nil {
+				t.Fatal(err)
+			}
+			eNL += e
+		}
+		if eXS < eNL*0.999 {
+			t.Fatalf("trial %d: IQ4_XS error %g < IQ4_NL %g", trial, eXS, eNL)
+		}
+	}
+}
+
+// WeightedError must equal the weighted SSE computed from QuantizeDequant
+// on a copy. The old implementation aliased its staging block with the
+// workspace scratch the search helpers overwrite (measured up to 95x wrong
+// for Q8_0).
+func TestWeightedErrorMatchesQuantizeDequant(t *testing.T) {
+	rng := rand.New(rand.NewSource(23))
+	const n = 256 * 3
+	src := make([]float32, n)
+	imp := make([]float32, n)
+	for i := range src {
+		src[i] = float32(rng.NormFloat64())
+		imp[i] = float32(0.25 + rng.Float64()*2)
+	}
+	for _, d := range SupportedTypes() {
+		got, err := WeightedError(d, src, imp)
+		if err != nil {
+			t.Fatalf("%s: %v", d, err)
+		}
+		work := append([]float32(nil), src...)
+		bs := BlockSize(d)
+		var want float64
+		for off := 0; off < n; off += bs {
+			blk := append([]float32(nil), work[off:off+bs]...)
+			if _, err := QuantizeDequant(d, blk, imp[off:off+bs]); err != nil {
+				t.Fatalf("%s: %v", d, err)
+			}
+			for i := range blk {
+				e := float64(src[off+i]) - float64(blk[i])
+				want += float64(imp[off+i]) * e * e
+			}
+		}
+		diff := got - want
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff > 1e-9*(1+want) {
+			t.Errorf("%s: WeightedError %g != QuantizeDequant SSE %g", d, got, want)
+		}
 	}
 }

@@ -5,7 +5,7 @@ import (
 )
 
 // scaleGrid multipliers around the reference scale: the deterministic
-// importance-weighted search set.
+// importance-weighted search set used by the IQ nonlinear grids.
 var scaleGrid = [...]float64{0.9, 1.0, 1.1}
 
 func weightedSSE(src, rec []float32, imp []float32) float64 {
@@ -23,92 +23,6 @@ func weightedSSE(src, rec []float32, imp []float32) float64 {
 		s += float64(imp[i]) * e * e
 	}
 	return s
-}
-
-// searchSymmetric finds the scale d minimizing importance-weighted error
-// over the grid, reconstructing into rec with fn(d). Reconstruction values
-// lie on d*level for integer levels within +/-maxLevel.
-func searchSymmetric(src, rec, imp []float32, maxLevel float64, ws *Workspace, fn func(d float64, out []float32)) float64 {
-	amax := 0.0
-	for _, v := range src {
-		if a := math.Abs(float64(v)); a > amax {
-			amax = a
-		}
-	}
-	if amax == 0 {
-		fn(0, rec)
-		return weightedSSE(src, rec, imp)
-	}
-	base := amax / maxLevel
-	best := math.Inf(1)
-	bestD := base
-	var scratch []float32
-	if ws != nil {
-		scratch = ws.scratch[:len(rec)]
-	} else {
-		scratch = make([]float32, len(rec))
-	}
-	for _, f := range scaleGrid {
-		d := base * f
-		if d <= 0 {
-			continue
-		}
-		fn(d, scratch)
-		if s := weightedSSE(src, scratch, imp); s < best {
-			best = s
-			bestD = d
-		}
-	}
-	fn(bestD, rec)
-	return best
-}
-
-// searchAffine finds (d, m) minimizing importance-weighted error for the
-// grid m + d*level, level in [0, 2^bits-1]. m candidates sit at or below
-// the block minimum so the level range covers the data.
-func searchAffine(src, rec, imp []float32, bits int, ws *Workspace, fn func(d, m float64, out []float32)) float64 {
-	mn, mx := math.Inf(1), math.Inf(-1)
-	for _, v := range src {
-		if float64(v) < mn {
-			mn = float64(v)
-		}
-		if float64(v) > mx {
-			mx = float64(v)
-		}
-	}
-	levels := math.Pow(2, float64(bits)) - 1
-	if !(mx-mn > 0) || levels == 0 {
-		fn(0, mn, rec)
-		for i := range rec {
-			rec[i] = float32(mn)
-		}
-		return weightedSSE(src, rec, imp)
-	}
-	baseD := (mx - mn) / levels
-	best := math.Inf(1)
-	bestD, bestM := baseD, mn
-	var scratch []float32
-	if ws != nil {
-		scratch = ws.scratch[:len(rec)]
-	} else {
-		scratch = make([]float32, len(rec))
-	}
-	for _, f := range scaleGrid {
-		d := baseD * f
-		if d <= 0 {
-			continue
-		}
-		for _, mo := range [...]float64{0, 0.5, 1.0} {
-			m := mn - mo*d*0.5
-			fn(d, m, scratch)
-			if s := weightedSSE(src, scratch, imp); s < best {
-				best = s
-				bestD, bestM = d, m
-			}
-		}
-	}
-	fn(bestD, bestM, rec)
-	return best
 }
 
 // clampRound is nearest_int with clamping: round-half-away-from-zero,
@@ -129,140 +43,313 @@ func clampRound(x float64, lo, hi int) int {
 	return int(v)
 }
 
-// q8_0rt: d (f16) + 32 int8 levels; reconstruction d*q, q in [-127,127].
+// Legacy Q4_0/Q4_1/Q5_0/Q5_1/Q8_0 reference codecs.
+//
+// Q8_0 mirrors quantize_row_q8_0_ref exactly and ignores importance (real
+// llama-quantize uses plain RTN for Q8_0 even with an imatrix). Q4_0/Q5_0
+// use makeQXQuants (rmse_type 1) and Q4_1/Q5_1 use makeQKX3Quants with
+// importance-derived weights weight[j] = imp[j]*sqrt(sigma2 + x[j]^2) where
+// sigma2 is the mean square of the whole row — matching llama-quantize's
+// quantize_row_q*_impl. With imp == nil the simple _ref min/max quantizers
+// are reproduced instead. Row-aware entry points carry the row length so
+// sigma2 spans the right window.
+
+// rowSigma2 returns the mean square of one row of weights.
+func rowSigma2(src []float32) float64 {
+	if len(src) == 0 {
+		return 0
+	}
+	var s float64
+	for _, v := range src {
+		s += float64(v) * float64(v)
+	}
+	return s / float64(len(src))
+}
+
+// legacyWeights builds the per-element fit weight
+// imp[j]*sqrt(sigma2 + x[j]^2) used by the *_impl quantizers.
+func legacyWeights(src, imp []float32, sigma2 float64) []float32 {
+	w := make([]float32, len(src))
+	for j, x := range src {
+		w[j] = imp[j] * float32(math.Sqrt(sigma2+float64(x)*float64(x)))
+	}
+	return w
+}
+
+// q8_0rt mirrors quantize_row_q8_0_ref and ignores importance.
 func q8_0rt(src, imp []float32, ws *Workspace) float64 {
-	var rec [32]float32
-	sse := searchSymmetric(src[:], rec[:], imp, 127, ws, func(d float64, out []float32) {
-		df := f16rt(float32(d))
-		id := 0.0
-		if d != 0 {
-			id = 1 / float64(df)
+	_ = imp
+	_ = ws
+	amax := 0.0
+	for _, v := range src {
+		if a := math.Abs(float64(v)); a > amax {
+			amax = a
 		}
-		for i, v := range src {
-			q := clampRound(float64(v)*id, -127, 127)
-			out[i] = float32(df * float32(q))
+	}
+	if amax < groupMaxEps {
+		for i := range src {
+			src[i] = 0
 		}
-	})
-	copy(src, rec[:])
+		return 0
+	}
+	d := amax / 127
+	id := 0.0
+	if d != 0 {
+		id = 1 / d
+	}
+	df := float64(f16rt(float32(d)))
+	var sse float64
+	for i, v := range src {
+		q := clampRound(float64(v)*id, -127, 127)
+		rec := df * float64(q)
+		src[i] = float32(rec)
+		e := float64(v) - rec
+		sse += e * e
+	}
 	return sse
 }
 
+// q4_0Ref mirrors quantize_row_q4_0_ref: one min/max scale per block.
+func q4_0Ref(src []float32) float64 {
+	amax, max := 0.0, 0.0
+	for _, v := range src {
+		if a := math.Abs(float64(v)); a > amax {
+			amax, max = a, float64(v)
+		}
+	}
+	if amax < groupMaxEps {
+		for i := range src {
+			src[i] = 0
+		}
+		return 0
+	}
+	d := max / -8
+	id := 0.0
+	if d != 0 {
+		id = 1 / d
+	}
+	df := float64(f16rt(float32(d)))
+	var sse float64
+	for i, v := range src {
+		n := int(float64(v)*id + 8.5)
+		if n < 0 {
+			n = 0
+		}
+		if n > 15 {
+			n = 15
+		}
+		rec := df * float64(n-8)
+		src[i] = float32(rec)
+		e := float64(v) - rec
+		sse += e * e
+	}
+	return sse
+}
+
+// q5_0Ref mirrors quantize_row_q5_0_ref.
+func q5_0Ref(src []float32) float64 {
+	amax, max := 0.0, 0.0
+	for _, v := range src {
+		if a := math.Abs(float64(v)); a > amax {
+			amax, max = a, float64(v)
+		}
+	}
+	if amax < groupMaxEps {
+		for i := range src {
+			src[i] = 0
+		}
+		return 0
+	}
+	d := max / -16
+	id := 0.0
+	if d != 0 {
+		id = 1 / d
+	}
+	df := float64(f16rt(float32(d)))
+	var sse float64
+	for i, v := range src {
+		n := int(float64(v)*id + 16.5)
+		if n < 0 {
+			n = 0
+		}
+		if n > 31 {
+			n = 31
+		}
+		rec := df * float64(n-16)
+		src[i] = float32(rec)
+		e := float64(v) - rec
+		sse += e * e
+	}
+	return sse
+}
+
+// q4_1Ref mirrors quantize_row_q4_1_ref: min/max affine per block.
+func q4_1Ref(src []float32) float64 {
+	mn, mx := math.Inf(1), math.Inf(-1)
+	for _, v := range src {
+		fv := float64(v)
+		if fv < mn {
+			mn = fv
+		}
+		if fv > mx {
+			mx = fv
+		}
+	}
+	if mn > 0 {
+		mn = 0
+	}
+	if !(mx-mn > 0) {
+		for i := range src {
+			src[i] = float32(mn)
+		}
+		return 0
+	}
+	d := (mx - mn) / 15
+	id := 0.0
+	if d != 0 {
+		id = 1 / d
+	}
+	df, mf := float64(f16rt(float32(d))), float64(f16rt(float32(mn)))
+	var sse float64
+	for i, v := range src {
+		n := int((float64(v)-mn)*id + 0.5)
+		if n < 0 {
+			n = 0
+		}
+		if n > 15 {
+			n = 15
+		}
+		rec := df*float64(n) + mf
+		src[i] = float32(rec)
+		e := float64(v) - rec
+		sse += e * e
+	}
+	return sse
+}
+
+// q5_1Ref mirrors quantize_row_q5_1_ref.
+func q5_1Ref(src []float32) float64 {
+	mn, mx := math.Inf(1), math.Inf(-1)
+	for _, v := range src {
+		fv := float64(v)
+		if fv < mn {
+			mn = fv
+		}
+		if fv > mx {
+			mx = fv
+		}
+	}
+	if mn > 0 {
+		mn = 0
+	}
+	if !(mx-mn > 0) {
+		for i := range src {
+			src[i] = float32(mn)
+		}
+		return 0
+	}
+	d := (mx - mn) / 31
+	id := 0.0
+	if d != 0 {
+		id = 1 / d
+	}
+	df, mf := float64(f16rt(float32(d))), float64(f16rt(float32(mn)))
+	var sse float64
+	for i, v := range src {
+		n := int((float64(v)-mn)*id + 0.5)
+		if n < 0 {
+			n = 0
+		}
+		if n > 31 {
+			n = 31
+		}
+		rec := df*float64(n) + mf
+		src[i] = float32(rec)
+		e := float64(v) - rec
+		sse += e * e
+	}
+	return sse
+}
+
+// blockSigma2 returns the row mean-square for the current block: the
+// workspace's row-level value when available, else the block's own mean
+// square (the correct window when a caller processes one block at a time).
+func blockSigma2(src []float32, ws *Workspace) float64 {
+	if ws != nil && ws.rowSigma2 > 0 {
+		return ws.rowSigma2
+	}
+	return rowSigma2(src)
+}
+
 // q4_0rt: d (f16) + nibbles; reconstruction d*(n-8), n in [0,15].
-// Dequant reads qs[j]&0xF -> y[j], qs[j]>>4 -> y[j+16].
 func q4_0rt(src, imp []float32, ws *Workspace) float64 {
-	var rec [32]float32
-	sse := searchSymmetric(src[:], rec[:], imp, 8, ws, func(d float64, out []float32) {
-		df := f16rt(float32(d))
-		id := 0.0
-		if d != 0 {
-			id = 1 / float64(df)
-		}
-		var qs [16]byte
-		for j := 0; j < 16; j++ {
-			x0 := float64(src[j]) * id
-			x1 := float64(src[j+16]) * id
-			n0 := clampRound(x0+8, 0, 15)
-			n1 := clampRound(x1+8, 0, 15)
-			qs[j] = byte(n0) | byte(n1)<<4
-		}
-		for j := 0; j < 16; j++ {
-			out[j] = float32(df) * float32(int(qs[j]&0xF)-8)
-			out[j+16] = float32(df) * float32(int(qs[j]>>4)-8)
-		}
-	})
-	copy(src, rec[:])
+	if imp == nil {
+		return q4_0Ref(src)
+	}
+	w := legacyWeights(src, imp, blockSigma2(src, ws))
+	scale, L := makeQXQuants(src, 8, w)
+	d := float64(f16rt(float32(scale)))
+	var sse float64
+	for i, v := range src {
+		rec := d * float64(L[i]-8)
+		src[i] = float32(rec)
+		e := float64(v) - rec
+		sse += float64(imp[i]) * e * e
+	}
+	return sse
+}
+
+// q5_0rt: d (f16) + qh bits, nibbles; reconstruction d*((n)-16),
+// level in [-16,15].
+func q5_0rt(src, imp []float32, ws *Workspace) float64 {
+	if imp == nil {
+		return q5_0Ref(src)
+	}
+	w := legacyWeights(src, imp, blockSigma2(src, ws))
+	scale, L := makeQXQuants(src, 16, w)
+	d := float64(f16rt(float32(scale)))
+	var sse float64
+	for i, v := range src {
+		rec := d * float64(L[i]-16)
+		src[i] = float32(rec)
+		e := float64(v) - rec
+		sse += float64(imp[i]) * e * e
+	}
 	return sse
 }
 
 // q4_1rt: d, m (f16) + nibbles; reconstruction n*d + m, n in [0,15].
 func q4_1rt(src, imp []float32, ws *Workspace) float64 {
-	var rec [32]float32
-	sse := searchAffine(src[:], rec[:], imp, 4, ws, func(d, m float64, out []float32) {
-		df, mf := f16rt(float32(d)), f16rt(float32(m))
-		id := 0.0
-		if d != 0 {
-			id = 1 / float64(df)
-		}
-		var qs [16]byte
-		for j := 0; j < 16; j++ {
-			n0 := clampRound((float64(src[j])-float64(mf))*id, 0, 15)
-			n1 := clampRound((float64(src[j+16])-float64(mf))*id, 0, 15)
-			qs[j] = byte(n0) | byte(n1)<<4
-		}
-		for j := 0; j < 16; j++ {
-			out[j] = float32(df)*float32(qs[j]&0xF) + mf
-			out[j+16] = float32(df)*float32(qs[j]>>4) + mf
-		}
-	})
-	copy(src, rec[:])
+	if imp == nil {
+		return q4_1Ref(src)
+	}
+	w := legacyWeights(src, imp, blockSigma2(src, ws))
+	scale, min, L := makeQKX3Quants(src, w, 15, -0.9, 0.05, 36, false)
+	df, mf := float64(f16rt(float32(scale))), float64(f16rt(float32(min)))
+	var sse float64
+	for i, v := range src {
+		rec := df*float64(L[i]) + mf
+		src[i] = float32(rec)
+		e := float64(v) - rec
+		sse += float64(imp[i]) * e * e
+	}
 	return sse
 }
 
-// q5_0rt: d (f16), qh bits, nibbles; reconstruction d*((n|hb<<4)-16),
-// level in [-16,15].
-func q5_0rt(src, imp []float32, ws *Workspace) float64 {
-	var rec [32]float32
-	sse := searchSymmetric(src[:], rec[:], imp, 16, ws, func(d float64, out []float32) {
-		df := f16rt(float32(d))
-		id := 0.0
-		if d != 0 {
-			id = 1 / float64(df)
-		}
-		var qs [16]byte
-		var qh2 [4]byte
-		for j := 0; j < 16; j++ {
-			n0 := clampRound(float64(src[j])*id+16, 0, 31)
-			n1 := clampRound(float64(src[j+16])*id+16, 0, 31)
-			qs[j] = byte(n0&0xF) | byte(n1&0xF)<<4
-			if n0&0x10 != 0 {
-				qh2[j/8] |= 1 << (j % 8)
-			}
-			if n1&0x10 != 0 {
-				qh2[(j+16)/8] |= 1 << ((j + 16) % 8)
-			}
-		}
-		qhBits := uint32(qh2[0]) | uint32(qh2[1])<<8 | uint32(qh2[2])<<16 | uint32(qh2[3])<<24
-		for j := 0; j < 16; j++ {
-			xh0 := uint8((qhBits>>uint(j+0))<<4) & 0x10
-			xh1 := uint8((qhBits >> uint(j+12))) & 0x10
-			out[j] = float32(df) * float32(int32((qs[j]&0xF)|xh0)-16)
-			out[j+16] = float32(df) * float32(int32((qs[j]>>4)|xh1)-16)
-		}
-	})
-	copy(src, rec[:])
-	return sse
-}
-
-// q5_1rt: d, m (f16), qh, nibbles; reconstruction d*(n|hb<<4) + m.
+// q5_1rt: d, m (f16), qh, nibbles; reconstruction d*n + m.
 func q5_1rt(src, imp []float32, ws *Workspace) float64 {
-	var rec [32]float32
-	sse := searchAffine(src[:], rec[:], imp, 5, ws, func(d, m float64, out []float32) {
-		df, mf := f16rt(float32(d)), f16rt(float32(m))
-		id := 0.0
-		if d != 0 {
-			id = 1 / float64(df)
-		}
-		var qs [16]byte
-		var qh2 [4]byte
-		for j := 0; j < 16; j++ {
-			n0 := clampRound((float64(src[j])-float64(mf))*id, 0, 31)
-			n1 := clampRound((float64(src[j+16])-float64(mf))*id, 0, 31)
-			qs[j] = byte(n0&0xF) | byte(n1&0xF)<<4
-			if n0&0x10 != 0 {
-				qh2[j/8] |= 1 << (j % 8)
-			}
-			if n1&0x10 != 0 {
-				qh2[(j+16)/8] |= 1 << ((j + 16) % 8)
-			}
-		}
-		qhBits := uint32(qh2[0]) | uint32(qh2[1])<<8 | uint32(qh2[2])<<16 | uint32(qh2[3])<<24
-		for j := 0; j < 16; j++ {
-			xh0 := uint8((qhBits>>uint(j+0))<<4) & 0x10
-			xh1 := uint8((qhBits >> uint(j+12))) & 0x10
-			out[j] = float32(df)*float32((qs[j]&0xF)|xh0) + mf
-			out[j+16] = float32(df)*float32((qs[j]>>4)|xh1) + mf
-		}
-	})
-	copy(src, rec[:])
+	if imp == nil {
+		return q5_1Ref(src)
+	}
+	w := legacyWeights(src, imp, blockSigma2(src, ws))
+	scale, min, L := makeQKX3Quants(src, w, 31, -0.9, 0.05, 36, false)
+	df, mf := float64(f16rt(float32(scale))), float64(f16rt(float32(min)))
+	var sse float64
+	for i, v := range src {
+		rec := df*float64(L[i]) + mf
+		src[i] = float32(rec)
+		e := float64(v) - rec
+		sse += float64(imp[i]) * e * e
+	}
 	return sse
 }

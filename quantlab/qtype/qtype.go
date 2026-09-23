@@ -1,13 +1,15 @@
-// Package qtype provides format-faithful reference implementations of the
-// GGUF per-tensor block quantization formats: quantize a block of weights
-// into the on-disk layout, dequantize it back, and measure the
-// importance-weighted squared error the format induces.
+// Package qtype provides reference implementations of the GGUF per-tensor
+// block quantization formats: quantize a block of weights into the on-disk
+// layout, dequantize it back, and measure the importance-weighted squared
+// error the format induces.
 //
-// The layouts and dequantization semantics mirror ggml-quants.c. K/legacy
-// types choose per-block scales by a small deterministic importance-weighted
-// grid search rather than llama.cpp's iterative refinement. IQ4_NL and IQ4_XS
-// round-trip through the packed f16 / 6-bit scale and int8 NL table so the
-// exact-loss table matches llama-quantize reconstruction for those formats.
+// The layouts and dequantization semantics mirror ggml-quants.c. K types
+// mirror llama.cpp's weighted scale/min fits (make_qx_quants,
+// make_qkx3_quants, make_qp_quants), so their rung ratios match what
+// llama-quantize actually writes. Legacy Q4_0/Q4_1/Q5_0/Q5_1 use a small
+// deterministic importance-weighted grid search, and the IQ types use
+// reduced codebooks with one scale per sub-block; IQ ratios are therefore
+// approximate and must not be treated as exact.
 //
 // Only per-tensor base types are supported; recipe labels are not.
 package qtype
@@ -23,10 +25,10 @@ import (
 func BlockSize(d core.DType) int {
 	switch d.BaseTensorType() {
 	case core.DTypeQ8_0, core.DTypeQ8_1, core.DTypeQ4_0, core.DTypeQ4_1,
-		core.DTypeQ5_0, core.DTypeQ5_1, core.DTypeIQ4_NL, core.DTypeIQ4_XS:
+		core.DTypeQ5_0, core.DTypeQ5_1, core.DTypeIQ4_NL:
 		return 32
 	case core.DTypeQ2_K, core.DTypeQ3_K, core.DTypeQ4_K_T, core.DTypeQ5_K_T,
-		core.DTypeQ6_K, core.DTypeQ8_K,
+		core.DTypeQ6_K, core.DTypeQ8_K, core.DTypeIQ4_XS,
 		core.DTypeIQ3_S, core.DTypeIQ3_XXS, core.DTypeIQ2_S, core.DTypeIQ2_XS,
 		core.DTypeIQ2_XXS:
 		return 256
@@ -100,6 +102,25 @@ func QuantizeDequantWS(d core.DType, src, imp []float32, ws *Workspace) (float64
 }
 
 func quantizeDequant(d core.DType, src, imp []float32, ws *Workspace) (float64, error) {
+	return quantizeDequantRows(d, src, imp, len(src), ws)
+}
+
+// QuantizeDequantRows is QuantizeDequant with an explicit row length ne0
+// (GGUF ne0). Legacy types compute their fit weights from the row's mean
+// square, so the row window matters. ne0 must divide len(src).
+func QuantizeDequantRows(d core.DType, src, imp []float32, ne0 int) (float64, error) {
+	ws := NewWorkspace(d)
+	defer ws.Release()
+	return quantizeDequantRows(d, src, imp, ne0, ws)
+}
+
+// QuantizeDequantRowsWS is QuantizeDequantRows with a caller-owned reusable
+// workspace.
+func QuantizeDequantRowsWS(d core.DType, src, imp []float32, ne0 int, ws *Workspace) (float64, error) {
+	return quantizeDequantRows(d, src, imp, ne0, ws)
+}
+
+func quantizeDequantRows(d core.DType, src, imp []float32, ne0 int, ws *Workspace) (float64, error) {
 	bs := BlockSize(d)
 	if bs == 0 {
 		return 0, fmt.Errorf("qtype: no reference quantizer for %s", d)
@@ -110,12 +131,20 @@ func quantizeDequant(d core.DType, src, imp []float32, ws *Workspace) (float64, 
 	if imp != nil && len(imp) != len(src) {
 		return 0, fmt.Errorf("qtype: importance length %d != elements %d", len(imp), len(src))
 	}
+	if ne0 <= 0 || ne0 > len(src) || len(src)%ne0 != 0 {
+		return 0, fmt.Errorf("qtype: row length %d incompatible with %d elements", ne0, len(src))
+	}
 	if ws != nil {
 		ws.ensure(bs)
 	}
 	var sse float64
-	for off := 0; off < len(src); off += bs {
-		sse += blockRoundTripWS(d, src[off:off+bs], impSlice(imp, off, bs), ws)
+	for rowOff := 0; rowOff < len(src); rowOff += ne0 {
+		if ws != nil && imp != nil {
+			ws.rowSigma2 = rowSigma2(src[rowOff : rowOff+ne0])
+		}
+		for off := rowOff; off < rowOff+ne0; off += bs {
+			sse += blockRoundTripWS(d, src[off:off+bs], impSlice(imp, off, bs), ws)
+		}
 	}
 	return sse, nil
 }
@@ -142,11 +171,17 @@ func WeightedError(d core.DType, src, imp []float32) (float64, error) {
 	}
 	ws := NewWorkspace(d)
 	defer ws.Release()
-	work := ws.block(d)
+	// Own buffer: blockRoundTripWS and the legacy search helpers share
+	// ws.scratch for trial reconstructions, so aliasing the block through it
+	// would compare the block against itself.
+	work := ws.work[:bs]
 	var sum float64
 	for off := 0; off < len(src); off += bs {
 		copy(work, src[off:off+bs])
 		w := imp[off : off+bs]
+		// Set the row window explicitly so legacy *_impl weights see the
+		// same sigma2 QuantizeDequant would compute for this block.
+		ws.rowSigma2 = rowSigma2(src[off : off+bs])
 		blockRoundTripWS(d, work, w, ws)
 		for i, q := range work {
 			e := float64(src[off+i]) - float64(q)
@@ -170,7 +205,13 @@ type Workspace struct {
 	scratch []float32
 	best    []float32
 	trial   []float32
-	pool    *workspacePool
+	// work is the private staging block for WeightedError. Nothing else
+	// touches it, so it never aliases scratch's trial reconstructions.
+	work []float32
+	// rowSigma2 is the mean square of the row currently being quantized,
+	// used by the legacy *_impl weight construction.
+	rowSigma2 float64
+	pool      *workspacePool
 }
 
 type workspacePool struct {
@@ -202,9 +243,13 @@ func (w *Workspace) ensure(bs int) {
 		w.best = make([]float32, bs)
 		w.trial = make([]float32, bs)
 	}
+	if cap(w.work) < bs {
+		w.work = make([]float32, bs)
+	}
 	w.scratch = w.scratch[:bs]
 	w.best = w.best[:bs]
 	w.trial = w.trial[:bs]
+	w.work = w.work[:bs]
 }
 
 func (w *Workspace) block(d core.DType) []float32 {

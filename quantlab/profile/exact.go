@@ -315,7 +315,7 @@ func exactTensorLoss(ctx context.Context, src *tensorbank.Source, t core.TensorD
 				return nil, err
 			}
 			copy(qrt[:ne0*n], row[:ne0*n])
-			if _, err := qtype.QuantizeDequantWS(d, qrt[:ne0*n], imp[:ne0*n], ws); err != nil {
+			if _, err := qtype.QuantizeDequantRowsWS(d, qrt[:ne0*n], imp[:ne0*n], int(ne0), ws); err != nil {
 				return nil, err
 			}
 			var sse float64
