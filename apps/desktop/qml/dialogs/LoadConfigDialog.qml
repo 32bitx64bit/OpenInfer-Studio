@@ -11,6 +11,7 @@ import "../components"
 Dialog {
     id: root
     property var api
+    property var events
     property string modelId: ""
     property var model: null
     property var runtimes: []
@@ -18,7 +19,10 @@ Dialog {
 
     signal loaded()
 
-    title: model ? ("Load — " + (model.alias || model.id)) : "Load model"
+    title: {
+        if (!model) return "Load model"
+        return "Load — " + (model.alias || model.id)
+    }
     modal: true
     width: Math.min(680, parent ? parent.width - 64 : 680)
     height: Math.min(720, parent ? parent.height - 48 : 720)
@@ -68,6 +72,17 @@ Dialog {
     property string loadError: ""
     property var draftCandidates: []
     property bool draftFiltered: true
+    // sd.cpp load panel state (diffusion models only).
+    property var sdRuntimes: []
+    property var sdSettings: ({})
+    property string sdLoadError: ""
+    property bool sdStarting: false
+    property bool sdServerRunning: false
+    property var sdComponents: []
+    property string sdSourceRepo: ""
+    property int sdMissingCount: 0
+    property double sdMissingBytes: 0
+    property bool sdFetching: false
     readonly property bool hasProjector: root.model && root.model.projector_path !== ""
     readonly property bool isEmbedding: !!(root.model && root.model.metadata
         && (root.model.metadata.is_embedding || root.model.metadata.is_reranker))
@@ -75,6 +90,24 @@ Dialog {
         && root.model.metadata.is_reranker)
     readonly property bool speculativeEnabled: !!(root.settings.draft_model && root.settings.draft_model !== "")
             || !!(root.settings.spec_type && root.settings.spec_type !== "")
+    // Image/video checkpoints (sd.cpp) get their own panel. SD-GGUF rows
+    // carry diffusion_kind/sd_family; block-diffusion LMs (DiffusionGemma,
+    // bare is_diffusion) stay on the LLM path.
+    readonly property bool isImageGen: {
+        if (!root.model) return false
+        var meta = root.model.metadata || {}
+        if (root.model.modality === "diffusion" || meta.modality === "diffusion") return true
+        if (meta.diffusion_kind || meta.sd_family) return true
+        if (meta.is_diffusion) return false
+        var path = String(root.model.primary_path || root.model.alias || "").toLowerCase()
+        var fams = ["qwen-image", "qwen_image", "flux", "sdxl", "sd-xl",
+                    "stable-diffusion", "stable_diffusion", "chroma", "z-image",
+                    "wan2", "wan-2", "wanx", "ltx", "hunyuanvideo", "hunyuan-video"]
+        for (var i = 0; i < fams.length; i++) {
+            if (path.indexOf(fams[i]) >= 0) return true
+        }
+        return false
+    }
     readonly property bool hasMTP: {
         if (root.isEmbedding) return false
         if (!root.model || !root.model.metadata) return false
@@ -133,6 +166,12 @@ Dialog {
     function openFor(m) {
         model = m
         modelId = m.id
+        // sd.cpp panel for image/video checkpoints; LLM panel otherwise.
+        root.sdLoadError = ""
+        if (root.isImageGen) {
+            root.openForDiffusion(m)
+            return
+        }
         // Reassign the whole settings object so QML bindings refresh. Mutating
         // keys in place does not notify FormFields still bound to the previous model.
         var meta = m.metadata || {}
@@ -229,11 +268,239 @@ Dialog {
         scheduleRefresh()
     }
 
+    // --- sd.cpp (image/video) load panel ---------------------------------
+    function sdDefaultSettings(m) {
+        return {
+            "threads": 0,
+            "vae": "", "taesd": "", "esrgan": "", "control_net": "",
+            "llm": "", "llm_vision": "", "t5xxl": "",
+            "clip_l": "", "clip_g": "", "clip_vision": "", "tokenizer": "",
+            "lora_model_dir": "",
+            "flash_attention": true, "vae_tiling": true, "temporal_tiling": false,
+            "weight_type": "", "vae_format": "",
+            "backend": "", "params_backend": "",
+            "max_vram": "", "auto_fit": "", "offload_to_cpu": false,
+            "mmap": false, "eager_load": false,
+            "diffusion_conv_direct": false, "vae_conv_direct": false,
+            "raw_args": "",
+            "runtime_id": (m && m.pinned_runtime) || "",
+            "save_on_success": true
+        }
+    }
+
+    function openForDiffusion(m) {
+        var next = root.sdDefaultSettings(m)
+        root.sdSettings = next
+        root.sdLoadError = ""
+        root.sdStarting = false
+        root.sdServerRunning = false
+        root.sdComponents = []
+        root.sdSourceRepo = ""
+        root.sdMissingCount = 0
+        root.sdMissingBytes = 0
+        root.sdFetching = false
+        root.sdFetchDownloadId = ""
+        root.preview = null
+        root.estimate = null
+        root.api.get("/api/v1/runtimes", function(st, data) {
+            if (st === 200) root.sdRuntimes = (data && data.runtimes) || []
+        })
+        // Prefill from the "Last known good" preset, else the default preset,
+        // else sdDefaultSettings — exactly like the LLM openFor path.
+        root.presets = []
+        api.get("/api/v1/models/" + m.id + "/presets", function(st, data) {
+            if (st !== 200 || root.modelId !== m.id) return
+            root.presets = (data && data.presets) || []
+            var applied = false
+            for (var i = 0; i < root.presets.length; i++) {
+                if (root.presets[i].name === "Last known good") {
+                    root.applySDPreset(root.presets[i])
+                    applied = true
+                    break
+                }
+            }
+            if (!applied) {
+                for (var j = 0; j < root.presets.length; j++) {
+                    if (root.presets[j].is_default) { root.applySDPreset(root.presets[j]); break }
+                }
+            }
+            root.refreshDiffusion()
+        })
+        open()
+        root.refreshDiffusion()
+    }
+
+    function applySDPreset(p) {
+        try {
+            var incoming = JSON.parse(JSON.stringify(p.settings || {}))
+            var s = root.sdDefaultSettings(root.model)
+            for (var k in incoming) s[k] = incoming[k]
+            root.sdSettings = s
+            root.refreshDiffusion()
+        } catch (e) {}
+    }
+
+    function setSDSetting(key, value) {
+        var s = Object.assign({}, root.sdSettings)
+        s[key] = value
+        root.sdSettings = s
+        sdRefreshTimer.restart()
+    }
+
+    function sdRuntimeChoices() {
+        var sd = (root.sdRuntimes || []).filter(function(r) {
+            var exe = String((r.executable_path || "")).toLowerCase()
+            return exe.indexOf("sd-server") >= 0 || exe.indexOf("sd_cli") >= 0
+                || exe.indexOf("sd-cli") >= 0
+                || ((r.capabilities || []).indexOf("listen-port") >= 0
+                    && (r.build || "").toLowerCase().indexOf("stable-diffusion") >= 0)
+        })
+        return [{ "id": "", "build": "Auto (sd.cpp)", "backend": "", "architecture": "" }].concat(sd)
+    }
+
+    function sdRuntimeIndex() {
+        var id = root.sdSettings.runtime_id || ""
+        var m = root.sdRuntimeChoices()
+        for (var i = 0; i < m.length; i++) {
+            if ((m[i].id || "") === id) return i
+        }
+        return 0
+    }
+
+    function refreshDiffusion() {
+        if (!modelId || !root.isImageGen) return
+        var mid = modelId
+        root.api.post("/api/v1/models/" + mid + "/preview", root.sdSettings, function(st, data) {
+            if (st !== 200 || root.modelId !== mid) return
+            root.preview = data
+            root.sdComponents = (data && data.components) || []
+            root.sdSourceRepo = (data && data.source_repo) || ""
+            root.sdMissingCount = (data && data.components_missing) || 0
+            root.sdMissingBytes = (data && data.components_missing_bytes) || 0
+        })
+        root.api.post("/api/v1/models/" + mid + "/estimate", root.sdSettings, function(st, data) {
+            if (st === 200 && root.modelId === mid) root.estimate = data
+        })
+    }
+
+    // Queue the missing pipeline companions (VAE / text encoders) from the
+    // source repo. The normal download pipeline runs them into the managed
+    // tree; the dialog auto-starts the server once they land. Only OUR
+    // download's completion triggers the start — another model's download
+    // finishing must not.
+    property string sdFetchDownloadId: ""
+    function fetchMissingComponents() {
+        if (root.sdMissingCount <= 0 || root.sdSourceRepo === "") return
+        var files = []
+        for (var i = 0; i < root.sdComponents.length; i++) {
+            var c = root.sdComponents[i]
+            if (c.status === "missing" && (c.repo_path || "") !== "") {
+                files.push({ "path": c.repo_path, "size": c.size || 0 })
+            }
+        }
+        if (files.length === 0) return
+        root.sdLoadError = ""
+        root.sdFetching = true
+        root.sdFetchDownloadId = ""
+        root.api.post("/api/v1/downloads", {
+            "kind": "model",
+            "label": root.sdSourceRepo + " pipeline components",
+            "repo": root.sdSourceRepo,
+            "group": "components",
+            "files": files
+        }, function(st, data) {
+            if (st !== 201) {
+                root.sdFetching = false
+                root.sdLoadError = (data && (data.detail || data.error)) || ("HTTP " + st)
+                return
+            }
+            root.sdFetchDownloadId = (data && data.id) || ""
+        })
+    }
+
+    function loadDiffusion() {
+        root.sdLoadError = ""
+        // Model weights load for minutes, so behave exactly like the LLM
+        // "Load model": answer 202, emit loaded() and close at once. The
+        // Library and Image Studio show starting/ready/failed from
+        // GET /media/servers and the media.server_state events.
+        root.api.post("/api/v1/models/" + root.modelId + "/media/server/start", root.sdSettings,
+            function(st, data) {
+                if (st === 200 && data && data.state === "running") {
+                    // Already up — settle at once.
+                    root.sdServerRunning = true
+                    root.sdStarting = false
+                    root.loaded()
+                    root.close()
+                    return
+                }
+                if (st === 200 || st === 202) {
+                    root.sdStarting = true
+                    root.loaded()
+                    root.close()
+                    return
+                }
+                // Synchronous 4xx: surface in the footer like the LLM path.
+                root.sdLoadError = (data && (data.detail || data.error)) || ("HTTP " + st)
+            })
+    }
+
+
+
+    // Ready/error events for the in-flight sd-server launch.
+    Connections {
+        target: root.events
+        function onEventReceived(name, payload) {
+            if (name === "download.state_changed" && root.sdFetching && payload) {
+                // React only to the download we queued — any other model's
+                // download completing must not start a diffusion launch.
+                if (root.sdFetchDownloadId !== "" && (payload.id || "") !== root.sdFetchDownloadId) return
+                if (payload.state === "complete") {
+                    // Companions landed — re-detect and start, but only if
+                    // this dialog is still open for that model.
+                    root.sdFetching = false
+                    root.sdFetchDownloadId = ""
+                    if (!root.visible || !root.isImageGen || !root.modelId) return
+                    root.refreshDiffusion()
+                    root.loadDiffusion()
+                } else if (payload.state === "failed" || payload.state === "canceled") {
+                    root.sdFetching = false
+                    root.sdFetchDownloadId = ""
+                    root.sdLoadError = "Component download " + payload.state
+                        + ((payload.error || "") !== "" ? ": " + payload.error : "")
+                }
+                return
+            }
+            if (!payload || (payload.model_id || "") !== root.modelId) return
+            if (name === "media.server_ready") {
+                root.sdStarting = false
+                root.sdServerRunning = true
+                if (root.isImageGen) {
+                    root.loaded()
+                    root.close()
+                }
+            } else if (name === "media.server_error") {
+                root.sdStarting = false
+                root.sdServerRunning = false
+                root.sdLoadError = payload.error || "diffusion server failed to start"
+            } else if (name === "media.server_stopped") {
+                root.sdStarting = false
+                root.sdServerRunning = false
+            }
+        }
+    }
+    // --- end sd.cpp panel -------------------------------------------------
+
     // Debounced refresh of preview + estimate on any settings change.
     Timer {
         id: refreshTimer
         interval: 350
         onTriggered: root.refreshNow()
+    }
+    Timer {
+        id: sdRefreshTimer
+        interval: 350
+        onTriggered: root.refreshDiffusion()
     }
     function scheduleRefresh() { refreshTimer.restart() }
 
@@ -348,37 +615,11 @@ Dialog {
                 width: root.width - AppTheme.pad * 2 - 60
                 spacing: AppTheme.gap
 
-                // Corrupt-file warning
-                Label {
-                    Layout.fillWidth: true
-                    visible: root.model && root.model.metadata && root.model.metadata.tensor_errors
-                        && root.model.metadata.tensor_errors.length > 0
-                    text: "⚠ This model file failed integrity validation: "
-                        + (root.model ? (root.model.metadata.tensor_errors || []).join("; ") : "")
-                        + "\nLoading will very likely fail. Re-download or pick another quantization."
-                    color: AppTheme.danger
-                    wrapMode: Text.WordWrap
-                }
-
-                Label {
-                    Layout.fillWidth: true
-                    visible: root.isEmbedding
-                    text: root.isReranker
-                          ? "This is a reranker model. It serves ranking via embeddings mode (pooling=rank), not Chat."
-                          : "This is an embedding model. It serves /v1/embeddings, not Chat."
-                    color: AppTheme.info
-                    wrapMode: Text.WordWrap
-                    padding: 8
-                    background: Rectangle {
-                        color: AppTheme.surface
-                        border.color: AppTheme.border
-                        radius: AppTheme.radius
-                    }
-                }
-
-                // Memory estimate
+                // Memory estimate (shared by the LLM and sd.cpp panels —
+                // both return the same instances.Estimate shape).
                 Card {
                     Layout.fillWidth: true
+                    visible: !!root.estimate
                     implicitHeight: estCol.implicitHeight + 20
                     ColumnLayout {
                         id: estCol
@@ -405,7 +646,6 @@ Dialog {
 
                         // GPU VRAM row
                         ColumnLayout {
-                            Layout.fillWidth: true
                             spacing: 2
                             visible: root.estimate && (root.estimate.gpu_budget_bytes > 0
                                      || root.estimate.gpu_bytes > 0
@@ -434,7 +674,6 @@ Dialog {
                                 }
                             }
                             AppProgressBar {
-                                Layout.fillWidth: true
                                 Layout.preferredHeight: 8
                                 from: 0; to: 1
                                 value: {
@@ -448,7 +687,6 @@ Dialog {
 
                         // System RAM row
                         ColumnLayout {
-                            Layout.fillWidth: true
                             spacing: 2
                             visible: !!root.estimate
                             RowLayout {
@@ -480,7 +718,6 @@ Dialog {
                                 }
                             }
                             AppProgressBar {
-                                Layout.fillWidth: true
                                 Layout.preferredHeight: 8
                                 from: 0; to: 1
                                 value: {
@@ -496,7 +733,6 @@ Dialog {
                         }
 
                         Label {
-                            Layout.fillWidth: true
                             text: {
                                 if (!root.estimate) return ""
                                 var e = root.estimate
@@ -506,7 +742,10 @@ Dialog {
                                     parts.push("draft " + AppTheme.bytes(e.draft_weights_bytes))
                                 if ((e.projector_bytes || 0) > 0)
                                     parts.push("mmproj " + AppTheme.bytes(e.projector_bytes))
-                                parts.push("KV " + AppTheme.bytes(e.kv_cache_bytes || 0))
+                                // Diffusion pipelines have no KV cache — only
+                                // show the line when the estimator produced one.
+                                if ((e.kv_cache_bytes || 0) > 0)
+                                    parts.push("KV " + AppTheme.bytes(e.kv_cache_bytes))
                                 if ((e.recurrent_bytes || 0) > 0)
                                     parts.push("recurrent " + AppTheme.bytes(e.recurrent_bytes))
                                 parts.push("compute " + AppTheme.bytes(e.compute_bytes || 0))
@@ -526,7 +765,6 @@ Dialog {
                         }
                         Label {
                             visible: root.estimate && !root.estimate.fits
-                            Layout.fillWidth: true
                             text: {
                                 if (!root.estimate) return ""
                                 var bits = []
@@ -540,6 +778,38 @@ Dialog {
                             font.pixelSize: AppTheme.fontSmall
                             wrapMode: Text.WordWrap
                         }
+                    }
+                }
+
+                ColumnLayout {
+                spacing: AppTheme.gap
+                visible: !root.isImageGen
+
+                // Corrupt-file warning
+                Label {
+                    Layout.fillWidth: true
+                    visible: root.model && root.model.metadata && root.model.metadata.tensor_errors
+                        && root.model.metadata.tensor_errors.length > 0
+                    text: "⚠ This model file failed integrity validation: "
+                        + (root.model ? (root.model.metadata.tensor_errors || []).join("; ") : "")
+                        + "\nLoading will very likely fail. Re-download or pick another quantization."
+                    color: AppTheme.danger
+                    wrapMode: Text.WordWrap
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    visible: root.isEmbedding
+                    text: root.isReranker
+                          ? "This is a reranker model. It serves ranking via embeddings mode (pooling=rank), not Chat."
+                          : "This is an embedding model. It serves /v1/embeddings, not Chat."
+                    color: AppTheme.info
+                    wrapMode: Text.WordWrap
+                    padding: 8
+                    background: Rectangle {
+                        color: AppTheme.surface
+                        border.color: AppTheme.border
+                        radius: AppTheme.radius
                     }
                 }
 
@@ -1419,6 +1689,243 @@ Dialog {
                         }
                     }
                 }
+                }
+
+            // --- sd.cpp (image/video) panel --------------------------------
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: AppTheme.gap
+                visible: root.isImageGen
+
+                Label {
+                    Layout.fillWidth: true
+                    text: {
+                        var fam = root.model && root.model.metadata ? (root.model.metadata.sd_family || "") : ""
+                        var kind = root.model && root.model.metadata ? (root.model.metadata.diffusion_kind || "") : ""
+                        var bits = ["This is an image/video generator checkpoint (stable-diffusion.cpp)."]
+                        if (fam !== "" || kind !== "")
+                            bits.push("Detected: " + (fam !== "" ? fam : "generator") + (kind !== "" ? " · " + kind : "") + ".")
+                        bits.push("It starts an sd-server for Image Studio — it is not a chat model and cannot load into llama-server.")
+                        return bits.join(" ")
+                    }
+                    color: AppTheme.info
+                    wrapMode: Text.WordWrap
+                    padding: 8
+                    background: Rectangle {
+                        color: AppTheme.surface
+                        border.color: AppTheme.border
+                        radius: AppTheme.radius
+                    }
+                }
+
+                // Presets (same storage as the LLM loader: per-model settings
+                // objects, prefilled from Last known good / the default).
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: root.presets.length > 0
+                    Label { text: "Preset:"; color: AppTheme.textDim }
+                    AppComboBox {
+                        Layout.fillWidth: true
+                        model: root.presets
+                        textRole: "name"
+                        onActivated: function(i) { root.applySDPreset(root.presets[i]) }
+                    }
+                }
+
+                // Pipeline companions: transformer-only checkpoints need a
+                // VAE + text encoder(s) beside the weights. Ready ones are
+                // paired into the command automatically; missing ones can be
+                // fetched from the source repo.
+                Card {
+                    Layout.fillWidth: true
+                    visible: root.sdComponents.length > 0
+                    implicitHeight: sdCompCol.implicitHeight + 20
+                    ColumnLayout {
+                        id: sdCompCol
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        spacing: 4
+                        RowLayout {
+                            Label {
+                                text: "Pipeline components"
+                                color: AppTheme.textDim
+                                font.pixelSize: AppTheme.fontSmall
+                            }
+                            Item { Layout.fillWidth: true }
+                            Label {
+                                visible: root.sdMissingCount > 0
+                                text: root.sdMissingCount + " missing"
+                                color: AppTheme.warning
+                                font.pixelSize: AppTheme.fontSmall
+                                font.weight: Font.DemiBold
+                            }
+                        }
+                        Repeater {
+                            model: root.sdComponents
+                            delegate: RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Tag {
+                                    text: modelData.status === "ready" ? "ready" : "missing"
+                                    tone: modelData.status === "ready" ? AppTheme.success : AppTheme.warning
+                                }
+                                Label {
+                                    text: modelData.label
+                                    color: AppTheme.text
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                }
+                                Label {
+                                    text: modelData.status === "ready" ? "" : AppTheme.bytes(modelData.size || 0)
+                                    color: AppTheme.textFaint
+                                    font.pixelSize: AppTheme.fontSmall
+                                }
+                            }
+                        }
+                    }
+                }
+
+                FormField {
+                    Layout.fillWidth: true
+                    label: "Runtime"
+                    hint: "stable-diffusion.cpp build. Auto uses the pinned or any installed sd.cpp runtime."
+                    AppComboBox {
+                        width: parent.width
+                        model: root.sdRuntimeChoices()
+                        textRole: "build"
+                        currentIndex: root.sdRuntimeIndex()
+                        onActivated: function(i) {
+                            root.setSDSetting("runtime_id", model[i].id || "")
+                        }
+                        delegate: ItemDelegate {
+                            text: modelData.id === "" ? modelData.build
+                                : modelData.build + " · " + modelData.backend + " · " + modelData.architecture
+                            width: parent ? parent.width : implicitWidth
+                        }
+                    }
+                }
+                Label {
+                    visible: root.sdRuntimeChoices().length <= 1
+                    Layout.fillWidth: true
+                    text: "No stable-diffusion.cpp runtime installed yet — install one from the Runtimes page first."
+                    color: AppTheme.warning
+                    wrapMode: Text.WordWrap
+                }
+
+                FormField {
+                    Layout.fillWidth: true
+                    label: "Weight type"
+                    hint: "Runtime conversion on load (f16 default). q8_0 / q4_0 save VRAM."
+                    AppComboBox {
+                        width: parent.width
+                        model: ["", "f16", "f32", "q8_0", "q5_0", "q5_1", "q4_0", "q4_1"]
+                        currentIndex: {
+                            var wt = String(root.sdSettings.weight_type || "")
+                            var idx = model.indexOf(wt)
+                            return idx >= 0 ? idx : 0
+                        }
+                        onActivated: function(i) { root.setSDSetting("weight_type", model[i]) }
+                    }
+                }
+
+                FormField {
+                    Layout.fillWidth: true
+                    label: "Threads (0 = auto)"
+                    AppSpinBox {
+                        width: parent.width
+                        from: 0; to: 256; stepSize: 1; editable: true
+                        value: root.sdSettings.threads || 0
+                        onValueModified: root.setSDSetting("threads", value)
+                    }
+                }
+
+                FormField {
+                    Layout.fillWidth: true
+                    label: "Max VRAM budget"
+                    hint: "Optional per-device budget, e.g. 8 (GiB). Empty = runtime default."
+                    AppTextField {
+                        width: parent.width
+                        placeholderText: "e.g. 8"
+                        text: root.sdSettings.max_vram || ""
+                        onEditingFinished: root.setSDSetting("max_vram", text.trim())
+                    }
+                }
+
+                FormField {
+                    Layout.fillWidth: true
+                    label: "Memory savers"
+                    hint: "Flash attention and VAE tiling cut VRAM on large outputs."
+                    ColumnLayout {
+                        width: parent.width
+                        spacing: 4
+                        AppCheckBox {
+                            text: "Flash attention (--diffusion-fa / --fa)"
+                            checked: !!root.sdSettings.flash_attention
+                            onToggled: root.setSDSetting("flash_attention", checked)
+                        }
+                        AppCheckBox {
+                            text: "VAE tiling (large images)"
+                            checked: !!root.sdSettings.vae_tiling
+                            onToggled: root.setSDSetting("vae_tiling", checked)
+                        }
+                        AppCheckBox {
+                            text: "Temporal tiling (video)"
+                            checked: !!root.sdSettings.temporal_tiling
+                            onToggled: root.setSDSetting("temporal_tiling", checked)
+                        }
+                        AppCheckBox {
+                            text: "Offload weights to CPU (slow, saves VRAM)"
+                            checked: !!root.sdSettings.offload_to_cpu
+                            onToggled: root.setSDSetting("offload_to_cpu", checked)
+                        }
+                    }
+                }
+
+                FormField {
+                    Layout.fillWidth: true
+                    label: "Standalone VAE"
+                    hint: "Optional .safetensors VAE override. Empty = bundled VAE."
+                    AppTextField {
+                        width: parent.width
+                        placeholderText: "/path/to/vae.safetensors"
+                        text: root.sdSettings.vae || ""
+                        onEditingFinished: root.setSDSetting("vae", text.trim())
+                    }
+                }
+
+                // Command preview (sd-server argv)
+                Card {
+                    Layout.fillWidth: true
+                    visible: !!root.preview
+                    implicitHeight: sdPrevCol.implicitHeight + 20
+                    ColumnLayout {
+                        id: sdPrevCol
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        spacing: 4
+                        Label { text: "Command"; color: AppTheme.textDim; font.pixelSize: AppTheme.fontSmall }
+                        TextEdit {
+                            Layout.fillWidth: true
+                            readOnly: true
+                            selectByMouse: true
+                            wrapMode: Text.WrapAnywhere
+                            text: root.preview ? (root.preview.command || "") : ""
+                            color: AppTheme.text
+                            font.family: "monospace"
+                            font.pixelSize: AppTheme.fontSmall
+                        }
+                    }
+                }
+
+                Label {
+                    visible: root.sdLoadError !== ""
+                    Layout.fillWidth: true
+                    text: root.sdLoadError
+                    color: AppTheme.danger
+                    wrapMode: Text.WordWrap
+                }
+            }
+            // --- end sd.cpp panel -------------------------------------------
             }
         }
 
@@ -1448,6 +1955,7 @@ Dialog {
                     Item { Layout.fillWidth: true }
                     AppButton { text: "Cancel"; onClicked: root.close() }
                     AppButton {
+                        visible: !root.isImageGen
                         readonly property bool overBudget: !!(root.estimate && !root.estimate.fits)
                         text: overBudget ? "Load anyway" : "Load model"
                         primary: !overBudget
@@ -1465,6 +1973,52 @@ Dialog {
                                         root.loadError = (data && (data.detail || data.error)) || ("HTTP " + st)
                                     }
                                 })
+                        }
+                    }
+                    AppButton {
+                        visible: root.isImageGen && root.sdFetching
+                        text: "Downloading components…"
+                        primary: true
+                        enabled: false
+                    }
+                    AppButton {
+                        visible: root.isImageGen && !root.sdFetching && root.sdMissingCount > 0
+                            && !root.sdStarting && !root.sdServerRunning
+                        text: "Download " + root.sdMissingCount + " missing ("
+                            + AppTheme.bytes(root.sdMissingBytes) + ")"
+                        primary: true
+                        onClicked: root.fetchMissingComponents()
+                    }
+                    AppButton {
+                        visible: root.isImageGen && !root.sdFetching && !root.sdStarting && !root.sdServerRunning
+                        readonly property bool overBudget: !!(root.estimate && root.estimate.fits === false)
+                        text: root.sdMissingCount > 0 ? "Load anyway"
+                            : (overBudget ? "Load anyway" : "Load model")
+                        primary: root.sdMissingCount <= 0 && !overBudget
+                        danger: root.sdMissingCount > 0 || overBudget
+                        ToolTip.visible: hovered && (root.sdMissingCount > 0 || overBudget)
+                        ToolTip.text: root.sdMissingCount > 0
+                            ? "Pipeline components are still missing — the server will refuse to start until they are downloaded."
+                            : "Estimate exceeds detected memory. Load anyway if you know this machine can handle it."
+                        onClicked: {
+                            root.sdLoadError = ""
+                            root.loadDiffusion()
+                        }
+                    }
+                    AppButton {
+                        visible: root.isImageGen && root.sdStarting
+                        text: "Loading model…"
+                        primary: true
+                        enabled: false
+                    }
+                    AppButton {
+                        visible: root.isImageGen && root.sdServerRunning
+                        text: "Stop image server"
+                        onClicked: {
+                            root.api.post("/api/v1/models/" + root.modelId + "/media/server/stop", {}, function() {
+                                root.sdServerRunning = false
+                                root.sdStarting = false
+                            })
                         }
                     }
                 }
