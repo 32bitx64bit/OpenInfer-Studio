@@ -61,7 +61,7 @@ func ParseHelp(tool Tool, path, help string) Capabilities {
 		return r == ' ' || r == '\t' || r == '\n' || r == ',' || r == '|' || r == '[' || r == ']'
 	}) {
 		d := core.DType(tok)
-		if d.Valid() && d.IsQuant() && !seen[tok] {
+		if d.Valid() && (d.IsQuant() || d.IsFloat()) && !seen[tok] {
 			seen[tok] = true
 			c.Types = append(c.Types, tok)
 		}

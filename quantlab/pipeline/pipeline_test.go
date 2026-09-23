@@ -263,7 +263,7 @@ func fakeQuantizeGGUF(t *testing.T, in, out string, target core.DType, pure bool
 const fakeQuantizeHelp = `usage: fake-quantize [options] <in> <out> <type> [threads]
 options:
  --imatrix FILE
- --tensor-type FILE
+ --tensor-type-file FILE
  --output-tensor-type TYPE
  --token-embedding-type TYPE
  --pure
@@ -381,7 +381,7 @@ func (f *fakeRunner) Run(ctx context.Context, iv orchestrate.Invocation) (orches
 func parseQuantizeArgv(argv []string) (in, out string, dtype core.DType, dry, pure bool) {
 	var pos []string
 	valueFlags := map[string]bool{
-		"--imatrix": true, "--tensor-type": true,
+		"--imatrix": true, "--tensor-type-file": true,
 		"--output-tensor-type": true, "--token-embedding-type": true,
 	}
 	for i := 0; i < len(argv); i++ {

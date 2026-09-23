@@ -69,7 +69,7 @@ func TestHelperProcess(t *testing.T) {
 	case "help":
 		fmt.Print(`usage: llama-quantize [options] model-f32.gguf [model-quant.gguf] type [nthreads]
   --imatrix file
-  --tensor-type file
+  --tensor-type-file file
   --output-tensor-type type
   --token-embedding-type type
   --keep-split

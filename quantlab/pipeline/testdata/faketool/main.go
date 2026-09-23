@@ -35,7 +35,7 @@ const help = `usage: faketool [options]
  --kl-divergence
  --kl-divergence-base FILE
  --imatrix FILE
- --tensor-type FILE
+ --tensor-type-file FILE
  --output-tensor-type TYPE
  --token-embedding-type TYPE
  --pure
@@ -112,7 +112,7 @@ func perplexity(args []string) error {
 
 func quantize(args []string) error {
 	valueFlags := map[string]bool{
-		"--imatrix": true, "--tensor-type": true,
+		"--imatrix": true, "--tensor-type-file": true,
 		"--output-tensor-type": true, "--token-embedding-type": true,
 	}
 	dry := false

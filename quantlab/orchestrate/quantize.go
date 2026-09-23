@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -19,8 +20,10 @@ type QuantizeRequest struct {
 	SourcePath string     `json:"sourcePath"`
 	OutputPath string     `json:"outputPath"`
 	Type       core.DType `json:"type"` // recipe label or per-tensor base type
-	// TensorTypeFile, when set, is a "name TYPE" file materialized via
-	// WriteTensorTypeFile and passed as --tensor-type.
+	// TensorTypeFile, when set, is a per-tensor override file materialized
+	// via WriteTensorTypeFile and passed as --tensor-type-file. Incompatible
+	// with Pure: current llama.cpp applies overrides inside
+	// llama_tensor_get_type, which --pure skips.
 	TensorTypeFile string `json:"tensorTypeFile,omitempty"`
 	// ImatrixPath is required when Type.RequiresImatrix().
 	ImatrixPath string `json:"imatrixPath,omitempty"`
@@ -40,6 +43,9 @@ type QuantizeRequest struct {
 	// tensors. Requantization is refused unless AllowRequantize is set.
 	SourceQuantized bool `json:"sourceQuantized,omitempty"`
 	AllowRequantize bool `json:"allowRequantize,omitempty"`
+	// Dequantize emits a requantize-to-F32 pass: Type must be F32,
+	// AllowRequantize must be true, and the positional type is F32.
+	Dequantize bool `json:"dequantize,omitempty"`
 }
 
 // flagSpec binds one optional request feature to the llama-quantize flag
@@ -55,9 +61,14 @@ func quantFlagSpecs() []quantFlag {
 		{"--imatrix",
 			func(r QuantizeRequest) bool { return r.ImatrixPath != "" },
 			func(r QuantizeRequest) ([]string, error) { return []string{"--imatrix", r.ImatrixPath}, nil }},
-		{"--tensor-type",
+		{"--tensor-type-file",
 			func(r QuantizeRequest) bool { return r.TensorTypeFile != "" },
-			func(r QuantizeRequest) ([]string, error) { return []string{"--tensor-type", r.TensorTypeFile}, nil }},
+			func(r QuantizeRequest) ([]string, error) {
+				return []string{"--tensor-type-file", r.TensorTypeFile}, nil
+			}},
+		{"--allow-requantize",
+			func(r QuantizeRequest) bool { return r.AllowRequantize },
+			func(r QuantizeRequest) ([]string, error) { return []string{"--allow-requantize"}, nil }},
 		{"--output-tensor-type",
 			func(r QuantizeRequest) bool { return r.OutputType != "" },
 			func(r QuantizeRequest) ([]string, error) {
@@ -93,14 +104,26 @@ func (r QuantizeRequest) Validate() error {
 	if r.SourcePath == r.OutputPath && !r.DryRun {
 		return fmt.Errorf("orchestrate: quantize source/output paths must differ")
 	}
-	if !r.Type.IsQuant() {
-		return fmt.Errorf("orchestrate: quantize type %q is not a quant dtype", r.Type)
-	}
-	if r.Type.RequiresImatrix() && r.ImatrixPath == "" {
-		return fmt.Errorf("orchestrate: type %q requires an imatrix", r.Type)
+	if r.Dequantize {
+		if r.Type != core.DTypeF32 {
+			return fmt.Errorf("orchestrate: dequantize requires type F32, got %q", r.Type)
+		}
+		if !r.AllowRequantize {
+			return fmt.Errorf("orchestrate: dequantize requires AllowRequantize")
+		}
+	} else {
+		if !r.Type.IsQuant() {
+			return fmt.Errorf("orchestrate: quantize type %q is not a quant dtype", r.Type)
+		}
+		if r.Type.RequiresImatrix() && r.ImatrixPath == "" {
+			return fmt.Errorf("orchestrate: type %q requires an imatrix", r.Type)
+		}
 	}
 	if r.SourceQuantized && !r.AllowRequantize {
 		return fmt.Errorf("orchestrate: refusing to requantize already-quantized source %q (set AllowRequantize to override)", r.SourcePath)
+	}
+	if r.Pure && r.TensorTypeFile != "" {
+		return fmt.Errorf("orchestrate: --pure skips llama_tensor_get_type, so --tensor-type-file overrides would be ignored")
 	}
 	if r.Threads < 0 {
 		return fmt.Errorf("orchestrate: negative thread count")
@@ -128,7 +151,9 @@ func PlanQuantize(r QuantizeRequest, caps *Capabilities, binaryPath string) (Inv
 		return Invocation{}, fmt.Errorf("orchestrate: capabilities are for %s, not %s", caps.Tool, ToolLlamaQuantize)
 	}
 	ftype := r.Type
-	if r.Pure {
+	if r.Dequantize {
+		ftype = core.DTypeF32
+	} else if r.Pure {
 		mapped := r.Type.PureFType()
 		if mapped != ftype && (caps == nil || caps.HasType(string(mapped))) {
 			ftype = mapped
@@ -177,12 +202,14 @@ func SourceIsQuantized(bank *core.TensorBank) bool {
 }
 
 // WriteTensorTypeFile writes the per-tensor override file consumed by
-// llama-quantize --tensor-type: one "name TYPE" line per option, sorted by
-// tensor name for byte-for-byte determinism across runs. Tensor names come
-// from untrusted GGUF headers, so they are re-validated here (no whitespace,
-// control characters, or empty names) to make override-line injection via a
-// crafted tensor name impossible even if an earlier validation layer was
-// bypassed.
+// llama-quantize --tensor-type-file: one "^name$"=type line per option,
+// sorted by tensor name for byte-for-byte determinism across runs. The name
+// is regexp-escaped and anchored because llama-quantize regex-searches
+// (std::regex ECMAScript) each tensor name, and the type is the lowercase
+// base per-tensor type. Tensor names come from untrusted GGUF headers, so
+// they are re-validated here (no whitespace, control characters, or empty
+// names) to make override-line injection via a crafted tensor name
+// impossible even if an earlier validation layer was bypassed.
 func WriteTensorTypeFile(w io.Writer, opts []core.TensorOption) error {
 	sorted := make([]core.TensorOption, len(opts))
 	copy(sorted, opts)
@@ -199,7 +226,8 @@ func WriteTensorTypeFile(w io.Writer, opts []core.TensorOption) error {
 			return fmt.Errorf("orchestrate: duplicate tensor %q in type file", o.TensorName)
 		}
 		seen[o.TensorName] = true
-		if _, err := fmt.Fprintf(w, "%s %s\n", o.TensorName, o.Target.BaseTensorType()); err != nil {
+		pat := "^" + regexp.QuoteMeta(o.TensorName) + "$"
+		if _, err := fmt.Fprintf(w, "%s=%s\n", pat, strings.ToLower(string(o.Target.BaseTensorType()))); err != nil {
 			return err
 		}
 	}

@@ -41,13 +41,14 @@ const quantizeHelp = `usage: llama-quantize [options] model-f32.gguf [model-quan
   --exclude-suffix pattern
   --output-tensor-type type
   --token-embedding-type type
-  --tensor-type file
+  --tensor-type-file file
+  --allow-requantize
   --keep-split
   --pure
   --dry-run
   --version
   --help
-allowed quantization types: Q2_K Q3_K Q3_K_S Q3_K_M Q3_K_L Q4_0 Q4_1 Q4_K Q4_K_S Q4_K_M Q5_0 Q5_1 Q5_K Q5_K_S Q5_K_M Q6_K Q8_0 IQ1_S IQ1_M IQ2_XXS IQ2_XS IQ2_S IQ2_M IQ3_XXS IQ3_XS IQ3_S IQ4_NL IQ4_XS F16 BF16
+allowed quantization types: Q2_K Q3_K Q3_K_S Q3_K_M Q3_K_L Q4_0 Q4_1 Q4_K Q4_K_S Q4_K_M Q5_0 Q5_1 Q5_K Q5_K_S Q5_K_M Q6_K Q8_0 IQ1_S IQ1_M IQ2_XXS IQ2_XS IQ2_S IQ2_M IQ3_XXS IQ3_XS IQ3_S IQ4_NL IQ4_XS F16 BF16 F32
 version: b4123
 `
 
@@ -57,7 +58,7 @@ version: b1000
 
 func TestParseHelpFlagsAndVersion(t *testing.T) {
 	caps := ParseHelp(ToolLlamaQuantize, "/bin/llama-quantize", quantizeHelp)
-	for _, f := range []string{"--imatrix", "--tensor-type", "--output-tensor-type", "--token-embedding-type", "--keep-split", "--pure", "--dry-run", "--version"} {
+	for _, f := range []string{"--imatrix", "--tensor-type-file", "--output-tensor-type", "--token-embedding-type", "--keep-split", "--pure", "--dry-run", "--version"} {
 		if !caps.Has(f) {
 			t.Errorf("missing advertised flag %s", f)
 		}
@@ -116,7 +117,7 @@ func TestPlanQuantizeArgvOrder(t *testing.T) {
 		TensorTypeFile: "/work/types.txt",
 		OutputType:     core.DTypeF16,
 		EmbeddingType:  core.DTypeF32,
-		Pure:           true,
+		Pure:           false,
 		KeepSplit:      true,
 		DryRun:         true,
 		Threads:        12,
@@ -127,10 +128,10 @@ func TestPlanQuantizeArgvOrder(t *testing.T) {
 	}
 	want := []string{
 		"--imatrix", "/cal/imatrix.bin",
-		"--tensor-type", "/work/types.txt",
+		"--tensor-type-file", "/work/types.txt",
 		"--output-tensor-type", "F16",
 		"--token-embedding-type", "F32",
-		"--pure", "--keep-split", "--dry-run",
+		"--keep-split", "--dry-run",
 		"/src/f16.gguf", "/out/q.gguf", "IQ4_XS", "12",
 	}
 	if strings.Join(iv.Argv, "\x1f") != strings.Join(want, "\x1f") {
@@ -138,6 +139,29 @@ func TestPlanQuantizeArgvOrder(t *testing.T) {
 	}
 	if iv.Tool != ToolLlamaQuantize || iv.Path != unixAbs("/bin/llama-quantize") {
 		t.Fatalf("iv = %+v", iv)
+	}
+
+	// --pure with a tensor-type file is refused: overrides are ignored.
+	pureReq := QuantizeRequest{
+		ProfileID: "p1", SourcePath: "/src/f16.gguf", OutputPath: "/out/q.gguf",
+		Type: core.DTypeIQ4_XS, ImatrixPath: "/cal/imatrix.bin",
+		TensorTypeFile: "/work/types.txt", Pure: true,
+	}
+	if _, err := PlanQuantize(pureReq, fullQuantCaps(), unixAbs("/bin/llama-quantize")); err == nil {
+		t.Fatal("--pure + --tensor-type-file accepted")
+	}
+
+	// --allow-requantize emits its flag.
+	req.AllowRequantize = true
+	req.TensorTypeFile = ""
+	req.OutputType, req.EmbeddingType = "", ""
+	req.DryRun, req.KeepSplit, req.Threads = false, false, 0
+	iv, err = PlanQuantize(req, fullQuantCaps(), unixAbs("/bin/llama-quantize"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(iv.Argv, " ") != "--imatrix /cal/imatrix.bin --allow-requantize /src/f16.gguf /out/q.gguf IQ4_XS" {
+		t.Fatalf("requantize argv = %v", iv.Argv)
 	}
 
 	// Minimal request: flags absent, no positional threads.
@@ -166,7 +190,9 @@ func TestPlanQuantizeCapabilityGating(t *testing.T) {
 	req.Pure = false
 	req.TensorTypeFile = "/work/types.txt" // also unadvertised
 	if _, err := PlanQuantize(req, oldCapsP, unixAbs("/bin/old")); err == nil {
-		t.Fatal("unadvertised --tensor-type accepted")
+		t.Fatal("unadvertised --tensor-type-file accepted")
+	} else if !strings.Contains(err.Error(), "--tensor-type-file") {
+		t.Fatalf("err = %v", err)
 	}
 	// Advertised subset passes.
 	req.TensorTypeFile = ""
@@ -325,7 +351,7 @@ func TestTensorTypeFileDeterministicSorted(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := buf.String()
-	want := "blk.1.attn Q6_K\nblk.10.attn Q4_K\nblk.9.ffn Q3_K\noutput.weight Q6_K\n"
+	want := "^blk\\.1\\.attn$=q6_k\n^blk\\.10\\.attn$=q4_k\n^blk\\.9\\.ffn$=q3_k\n^output\\.weight$=q6_k\n"
 	if got != want {
 		t.Fatalf("type file = %q, want %q", got, want)
 	}
@@ -387,13 +413,13 @@ func TestTensorTypeFileRejectsInjection(t *testing.T) {
 			t.Errorf("name %q written to tensor-type file", name)
 		}
 	}
-	// A valid file holds exactly one "name TYPE" line per option.
+	// A valid file holds exactly one anchored "^name$"=type line per option.
 	opts := []core.TensorOption{{TensorName: "blk.0.attn_q.weight", Target: core.DTypeQ6_K, Bytes: 64}}
 	b, err := TensorTypeFileBytes(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(b), "blk.0.attn_q.weight Q6_K\n"; got != want {
+	if got, want := string(b), "^blk\\.0\\.attn_q\\.weight$=q6_k\n"; got != want {
 		t.Fatalf("file = %q, want %q", got, want)
 	}
 }
@@ -836,4 +862,36 @@ func mustSHA(t *testing.T, b []byte) string {
 	t.Helper()
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+func TestPlanQuantizeDequantize(t *testing.T) {
+	req := QuantizeRequest{
+		ProfileID:       "deq",
+		SourcePath:      "/q.gguf",
+		OutputPath:      "/f.gguf",
+		Type:            core.DTypeF32,
+		AllowRequantize: true,
+		Dequantize:      true,
+		SourceQuantized: true,
+		Pure:            true,
+	}
+	iv, err := PlanQuantize(req, fullQuantCaps(), unixAbs("/bin/lq"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "--allow-requantize --pure /q.gguf /f.gguf F32"
+	if strings.Join(iv.Argv, " ") != want {
+		t.Fatalf("argv = %v, want %q", iv.Argv, want)
+	}
+	// Dequantize with non-F32 type refused.
+	req.Type = core.DTypeQ4_K_M
+	if _, err := PlanQuantize(req, fullQuantCaps(), unixAbs("/bin/lq")); err == nil {
+		t.Fatal("non-F32 dequantize accepted")
+	}
+	// Dequantize without AllowRequantize refused.
+	req.Type = core.DTypeF32
+	req.AllowRequantize = false
+	if _, err := PlanQuantize(req, fullQuantCaps(), unixAbs("/bin/lq")); err == nil {
+		t.Fatal("dequantize without AllowRequantize accepted")
+	}
 }
