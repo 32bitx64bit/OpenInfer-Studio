@@ -11,6 +11,7 @@ import (
 	"github.com/openinfer/openinfer-studio/internal/hostit"
 	"github.com/openinfer/openinfer-studio/internal/huggingface"
 	"github.com/openinfer/openinfer-studio/internal/instances"
+	"github.com/openinfer/openinfer-studio/internal/mediagen"
 	"github.com/openinfer/openinfer-studio/internal/models"
 	"github.com/openinfer/openinfer-studio/internal/proxy"
 	"github.com/openinfer/openinfer-studio/internal/quantize"
@@ -28,6 +29,7 @@ type Deps struct {
 	RT       *runtimes.Manager
 	Lib      *models.Library
 	IM       *instances.Manager
+	Media    *mediagen.Manager
 	Chat     *chat.Service
 	Proxy    *proxy.Server
 	HostIt   *hostit.Bridge
@@ -79,6 +81,16 @@ func (s *Server) RegisterRoutes(d *Deps) {
 	s.Handle("POST /api/v1/models/{id}/restart", h.restartModel)
 	s.Handle("GET /api/v1/models/{id}/diagnostics", h.modelDiagnostics)
 	s.Handle("GET /api/v1/models/{id}/activity", h.modelActivity)
+
+	s.Handle("GET /api/v1/media/servers", h.listMediaServers)
+	s.Handle("GET /api/v1/media/jobs", h.listMediaJobs)
+	s.Handle("GET /api/v1/media/jobs/{id}", h.getMediaJob)
+	s.Handle("POST /api/v1/media/jobs/{id}/cancel", h.cancelMediaJob)
+	s.Handle("GET /api/v1/media/file/", h.mediaFile)
+	s.Handle("GET /api/v1/models/{id}/media/capabilities", h.mediaCapabilities)
+	s.Handle("POST /api/v1/models/{id}/media/server/start", h.mediaServer)
+	s.Handle("POST /api/v1/models/{id}/media/server/stop", h.mediaServer)
+	s.Handle("POST /api/v1/models/{id}/media/generate", h.generateMedia)
 
 	s.Handle("GET /api/v1/directories", h.listDirs)
 	s.Handle("POST /api/v1/directories", h.addDir)

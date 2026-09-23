@@ -284,6 +284,19 @@ func decodeSettings(w http.ResponseWriter, r *http.Request) (instances.LoadSetti
 }
 
 func (h *handlers) previewLoad(w http.ResponseWriter, r *http.Request) {
+	if m, err := h.d.Lib.Get(r.PathValue("id")); err == nil && models.IsDiffusionModel(*m) {
+		var meta struct {
+			IsDiff   bool   `json:"is_diffusion"`
+			SDKind   string `json:"diffusion_kind"`
+			SDFam    string `json:"sd_family"`
+			Modality string `json:"modality"`
+		}
+		_ = json.Unmarshal(m.Metadata, &meta)
+		if meta.Modality == "diffusion" || meta.SDKind != "" || meta.SDFam != "" || !meta.IsDiff {
+			h.previewDiffusionLoad(w, r, m)
+			return
+		}
+	}
 	s, ok := decodeSettings(w, r)
 	if !ok {
 		return
@@ -337,6 +350,21 @@ func (h *handlers) draftCandidates(w http.ResponseWriter, r *http.Request) {
 // estimateLoad projects memory use for a settings draft against detected
 // VRAM/RAM. Numbers are heuristics and presented as estimates in the UI.
 func (h *handlers) estimateLoad(w http.ResponseWriter, r *http.Request) {
+	if m, err := h.d.Lib.Get(r.PathValue("id")); err == nil && models.IsDiffusionModel(*m) {
+		// Block-diffusion LMs (DiffusionGemma) stay on the LLM estimator —
+		// IsDiffusionModel is SD-only, but keep the belt explicit.
+		var meta struct {
+			IsDiff   bool   `json:"is_diffusion"`
+			SDKind   string `json:"diffusion_kind"`
+			SDFam    string `json:"sd_family"`
+			Modality string `json:"modality"`
+		}
+		_ = json.Unmarshal(m.Metadata, &meta)
+		if meta.Modality == "diffusion" || meta.SDKind != "" || meta.SDFam != "" || !meta.IsDiff {
+			h.estimateDiffusionLoad(w, r, m)
+			return
+		}
+	}
 	s, ok := decodeSettings(w, r)
 	if !ok {
 		return
@@ -457,6 +485,14 @@ func (h *handlers) estimateLoad(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) loadModel(w http.ResponseWriter, r *http.Request) {
+	// SD image/video checkpoints load through the sd-server path: applying
+	// LLM chat-template/embedder defaults to them would be wrong, and
+	// llama-server cannot run them. DiffusionGemma LMs (is_diffusion
+	// without sd_family/diffusion_kind) are unaffected.
+	if m, err := h.d.Lib.Get(r.PathValue("id")); err == nil && models.IsDiffusionModel(*m) {
+		writeErr(w, 400, "diffusion image/video checkpoints start from Image Studio (media server), not the chat loader", nil)
+		return
+	}
 	s, ok := decodeSettings(w, r)
 	if !ok {
 		return
@@ -533,6 +569,10 @@ func (h *handlers) unloadModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handlers) restartModel(w http.ResponseWriter, r *http.Request) {
+	if m, err := h.d.Lib.Get(r.PathValue("id")); err == nil && models.IsDiffusionModel(*m) {
+		writeErr(w, 400, "diffusion image/video checkpoints start from Image Studio (media server), not the chat loader", nil)
+		return
+	}
 	s, ok := decodeSettings(w, r)
 	if !ok {
 		return

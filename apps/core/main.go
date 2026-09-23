@@ -27,6 +27,7 @@ import (
 	"github.com/openinfer/openinfer-studio/internal/hostit"
 	"github.com/openinfer/openinfer-studio/internal/huggingface"
 	"github.com/openinfer/openinfer-studio/internal/instances"
+	"github.com/openinfer/openinfer-studio/internal/mediagen"
 	"github.com/openinfer/openinfer-studio/internal/models"
 	"github.com/openinfer/openinfer-studio/internal/proxy"
 	"github.com/openinfer/openinfer-studio/internal/quantize"
@@ -131,6 +132,10 @@ func main() {
 	rt := runtimes.NewManager(db.DB, layout.Runtimes, dl, hub, logs.Logger("runtimes", slog.LevelInfo).Logger)
 	im := instances.NewManager(db.DB, rt, lib, hub, logs.Logger("instances", slog.LevelInfo).Logger,
 		layout.InstLogs, layout.Temp, layout.CacheDir)
+	media := mediagen.NewManager(db.DB, layout, rt, lib, hub, logs.Logger("media", slog.LevelInfo).Logger)
+	if err := media.RecoverAfterRestart(); err != nil {
+		log.Warn("media job recovery failed", "err", err)
+	}
 	if n := settings.Get("instances.max_loaded", ""); n != "" {
 		var v int
 		if _, err := fmt.Sscanf(n, "%d", &v); err == nil {
@@ -199,7 +204,7 @@ func main() {
 	srv := api.NewServer(auth.Token(*tokenFlag), hub, logs.Logger("api", slog.LevelInfo).Logger)
 	srv.RegisterRoutes(&api.Deps{
 		Hub: hub, Layout: layout, DB: db, Settings: settings, HF: hf, DL: dl,
-		RT: rt, Lib: lib, IM: im, Chat: chatSvc, Proxy: px, HostIt: hostIt, Logs: logs, Quant: qm,
+		RT: rt, Lib: lib, IM: im, Media: media, Chat: chatSvc, Proxy: px, HostIt: hostIt, Logs: logs, Quant: qm,
 	})
 	if err := srv.Start(*portFlag); err != nil {
 		fmt.Fprintf(os.Stderr, `{"ready":false,"error":%q}`+"\n", "bind: "+err.Error())
@@ -222,7 +227,7 @@ func main() {
 	// processes (and this backend) are never abandoned.
 	if *ppidFlag > 0 {
 		go watchParent(*ppidFlag, log, func() {
-			shutdown(log, im, px, hostIt, srv)
+			shutdown(log, im, media, px, hostIt, srv)
 			os.Exit(0)
 		})
 	}
@@ -231,16 +236,19 @@ func main() {
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
-	shutdown(log, im, px, hostIt, srv)
+	shutdown(log, im, media, px, hostIt, srv)
 }
 
-func shutdown(log *diagnostics.Logger, im *instances.Manager, px *proxy.Server, hi *hostit.Bridge, srv *api.Server) {
+func shutdown(log *diagnostics.Logger, im *instances.Manager, media *mediagen.Manager, px *proxy.Server, hi *hostit.Bridge, srv *api.Server) {
 	log.Info("shutting down")
 	if hi != nil {
 		_ = hi.SyncTimeout(0, false)
 	}
 	px.Stop()
 	im.StopAll()
+	if media != nil {
+		media.StopAll()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)

@@ -212,6 +212,7 @@ func (s *Server) Start() error {
 	mux.HandleFunc("POST /v1/completions", s.wrap(s.handlePassthrough))
 	mux.HandleFunc("POST /v1/embeddings", s.wrap(s.handlePassthrough))
 	mux.HandleFunc("POST /v1/responses", s.wrap(s.handleResponses))
+	mux.HandleFunc("POST /v1/images/generations", s.wrap(s.handleImages))
 
 	s.http = &http.Server{Handler: mux, ReadHeaderTimeout: 30 * time.Second}
 	s.mu.Lock()
@@ -384,6 +385,14 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	// llama-server serves /v1/responses on recent builds; older runtimes
 	// return 404 which we surface transparently.
 	s.forward(w, r, "/v1/responses")
+}
+
+// handleImages forwards OpenAI image generation to the sd-server behind a
+// loaded diffusion model. sd.cpp serves POST /v1/images/generations
+// natively; the request model name resolves to a ready sd-server endpoint
+// via the same instance registry as chat.
+func (s *Server) handleImages(w http.ResponseWriter, r *http.Request) {
+	s.forward(w, r, "/v1/images/generations")
 }
 
 func (s *Server) handlePassthrough(w http.ResponseWriter, r *http.Request) {
