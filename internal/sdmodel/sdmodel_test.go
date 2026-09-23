@@ -1,0 +1,263 @@
+package sdmodel
+
+import (
+	"encoding/binary"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// writeSafetensors writes a minimal valid safetensors file: an 8-byte LE
+// header length followed by the JSON header. Zero-length tensor data is
+// fine — only the header is ever read by this package.
+func writeSafetensors(t *testing.T, path string, tensorNames []string) {
+	t.Helper()
+	header := map[string]any{}
+	for _, n := range tensorNames {
+		header[n] = map[string]any{
+			"dtype": "F16", "shape": []int{1}, "data_offsets": []int{0, 0},
+		}
+	}
+	header["__metadata__"] = map[string]any{"format": "pt"}
+	body, err := json.Marshal(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lenBuf [8]byte
+	binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(body)))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(lenBuf[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(body); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSafetensorsTensorNamesRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "m.safetensors")
+	want := []string{"first_stage_model.encoder.conv_in.weight", "first_stage_model.decoder.conv_out.weight"}
+	writeSafetensors(t, path, want)
+
+	got, err := SafetensorsTensorNames(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("names = %v, want %v", got, want)
+	}
+	seen := map[string]bool{}
+	for _, n := range got {
+		seen[n] = true
+	}
+	for _, w := range want {
+		if !seen[w] {
+			t.Errorf("missing tensor %q in %v", w, got)
+		}
+	}
+	// __metadata__ must never appear as a tensor name.
+	if seen["__metadata__"] {
+		t.Fatal("__metadata__ leaked into tensor names")
+	}
+}
+
+func TestSafetensorsTensorNamesRejectsGarbageLength(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "garbage.safetensors")
+	// A file whose first 8 bytes decode as a huge/garbage header length
+	// (this is what a raw non-safetensors byte blob looks like) must error,
+	// not allocate ~unbounded memory.
+	if err := os.WriteFile(path, []byte{2, 2, 2, 2, 2, 2, 2, 2}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SafetensorsTensorNames(path); err == nil {
+		t.Fatal("expected error for garbage header length")
+	}
+}
+
+func TestTensorNamesDispatch(t *testing.T) {
+	dir := t.TempDir()
+	st := filepath.Join(dir, "m.safetensors")
+	writeSafetensors(t, st, []string{"vae.encoder.weight"})
+	names, err := TensorNames(st)
+	if err != nil || len(names) != 1 {
+		t.Fatalf("TensorNames(.safetensors) = %v, %v", names, err)
+	}
+
+	unsupported := filepath.Join(dir, "m.ckpt")
+	if err := os.WriteFile(unsupported, []byte{0}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := TensorNames(unsupported); err == nil {
+		t.Fatal("expected error for unsupported extension")
+	}
+}
+
+func TestComponentRoleFromName(t *testing.T) {
+	cases := map[string]string{
+		"vae/qwen_image_2.1_vae_bf16.safetensors":           RoleVAE,
+		"components/vae/qwen_image_vae.safetensors":         RoleVAE,
+		"text_encoders/qwen3vl_8b_int8_convrot.safetensors": RoleLLM,
+		"text_encoders/t5xxl_fp16.safetensors":              RoleT5XXL,
+		"text_encoders/umt5_xxl_fp8_e4m3fn.safetensors":     RoleT5XXL, // Wan uses UMT5 via --t5xxl
+		"clip_l.safetensors":                                RoleClipL,
+		"clip_g.safetensors":                                RoleClipG,
+		"clip_vision.safetensors":                           RoleClipVision,
+		"tokenizer.json":                                    RoleTokenizer,
+		"taesd_decoder.safetensors":                         RoleTAESD,
+		"4x-UltraSharp.pth":                                 RoleESRGAN,
+		"controlnet/diffusion_pytorch_model.safetensors":    RoleControlNet,
+		"loras/add-detail-xl.safetensors":                   RoleLoRA,
+		"qwen-image-2.1-Q6_K.gguf":                          "",
+		"model-00001-of-00004.safetensors":                  "",
+	}
+	for path, want := range cases {
+		if got := ComponentRole(path, nil); got != want {
+			t.Errorf("ComponentRole(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestComponentRoleFromTensors(t *testing.T) {
+	// Anonymous filename; only tensor evidence identifies the role.
+	loraTensors := []string{"lora_unet.down_blocks.0.lora_down.weight", "lora_unet.down_blocks.0.lora_up.weight",
+		"lora_unet.up_blocks.0.lora_down.weight", "lora_unet.up_blocks.0.lora_up.weight"}
+	if got := ComponentRole("model.safetensors", loraTensors); got != RoleLoRA {
+		t.Errorf("lora tensors: role = %q, want %q", got, RoleLoRA)
+	}
+
+	vaeTensors := []string{
+		"first_stage_model.encoder.conv_in.weight", "first_stage_model.encoder.down.0.block.0.norm1.weight",
+		"first_stage_model.decoder.conv_out.weight", "first_stage_model.decoder.up.0.block.0.norm1.weight",
+	}
+	if got := ComponentRole("model.safetensors", vaeTensors); got != RoleVAE {
+		t.Errorf("vae tensors: role = %q, want %q", got, RoleVAE)
+	}
+
+	clipLTensors := make([]string, 0, 12)
+	for i := 0; i < 12; i++ {
+		clipLTensors = append(clipLTensors, "text_model.encoder.layers."+itoa(i)+".mlp.fc1.weight")
+	}
+	if got := ComponentRole("model.safetensors", clipLTensors); got != RoleClipL {
+		t.Errorf("clip-l tensors (12 layers): role = %q, want %q", got, RoleClipL)
+	}
+
+	clipGTensors := make([]string, 0, 32)
+	for i := 0; i < 32; i++ {
+		clipGTensors = append(clipGTensors, "text_model.encoder.layers."+itoa(i)+".mlp.fc1.weight")
+	}
+	if got := ComponentRole("model.safetensors", clipGTensors); got != RoleClipG {
+		t.Errorf("clip-g tensors (32 layers): role = %q, want %q", got, RoleClipG)
+	}
+
+	t5Tensors := []string{
+		"encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight",
+		"encoder.block.0.layer.1.DenseReluDense.wi.weight",
+		"encoder.block.1.layer.1.DenseReluDense.wi.weight",
+		"encoder.block.2.layer.1.DenseReluDense.wi.weight",
+	}
+	if got := ComponentRole("model.safetensors", t5Tensors); got != RoleT5XXL {
+		t.Errorf("t5 tensors: role = %q, want %q", got, RoleT5XXL)
+	}
+
+	// A full SD1.x-style checkpoint (UNet + VAE) is not a "component" —
+	// ComponentRole should return "" so it is imported as a checkpoint.
+	fullCkpt := append(append([]string{}, vaeTensors...),
+		"model.diffusion_model.time_embed.0.weight", "model.diffusion_model.time_embed.2.weight",
+		"model.diffusion_model.input_blocks.0.0.weight", "model.diffusion_model.input_blocks.1.0.weight",
+		"model.diffusion_model.middle_block.0.weight", "model.diffusion_model.middle_block.1.weight",
+		"model.diffusion_model.output_blocks.0.0.weight", "model.diffusion_model.output_blocks.1.0.weight")
+	if got := ComponentRole("v1-5-pruned-emaonly.safetensors", fullCkpt); got != "" {
+		t.Errorf("full checkpoint tensors: role = %q, want \"\"", got)
+	}
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	digits := []byte{}
+	for n > 0 {
+		digits = append([]byte{byte('0' + n%10)}, digits...)
+		n /= 10
+	}
+	return string(digits)
+}
+
+func TestDiffusionKindGGUFStyle(t *testing.T) {
+	tensors := []string{
+		"img_in.weight", "time_text_embed.timestep_embedder.linear_1.weight",
+		"transformer_blocks.0.attn.to_q.weight", "transformer_blocks.0.img_mlp.proj.weight",
+		"transformer_blocks.1.attn.to_q.weight", "transformer_blocks.1.img_mlp.proj.weight",
+		"txt_in.weight", "norm_out.weight", "proj_out.weight",
+	}
+	if kind := DiffusionKind(tensors); kind != "image" {
+		t.Fatalf("kind = %q, want image", kind)
+	}
+}
+
+func TestDiffusionKindComfyUIPrefixStripped(t *testing.T) {
+	base := []string{
+		"img_in.weight", "time_text_embed.timestep_embedder.linear_1.weight",
+		"transformer_blocks.0.attn.to_q.weight", "transformer_blocks.0.img_mlp.proj.weight",
+		"transformer_blocks.1.attn.to_q.weight", "transformer_blocks.1.img_mlp.proj.weight",
+		"txt_in.weight", "norm_out.weight", "proj_out.weight",
+	}
+	prefixed := make([]string, len(base))
+	for i, n := range base {
+		prefixed[i] = "model.diffusion_model." + n
+	}
+	if kind := DiffusionKind(prefixed); kind != "image" {
+		t.Fatalf("kind = %q, want image (ComfyUI prefix should be stripped)", kind)
+	}
+}
+
+func TestDiffusionKindUNetLayout(t *testing.T) {
+	tensors := []string{
+		"model.diffusion_model.time_embed.0.weight", "model.diffusion_model.time_embed.2.weight",
+		"model.diffusion_model.input_blocks.0.0.weight", "model.diffusion_model.input_blocks.1.0.weight",
+		"model.diffusion_model.middle_block.0.weight", "model.diffusion_model.middle_block.1.weight",
+		"model.diffusion_model.output_blocks.0.0.weight", "model.diffusion_model.output_blocks.1.0.weight",
+	}
+	if kind := DiffusionKind(tensors); kind != "image" {
+		t.Fatalf("kind = %q, want image (SD1.x/SDXL UNet layout)", kind)
+	}
+}
+
+func TestDiffusionKindNoEvidence(t *testing.T) {
+	tensors := []string{"token_embd.weight", "blk.0.attn_q.weight", "output.weight"}
+	if kind := DiffusionKind(tensors); kind != "" {
+		t.Fatalf("kind = %q, want \"\" for a plain LLM tensor set", kind)
+	}
+}
+
+func TestIsFullCheckpoint(t *testing.T) {
+	unetOnly := []string{
+		"model.diffusion_model.time_embed.0.weight", "model.diffusion_model.input_blocks.0.0.weight",
+		"model.diffusion_model.middle_block.0.weight", "model.diffusion_model.output_blocks.0.0.weight",
+		"model.diffusion_model.input_blocks.1.0.weight", "model.diffusion_model.output_blocks.1.0.weight",
+	}
+	if IsFullCheckpoint(unetOnly) {
+		t.Fatal("UNet-only weights must not read as a full checkpoint")
+	}
+
+	withVAE := append(append([]string{}, unetOnly...),
+		"first_stage_model.encoder.conv_in.weight", "first_stage_model.decoder.conv_out.weight")
+	if !IsFullCheckpoint(withVAE) {
+		t.Fatal("UNet + VAE weights should read as a full checkpoint")
+	}
+
+	noDiffusion := []string{"first_stage_model.encoder.conv_in.weight"}
+	if IsFullCheckpoint(noDiffusion) {
+		t.Fatal("VAE-only weights (no diffusion transformer) must not read as a full checkpoint")
+	}
+}
