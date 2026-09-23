@@ -8,3 +8,5 @@ packaging/linux/.cache/
 *.db-shm
 *.user
 .openinfer-test/
+quantlab/quantlab
+quantlab/quantlab.exe
