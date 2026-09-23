@@ -16,9 +16,12 @@ import (
 // and shaped per tensor by its exact-table rung ratios). Roles too small to
 // probe are pinned to their highest-fidelity legal rung. Soft priors are not
 // applied and gate/up coupling is off: both encode guesses about relative
-// sensitivity that the probes replace with measurement. Policy hard floors
-// are likewise dropped for probed roles (an output head that measured as
-// insensitive should not be forced to Q6_K) and kept for unprobed ones.
+// sensitivity that the probes replace with measurement.
+//
+// Policy hard floors (output head, token embeddings, MoE routers) and
+// explicit/calibration anchors are always enforced, including on probed
+// roles: a short probe cannot see the rare-token and tail-logit damage that
+// those floors exist to prevent, so it must not be able to harvest them.
 //
 // Allocation is an exact Lagrangian sweep over each tensor's lower convex
 // frontier: hull edges are applied in descending loss-decrease-per-byte
@@ -33,7 +36,6 @@ func solveCalibrated(req Request, set *anchor.Set, est *FallbackEstimator, cands
 	if len(req.ExactLoss) == 0 {
 		return nil, fmt.Errorf("profile: calibrated solve requires an exact loss table")
 	}
-	set = calibratedAnchors(set, req.Bank, sens)
 
 	states := make([]solverState, len(req.Bank.Tensors))
 	var minTotal, maxTotal uint64
@@ -63,27 +65,6 @@ func solveCalibrated(req Request, set *anchor.Set, est *FallbackEstimator, cands
 	lagrangianAllocate(states, req.Bank, effective)
 	reallocate2Opt(states, req.Bank, effective)
 	return assembleResult(req, set, states, budget, effective, minTotal, maxTotal)
-}
-
-// calibratedAnchors returns set without the hard floors that match any
-// tensor of a probed role; the profile records the reduced set so
-// Set.Check agrees with what the solver enforced.
-func calibratedAnchors(set *anchor.Set, bank *core.TensorBank, sens *Sensitivity) *anchor.Set {
-	out := *set
-	out.Hard = nil
-	for _, a := range set.Hard {
-		keep := true
-		for _, t := range bank.Tensors {
-			if sens.Calibrated(t.Name) && a.Matches(t.Name) {
-				keep = false
-				break
-			}
-		}
-		if keep {
-			out.Hard = append(out.Hard, a)
-		}
-	}
-	return &out
 }
 
 // enumerateCalibrated is EnumerateOptions for the calibrated objective:
