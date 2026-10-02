@@ -33,6 +33,7 @@ import (
 	"github.com/openinfer/openinfer-studio/internal/quantize"
 	"github.com/openinfer/openinfer-studio/internal/runtimes"
 	"github.com/openinfer/openinfer-studio/internal/version"
+	"github.com/openinfer/openinfer-studio/internal/workflow"
 	"github.com/openinfer/openinfer-studio/migrations"
 )
 
@@ -205,6 +206,7 @@ func main() {
 	srv.RegisterRoutes(&api.Deps{
 		Hub: hub, Layout: layout, DB: db, Settings: settings, HF: hf, DL: dl,
 		RT: rt, Lib: lib, IM: im, Media: media, Chat: chatSvc, Proxy: px, HostIt: hostIt, Logs: logs, Quant: qm,
+		Workflow: workflow.NewService(db.DB, lib, media, hub),
 	})
 	if err := srv.Start(*portFlag); err != nil {
 		fmt.Fprintf(os.Stderr, `{"ready":false,"error":%q}`+"\n", "bind: "+err.Error())

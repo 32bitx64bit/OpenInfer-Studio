@@ -181,6 +181,7 @@ type server struct {
 	startedAt string
 	updatedAt string
 	settings  LoadSettings
+	resolved  LoadSettings // settings after local companion pairing (what ran)
 }
 
 // ServerView is the API view of one supervised sd-server
@@ -225,9 +226,10 @@ type Manager struct {
 	log    *slog.Logger
 	http   *http.Client
 
-	mu      sync.Mutex
-	servers map[string]*server // keyed by model ID
-	jobs    map[string]*jobHandle
+	mu       sync.Mutex
+	servers  map[string]*server // keyed by model ID
+	jobs     map[string]*jobHandle
+	capCache map[string][]string // runtime ID -> parsed sd-server capabilities
 }
 
 func NewManager(db *sql.DB, layout *config.Layout, rt *runtimes.Manager, lib *models.Library, events EventSink, log *slog.Logger) *Manager {
@@ -236,9 +238,10 @@ func NewManager(db *sql.DB, layout *config.Layout, rt *runtimes.Manager, lib *mo
 	}
 	return &Manager{
 		db: db, layout: layout, rt: rt, lib: lib, events: events, log: log,
-		http:    &http.Client{Timeout: 0},
-		servers: map[string]*server{},
-		jobs:    map[string]*jobHandle{},
+		http:     &http.Client{Timeout: 0},
+		servers:  map[string]*server{},
+		jobs:     map[string]*jobHandle{},
+		capCache: map[string][]string{},
 	}
 }
 
@@ -398,10 +401,13 @@ func (m *Manager) startServer(modelID string, s LoadSettings, sv *server) (int, 
 	// validates companion paths, and builds the argv — the same helper
 	// previewDiffusionLoad uses, so the dialog shows exactly what runs here.
 	rawHelp, _ := m.rt.HelpOutput(rt.ID)
-	exe, args, _, help, caps, warnings, err := PrepareLaunch(rt, rawHelp, mdl.PrimaryPath, s)
+	exe, args, resolved, help, caps, warnings, err := PrepareLaunch(rt, rawHelp, mdl.PrimaryPath, s)
 	if err != nil {
 		return 0, err
 	}
+	m.mu.Lock()
+	sv.resolved = resolved
+	m.mu.Unlock()
 	for _, w := range warnings {
 		m.log.Warn("sd-server launch warning", "model_id", modelID, "warning", w)
 	}
@@ -720,36 +726,94 @@ func (m *Manager) Capabilities(ctx context.Context, modelID string) (map[string]
 // so callers can respond 202 without blocking on model load + sampling.
 // Progress and completion flow over media.progress events.
 func (m *Manager) StartGenerate(modelID string, p GenerateParams) (*Job, error) {
+	return m.StartGenerateWith(modelID, p, nil)
+}
+
+// StartGenerateWith is StartGenerate for callers that also pin sd-server
+// launch inputs (the node-graph executor). When ov is non-nil and the model's
+// running server does not already satisfy it, the server is restarted with
+// the overrides applied before the job is submitted.
+func (m *Manager) StartGenerateWith(modelID string, p GenerateParams, ov *LoadOverrides) (*Job, error) {
+	j, _, err := m.startGenerate(modelID, p, ov)
+	return j, err
+}
+
+// RunStage runs one generation to completion and returns the finished job.
+// It is the seam the workflow executor drives: same job row, events and
+// cancel path as StartGenerate, but blocking. A canceled ctx cancels the job
+// (including the GPU work) and returns ctx's error; a failed job returns the
+// job alongside an error carrying its message.
+func (m *Manager) RunStage(ctx context.Context, modelID string, p GenerateParams, ov *LoadOverrides) (*Job, error) {
+	j, done, err := m.startGenerate(modelID, p, ov)
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		_ = m.Cancel(j.ID)
+		<-done
+		if final, gerr := m.Get(j.ID); gerr == nil {
+			return final, ctx.Err()
+		}
+		return j, ctx.Err()
+	}
+	final, err := m.Get(j.ID)
+	if err != nil {
+		return j, err
+	}
+	switch final.State {
+	case StateComplete:
+		return final, nil
+	case StateCanceled:
+		return final, fmt.Errorf("media job %s canceled", final.ID)
+	default:
+		msg := final.Error
+		if msg == "" {
+			msg = "generation " + final.State
+		}
+		return final, errors.New(msg)
+	}
+}
+
+// startGenerate validates, records the queued job and runs it in the
+// background; the returned channel closes once the job goroutine is done.
+func (m *Manager) startGenerate(modelID string, p GenerateParams, ov *LoadOverrides) (*Job, <-chan struct{}, error) {
 	kind := p.Kind
 	if kind == "" {
 		kind = KindImage
 	}
 	if kind != KindImage && kind != KindVideo {
-		return nil, fmt.Errorf("invalid kind %q", p.Kind)
+		return nil, nil, fmt.Errorf("invalid kind %q", p.Kind)
 	}
 	if strings.TrimSpace(p.Prompt) == "" {
-		return nil, fmt.Errorf("prompt is required")
+		return nil, nil, fmt.Errorf("prompt is required")
 	}
 	// Reject an oversize inline init_image before ValidateGenerateParams,
 	// which otherwise silently drops it (turning img2img into txt2img
 	// without telling the caller). Large images belong in InitImagePath.
 	if err := checkInitImageSize(p); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if p.InitImagePath != "" {
 		if err := validateInitImagePath(p.InitImagePath); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	ValidateGenerateParams(&p)
 
-	if _, err := m.lib.Get(modelID); err != nil {
-		return nil, err
+	// lib and rt are only ever nil in tests that inject a ready server.
+	if m.lib != nil {
+		if _, err := m.lib.Get(modelID); err != nil {
+			return nil, nil, err
+		}
 	}
 	// Fail fast when no sd.cpp runtime exists (fast DB check) instead of
 	// surfacing it minutes later as a job failure.
-	if _, err := m.ResolveRuntime(modelID, ""); err != nil {
-		return nil, err
+	if m.rt != nil {
+		if _, err := m.ResolveRuntime(modelID, ""); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	id := uuid.NewString()
@@ -757,22 +821,28 @@ func (m *Manager) StartGenerate(modelID string, p GenerateParams) (*Job, error) 
 	ts := now()
 	if _, err := m.db.Exec(`INSERT INTO media_jobs(id,model_id,kind,state,prompt,params_json,seed,created_at,updated_at)
 		VALUES (?,?,?,?,?,?,?,?,?)`, id, modelID, kind, StateQueued, p.Prompt, string(body), p.Seed, ts, ts); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	jctx, cancel := context.WithCancelCause(context.Background())
 	m.mu.Lock()
 	m.jobs[id] = &jobHandle{cancel: cancel, modelID: modelID}
 	m.mu.Unlock()
+	done := make(chan struct{})
 	go func() {
 		defer func() {
 			m.mu.Lock()
 			delete(m.jobs, id)
 			m.mu.Unlock()
 			cancel(nil)
+			close(done)
 		}()
-		m.runJob(jctx, id, modelID, kind, p)
+		m.runJob(jctx, id, modelID, kind, p, ov)
 	}()
-	return m.Get(id)
+	j, err := m.Get(id)
+	if err != nil {
+		return nil, nil, err
+	}
+	return j, done, nil
 }
 
 // jobCanceledByCrash reports whether ctx was canceled by failJobsForModel
@@ -785,8 +855,16 @@ func jobCanceledByCrash(ctx context.Context) bool {
 // runJob executes one media generation: auto-start the sd-server when
 // needed, submit the sdcpp job, poll to completion, and store the outputs.
 // Progress events flow over media.progress.
-func (m *Manager) runJob(jctx context.Context, id, modelID, kind string, p GenerateParams) {
+func (m *Manager) runJob(jctx context.Context, id, modelID, kind string, p GenerateParams, ov *LoadOverrides) {
 	port, ok := m.ServerPort(modelID)
+	if ok && ov != nil && !m.serverSatisfies(modelID, *ov) {
+		// The graph needs different launch inputs (VAE, text encoder, LoRA
+		// dir) than the running server has; sd-server only reads them at
+		// launch, so replace it.
+		m.publish("media.progress", map[string]any{"id": id, "model_id": modelID, "state": StateRunning, "sd_status": "reloading model", "message": "Reloading model with different components…"})
+		m.StopServer(modelID)
+		ok = false
+	}
 	if !ok {
 		// Auto-start with the model's last-known-good settings when present
 		// (same fallback the load dialog uses), else safe defaults, so
@@ -800,6 +878,12 @@ func (m *Manager) runJob(jctx context.Context, id, modelID, kind string, p Gener
 					settings = s
 				}
 			}
+		}
+		if ov != nil && !ov.IsZero() {
+			ov.Apply(&settings)
+			// A graph-shaped launch is not the user's tuned configuration;
+			// do not record it as the model's last known good.
+			settings.SaveOnSuccess = false
 		}
 		var err error
 		port, err = m.EnsureServer(modelID, settings)
@@ -933,6 +1017,28 @@ func (m *Manager) serverMeta(modelID string) (runtimeID, logPath string, pid int
 		pid = sv.handle.Cmd.Process.Pid
 	}
 	return runtimeID, logPath, pid
+}
+
+// RunningSettings returns the settings the model's ready sd-server was
+// launched with (after companion pairing), if one is running.
+func (m *Manager) RunningSettings(modelID string) (LoadSettings, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sv, ok := m.servers[modelID]
+	if !ok || !sv.ready {
+		return LoadSettings{}, false
+	}
+	if sv.resolved == (LoadSettings{}) {
+		return sv.settings, true // server injected without a launch record
+	}
+	return sv.resolved, true
+}
+
+// serverSatisfies reports whether the model's running server already has the
+// given launch overrides in effect.
+func (m *Manager) serverSatisfies(modelID string, ov LoadOverrides) bool {
+	have, ok := m.RunningSettings(modelID)
+	return ok && ov.SatisfiedBy(have)
 }
 
 // serverMatchesPort reports whether the model's supervised server is still

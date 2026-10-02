@@ -443,18 +443,14 @@ ApplicationWindow {
                         window.goTo("quantize")
                     }
                     onOpenImageStudio: function(modelId) {
-                        mediaPage.selectedModelId = modelId
+                        graphPage.preferredModelId = modelId
                         window.goTo("media")
                     }
                 }
-                MediaPage {
-                    id: mediaPage
+                GraphPage {
+                    id: graphPage
                     api: api
                     events: events
-                    // LoadConfigDialog lives inside LibraryPage and parents to
-                    // Overlay.overlay, so it shows fine without navigating —
-                    // same pattern as ChatPage.onConfigureModel above.
-                    onLoadModel: function(modelId) { libraryPage.openLoad(modelId) }
                 }
                 DeveloperPage { api: api; events: events }
                 RuntimesPage  { api: api; events: events; recommendation: window.recommendation }

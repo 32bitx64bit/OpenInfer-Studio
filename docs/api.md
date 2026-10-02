@@ -275,6 +275,83 @@ the frontend does not lose ETA or stage state. Long `llama-imatrix` passes are
 interpolated from the runtime's reported seconds-per-pass between checkpoints.
 `quant.state_changed` (`id, state, kind, source_model_id, dest_path, model_id, ftype, error`).
 
+## Media (Image Studio)
+
+Image / video generation jobs (stable-diffusion.cpp `sd-server`). `POST
+/models/{id}/media/generate` returns **202** with a queued job; progress
+arrives as `media.progress` events. Job rows carry `urls` (control-API paths,
+need the bearer token) and `file_urls` / `local_paths` (local `file://` URLs and
+paths) — the desktop UI loads `file_urls` only.
+
+| Method & path | Purpose |
+|---|---|
+| GET `/media/servers` | live sd-server processes with state and log tail |
+| GET `/media/jobs[?model_id=]` | recent jobs |
+| GET `/media/jobs/{id}` | one job |
+| POST `/media/jobs/{id}/cancel` | cancel a queued/running job |
+| POST `/media/jobs/{id}/save` | `{"dest_path": "/…/photo.png"}` copy outputs out of the managed media dir to a user-chosen absolute path. A single-output job lands exactly on `dest_path`; batch extras get `-1`, `-2`, … before the extension. Returns `{ok, saved:[…]}` |
+| GET `/media/file/{rel}` | serve one stored output (media-root-relative only) |
+| GET `/models/{id}/media/capabilities` | samplers, schedulers, formats, defaults for the running server |
+| POST `/models/{id}/media/server/start\|stop` | manage the model's sd-server |
+| POST `/models/{id}/media/generate` | `{kind, prompt, negative_prompt, width, height, steps, cfg_scale, seed, sampler, scheduler, guidance, output_format, batch_count, strength, init_image_path, video_frames, fps}` |
+
+Events: `media.progress` (`id`, `state`, `message`, `sd_status`, `outputs`),
+`media.server_state`, `media.server_starting`, `media.server_ready`,
+`media.server_error`, `media.server_stopped`.
+
+## Workflows (Image Studio Graph view)
+
+A workflow is a JSON node graph the QML canvas edits. The backend owns the node
+registry, validation, planning and running; QML only draws. Runs go through one
+FIFO queue (one GPU, one run at a time), live in memory (the last 30 are kept),
+and write their outputs as ordinary media files and `media_jobs` rows. There is
+no node cache yet: every run recomputes every stage.
+
+| Method & path | Purpose |
+|---|---|
+| GET `/workflow/node-types[?runtime_id=]` | `{node_types, port_types, runtime}`. Every node type with its ports, parameters and `available`/`reason` for the selected sd.cpp runtime (a node needing a flag the runtime does not advertise is unavailable). The canvas draws sockets, widgets, palette and inspector from this |
+| GET/POST `/workflows` | list `{workflows:[{id,name,node_count,created_at,updated_at}]}` / create `{name?, graph}` → **201** record |
+| GET/PUT/DELETE `/workflows/{id}` | load a record `{id,name,graph,created_at,updated_at}` / `{name?, graph?}` replace either part / delete |
+| POST `/workflows/validate` | `{graph, only?, runtime_id?}` → `{ok, errors[], warnings[], plan, runtime}`. `only` plans a node and everything upstream ("Run to here") |
+| POST `/workflow/runs` | `{graph, only?, runtime_id?}` → **202** `{run, warnings}`. A graph with problems is **400** `{error, errors[], warnings[]}` and nothing is queued; a full queue is **429** |
+| GET `/workflow/runs` | recent runs, newest first |
+| GET `/workflow/runs/{id}` | `{id, state, error?, nodes:{<node id>:{state, message?, outputs?, file_urls?, job_id?, ms?}}, created_at, started_at?, finished_at?}` |
+| POST `/workflow/runs/{id}/cancel` | cancel a queued or running run (the running GPU job is canceled too) |
+
+Saving never requires a valid graph (drafts are normal); only the document
+shape is checked (`version: 1`, at most 500 nodes / 2000 edges). A bad
+document is **400**, an unknown id **404**.
+
+Graph document: `{version:1, name?, nodes:[{id, type, title?, pos:[x,y],
+params?}], edges:[{from:[node,port], to:[node,port]}], groups?, view?}`. Models
+are referenced by library id (`{"library_id": "…", "name": "…"}`), never by
+path; local files (LoRA, VAE, text encoder, input image) by absolute path.
+
+Issues are `{severity, code, node?, port?, param?, message}` so the canvas can
+mark the exact socket. Codes: `node.*`, `edge.*` (`type`, `multiple`,
+`endpoint`, `self`), `input.missing`, `param.*` (`unknown`, `required`, `type`,
+`range`, `enum`), `graph.cycle`, `capability.missing`, and planner errors
+`plan.*` (`model_missing`, `file_missing`, `prompt_empty`, `clip_source`,
+`vae_source`, `lora_dir`, `lora_name`, `image_size`, `i2v_unsupported`, …).
+
+Events: `workflow.run_queued` (`run_id`, `nodes`), `workflow.run_started`,
+`workflow.node_state` (`run_id`, `node_id`, `state` pending|running|done|failed|
+canceled, `message?`, `outputs?`, `file_urls?`, `job_id?`, `ms?`) and
+`workflow.run_finished` (`run_id`, `state` complete|failed|canceled, `error?`).
+Loaders, prompts and sizes have no work of their own: they take the state of the
+stage that consumes them. A random seed (`-1`) is resolved to a concrete one
+before submitting and reported in the node's `message` (`seed N`). Run states
+are in memory, so a stage's `outputs` are media-root-relative paths and
+`file_urls` are local `file://` URLs for previews.
+
+`plan` is `{stages, servers, warnings?}`. Stages are `generate` (one sd-server
+request, with the full `GenerateParams` it will send), `resize` (CPU, in the
+backend) or `save`. Each carries a content-hash `key` (`volatile` when a seed
+is random, so it must never be cached). `servers` lists each sd-server the plan
+uses by load `signature` with `action`: `reuse` (a running server already has
+the graph's VAE / text encoder / LoRA folder), `start`, or `restart` (sd-server
+only reads those at launch, so changing one reloads the model).
+
 ## Chat
 
 | Method & path | Purpose |

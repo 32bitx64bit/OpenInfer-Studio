@@ -16,6 +16,7 @@ import (
 	"github.com/openinfer/openinfer-studio/internal/proxy"
 	"github.com/openinfer/openinfer-studio/internal/quantize"
 	"github.com/openinfer/openinfer-studio/internal/runtimes"
+	"github.com/openinfer/openinfer-studio/internal/workflow"
 )
 
 // Deps are the backend services exposed over the control API.
@@ -35,6 +36,7 @@ type Deps struct {
 	HostIt   *hostit.Bridge
 	Logs     *diagnostics.Manager
 	Quant    *quantize.Manager
+	Workflow *workflow.Service
 }
 
 // RegisterRoutes wires every REST endpoint and the event WebSocket.
@@ -86,11 +88,24 @@ func (s *Server) RegisterRoutes(d *Deps) {
 	s.Handle("GET /api/v1/media/jobs", h.listMediaJobs)
 	s.Handle("GET /api/v1/media/jobs/{id}", h.getMediaJob)
 	s.Handle("POST /api/v1/media/jobs/{id}/cancel", h.cancelMediaJob)
+	s.Handle("POST /api/v1/media/jobs/{id}/save", h.saveMediaJob)
 	s.Handle("GET /api/v1/media/file/", h.mediaFile)
 	s.Handle("GET /api/v1/models/{id}/media/capabilities", h.mediaCapabilities)
 	s.Handle("POST /api/v1/models/{id}/media/server/start", h.mediaServer)
 	s.Handle("POST /api/v1/models/{id}/media/server/stop", h.mediaServer)
 	s.Handle("POST /api/v1/models/{id}/media/generate", h.generateMedia)
+
+	s.Handle("GET /api/v1/workflow/node-types", h.workflowNodeTypes)
+	s.Handle("GET /api/v1/workflows", h.listWorkflows)
+	s.Handle("POST /api/v1/workflows", h.createWorkflow)
+	s.Handle("POST /api/v1/workflows/validate", h.validateWorkflow)
+	s.Handle("POST /api/v1/workflow/runs", h.startWorkflowRun)
+	s.Handle("GET /api/v1/workflow/runs", h.listWorkflowRuns)
+	s.Handle("GET /api/v1/workflow/runs/{id}", h.getWorkflowRun)
+	s.Handle("POST /api/v1/workflow/runs/{id}/cancel", h.cancelWorkflowRun)
+	s.Handle("GET /api/v1/workflows/{id}", h.getWorkflow)
+	s.Handle("PUT /api/v1/workflows/{id}", h.putWorkflow)
+	s.Handle("DELETE /api/v1/workflows/{id}", h.deleteWorkflow)
 
 	s.Handle("GET /api/v1/directories", h.listDirs)
 	s.Handle("POST /api/v1/directories", h.addDir)

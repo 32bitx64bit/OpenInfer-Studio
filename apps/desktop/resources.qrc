@@ -5,6 +5,7 @@
         <file>qml/AppTheme.qml</file>
         <file>qml/qmldir</file>
         <file>qml/js/codeHighlight.js</file>
+        <file>qml/js/graphModel.js</file>
         <file>qml/services/Api.qml</file>
         <file>qml/services/Events.qml</file>
         <file>qml/components/NavButton.qml</file>
@@ -40,7 +41,16 @@
         <file>qml/pages/ChatPage.qml</file>
         <file>qml/pages/DiscoverPage.qml</file>
         <file>qml/pages/LibraryPage.qml</file>
-        <file>qml/pages/MediaPage.qml</file>
+        <file>qml/pages/GraphPage.qml</file>
+        <file>qml/components/graph/GraphNode.qml</file>
+        <file>qml/components/graph/Socket.qml</file>
+        <file>qml/components/graph/QuickAdd.qml</file>
+        <file>qml/components/graph/NodeNumber.qml</file>
+        <file>qml/components/graph/NodeCombo.qml</file>
+        <file>qml/components/graph/NodeText.qml</file>
+        <file>qml/components/graph/NodeLine.qml</file>
+        <file>qml/components/graph/NodeModelPick.qml</file>
+        <file>qml/components/graph/NodeBool.qml</file>
         <file>qml/pages/DeveloperPage.qml</file>
         <file>qml/pages/RuntimesPage.qml</file>
         <file>qml/pages/QuantizationPage.qml</file>

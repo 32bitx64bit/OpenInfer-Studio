@@ -2,11 +2,13 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/openinfer/openinfer-studio/internal/mediagen"
@@ -147,6 +149,101 @@ func (h *handlers) getMediaJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, mediaJobView(j, h.d.Media.MediaDir()))
+}
+
+// saveTargets maps n job outputs onto a user-chosen destination path: the
+// first output lands exactly on dest, later ones get "-<i>" before the
+// extension so a batch lands beside the picked name.
+func saveTargets(dest string, n int) []string {
+	out := make([]string, 0, n)
+	ext := filepath.Ext(dest)
+	stem := strings.TrimSuffix(dest, ext)
+	for i := 0; i < n; i++ {
+		if i == 0 {
+			out = append(out, dest)
+		} else {
+			out = append(out, stem+"-"+strconv.Itoa(i)+ext)
+		}
+	}
+	return out
+}
+
+// copyFile writes src to dst atomically (temp file + rename).
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	tmp := dst + ".copying"
+	out, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dst)
+}
+
+// saveMediaJob copies a job's generated outputs out of the managed media dir
+// to a user-chosen absolute path ("Save to disk"). A single-output job lands
+// exactly on dest_path; a batch writes the rest beside it as name-1.ext, …
+func (h *handlers) saveMediaJob(w http.ResponseWriter, r *http.Request) {
+	if h.d.Media == nil {
+		writeErr(w, 503, "media generation unavailable", nil)
+		return
+	}
+	var body struct {
+		DestPath string `json:"dest_path"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	dest := filepath.Clean(body.DestPath)
+	if dest == "" || dest == "." {
+		writeErr(w, 400, "dest_path required", nil)
+		return
+	}
+	if !filepath.IsAbs(dest) {
+		writeErr(w, 400, "dest_path must be an absolute path", nil)
+		return
+	}
+	j, err := h.d.Media.Get(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, 404, "media job not found", err)
+		return
+	}
+	outs := j.OutputPaths
+	if len(outs) == 0 {
+		writeErr(w, 400, "job has no output files", nil)
+		return
+	}
+	mediaDir := h.d.Media.MediaDir()
+	targets := saveTargets(dest, len(outs))
+	saved := make([]string, 0, len(outs))
+	for i, p := range outs {
+		src := p
+		if !filepath.IsAbs(src) {
+			src = filepath.Join(mediaDir, filepath.FromSlash(p))
+		}
+		if _, err := os.Stat(src); err != nil {
+			writeErr(w, 404, "output file not found", err)
+			return
+		}
+		if err := copyFile(src, targets[i]); err != nil {
+			writeErr(w, 500, "save failed", err)
+			return
+		}
+		saved = append(saved, targets[i])
+	}
+	writeJSON(w, 200, map[string]any{"ok": true, "saved": saved})
 }
 
 func (h *handlers) cancelMediaJob(w http.ResponseWriter, r *http.Request) {

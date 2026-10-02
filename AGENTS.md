@@ -36,7 +36,7 @@ llama.cpp. Qt 6/QML frontend, Go backend, SQLite state, one managed
 - `apps/core` — backend main (+ watchdog, adapters)
 - `internal/*` — api, auth, chat, config, database, diagnostics, downloads,
   gguf, hardware, huggingface, instances, models, processes, proxy, runtimes,
-  storage
+  storage, workflow
 - `migrations/` — embedded SQL
 - `tests/` — integration tests; `tests/fakeserver` is the fake llama-server
 - `packaging/`, `scripts/`, `docs/` (control API: `docs/api.md`)
