@@ -23,7 +23,6 @@ Item {
     property string detailEmbedding: ""
     property string detailDiffusion: ""
     property var detailDiffusionGroups: []
-    property string corpus: "llm" // llm|diffusion
     property bool withVision: true
     property bool withDraft: true
     property bool showFilePaths: false
@@ -132,8 +131,8 @@ Item {
         page.searchError = ""
         var q = encodeURIComponent(searchField.text)
         var sort = sortCombo.currentValue
-        var kind = page.corpus === "diffusion" ? "&kind=diffusion" : ""
-        api.get("/api/v1/hf/search?q=" + q + "&sort=" + sort + "&limit=40" + kind, function(st, data) {
+        // One corpus: GGUF chat models and image/video generators together.
+        api.get("/api/v1/hf/search?q=" + q + "&sort=" + sort + "&limit=40&kind=all", function(st, data) {
             page.searching = false
             if (st === 200) {
                 page.results = (data && data.results) || []
@@ -259,26 +258,16 @@ Item {
 
         PageHeader {
             title: "Browse models"
-            subtitle: "Find GGUF chat models or image/video generators on Hugging Face."
+            subtitle: "Find chat models and image/video generators on Hugging Face."
         }
 
         RowLayout {
             Layout.fillWidth: true
             spacing: 8
-            AppComboBox {
-                id: corpusCombo
-                model: [
-                    { "text": "Chat (GGUF)", "value": "llm" },
-                    { "text": "Image / video", "value": "diffusion" }
-                ]
-                textRole: "text"
-                valueRole: "value"
-                onActivated: page.corpus = currentValue
-            }
             SearchField {
                 id: searchField
                 Layout.fillWidth: true
-                placeholderText: page.corpus === "diffusion" ? "Search Hugging Face for image/video generators…" : "Search Hugging Face for GGUF models…"
+                placeholderText: "Search Hugging Face for models…"
                 searchLabel: "Search Hugging Face models"
                 onAccepted: page.search()
             }
@@ -334,7 +323,7 @@ Item {
                 anchors.centerIn: parent
                 icon: "⌕"
                 title: "Search for models"
-                hint: "Search Hugging Face for GGUF repositories. Results are grouped by quantization, split set, and projector files."
+                hint: "Search Hugging Face for GGUF chat models and image/video generators. Open one to pick the file set you want."
             }
 
             delegate: Card {

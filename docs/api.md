@@ -19,7 +19,7 @@ Errors: `{"error": "message", "detail": "debug detail"}`.
 
 | Method & path | Purpose |
 |---|---|
-| GET `/hf/search?q=&sort=&limit=` | GGUF repo search (sort: downloads, likes, trending, lastModified); results include `modalities`, `mtp`, and `embedding` (`embedding`\|`reranker`) when detectable |
+| GET `/hf/search?q=&sort=&limit=&kind=` | repo search (sort: downloads, likes, trending, lastModified). `kind=all` (what the app uses) merges GGUF repos with image/video generators (diffusers bundles and repos tagged text-to-image / text-to-video / image-to-video) into one deduplicated list and still answers if some sources fail; `kind=llm` (default) is GGUF only, `kind=diffusion` is diffusers generators only. Results include `modalities`, `mtp`, `embedding` (`embedding`\|`reranker`) and `diffusion` (`image`\|`video`\|`both`) when detectable |
 | GET `/hf/repo/{author}/{name}` | repo detail + grouped file sets + `modalities` + `mtp` + `embedding` + model card |
 | GET/PUT/DELETE `/hf/token` | token status / store in OS keychain / remove |
 

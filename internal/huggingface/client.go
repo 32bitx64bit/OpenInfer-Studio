@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -160,32 +161,118 @@ type hfSafetensors struct {
 	Total      int64            `json:"total"`
 }
 
-// Search queries model repositories. kind selects the corpus:
-// "" | "llm" → GGUF text models (legacy default), "diffusion" →
-// image/video generators (diffusers pipeline tags + family tokens).
+// Search kinds accepted by SearchKind.
+const (
+	// SearchKindLLM ("" or "llm") queries GGUF repositories only (the legacy
+	// default for API callers).
+	SearchKindLLM = "llm"
+	// SearchKindDiffusion queries image/video generators only.
+	SearchKindDiffusion = "diffusion"
+	// SearchKindAll is the Discover page's single corpus: GGUF repositories
+	// plus image/video generators in one ranked list.
+	SearchKindAll = "all"
+)
+
+// searchSpec is one Hub /api/models query that contributes to a search.
+type searchSpec struct {
+	filter      string // library/format tag ("gguf", "diffusers")
+	pipelineTag string // task tag; the Hub accepts only one per request
+}
+
+// searchSpecs returns the Hub queries a kind expands to. The unified search
+// asks for every source that can hold a loadable model: GGUF repositories
+// (chat models and GGUF-quantized diffusion transformers), diffusers
+// bundles, and repositories tagged with an image/video generation task but
+// shipping single-file checkpoints (ComfyUI repackages carry no diffusers
+// tag).
+func searchSpecs(kind string) []searchSpec {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case SearchKindDiffusion:
+		return []searchSpec{{filter: "diffusers"}}
+	case SearchKindAll:
+		return []searchSpec{
+			{filter: "gguf"},
+			{filter: "diffusers"},
+			{pipelineTag: "text-to-image"},
+			{pipelineTag: "text-to-video"},
+			{pipelineTag: "image-to-video"},
+		}
+	default:
+		return []searchSpec{{filter: "gguf"}}
+	}
+}
+
+// Search queries model repositories (GGUF text models; see SearchKind).
 func (c *Client) Search(ctx context.Context, query, sort string, limit int) ([]SearchResult, error) {
 	return c.SearchKind(ctx, query, sort, limit, "")
 }
 
-// SearchKind is Search with an explicit corpus selector.
+// SearchKind is Search with an explicit corpus selector. "" | "llm" →
+// GGUF text models, "diffusion" → diffusers image/video generators, "all" →
+// both, merged into one list.
 func (c *Client) SearchKind(ctx context.Context, query, sort string, limit int, kind string) ([]SearchResult, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 30
 	}
+	specs := searchSpecs(kind)
+	if len(specs) == 1 {
+		rows, err := c.searchOnce(ctx, query, sort, limit, kind, specs[0])
+		if err != nil {
+			return nil, err
+		}
+		return rows, nil
+	}
+
+	type outcome struct {
+		rows []SearchResult
+		err  error
+	}
+	outs := make([]outcome, len(specs))
+	var wg sync.WaitGroup
+	for i, spec := range specs {
+		wg.Add(1)
+		go func(i int, spec searchSpec) {
+			defer wg.Done()
+			outs[i].rows, outs[i].err = c.searchOnce(ctx, query, sort, limit, kind, spec)
+		}(i, spec)
+	}
+	wg.Wait()
+
+	// A source that fails (rate limit, one bad filter) must not blank the
+	// others; the search only fails when every source does.
+	lists := make([][]SearchResult, 0, len(outs))
+	var firstErr error
+	for _, o := range outs {
+		if o.err != nil {
+			if firstErr == nil {
+				firstErr = o.err
+			}
+			continue
+		}
+		lists = append(lists, o.rows)
+	}
+	if len(lists) == 0 {
+		return nil, firstErr
+	}
+	return mergeSearchResults(lists, sort, limit), nil
+}
+
+// searchOnce runs one Hub query and converts its rows.
+func (c *Client) searchOnce(ctx context.Context, query, sort string, limit int, kind string, spec searchSpec) ([]SearchResult, error) {
 	q := url.Values{}
 	q.Set("search", query)
 	q.Set("limit", strconv.Itoa(limit))
 	q.Set("full", "true")
-	if strings.EqualFold(kind, "diffusion") {
-		// Generator corpus: query the diffusers pipelines plus the known
-		// families so tag-less single-file checkpoints still surface.
-		// pipeline_tag narrows to one tag, so prefer library + search terms.
-		q.Set("filter", "diffusers")
-		if strings.TrimSpace(query) == "" {
-			q.Set("search", "stable diffusion flux sdxl wan ltx")
-		}
-	} else {
-		q.Set("filter", "gguf")
+	if spec.filter != "" {
+		q.Set("filter", spec.filter)
+	}
+	if spec.pipelineTag != "" {
+		q.Set("pipeline_tag", spec.pipelineTag)
+	}
+	if strings.EqualFold(kind, SearchKindDiffusion) && strings.TrimSpace(query) == "" {
+		// Diffusers-only browsing with no query: seed with the known
+		// families so the result is not dominated by adapters.
+		q.Set("search", "stable diffusion flux sdxl wan ltx")
 	}
 	switch sort {
 	case "downloads", "likes", "lastModified", "trending":
@@ -222,6 +309,78 @@ func (c *Client) SearchKind(ctx context.Context, query, sort string, limit int, 
 		})
 	}
 	return out, nil
+}
+
+// mergeSearchResults folds per-source result lists into one list of at most
+// limit rows with each repository once. A sorted search (downloads, likes,
+// trending, lastModified) orders by that key across sources; relevance has
+// no comparable score, so sources are interleaved round-robin and each
+// keeps its own ranking.
+func mergeSearchResults(lists [][]SearchResult, sort string, limit int) []SearchResult {
+	seen := map[string]bool{}
+	var merged []SearchResult
+	add := func(r SearchResult) {
+		key := strings.ToLower(r.ID)
+		if r.ID == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		merged = append(merged, r)
+	}
+
+	less := searchLess(sort)
+	if less == nil {
+		for rank := 0; ; rank++ {
+			more := false
+			for _, l := range lists {
+				if rank < len(l) {
+					more = true
+					add(l[rank])
+				}
+			}
+			if !more {
+				break
+			}
+		}
+	} else {
+		for _, l := range lists {
+			for _, r := range l {
+				add(r)
+			}
+		}
+		slices.SortStableFunc(merged, func(a, b SearchResult) int {
+			switch {
+			case less(a, b):
+				return -1
+			case less(b, a):
+				return 1
+			}
+			return 0
+		})
+	}
+	if len(merged) > limit {
+		merged = merged[:limit]
+	}
+	if merged == nil {
+		merged = []SearchResult{}
+	}
+	return merged
+}
+
+// searchLess orders results for a Hub sort key, best first; nil means the
+// sort has no cross-source key (relevance).
+func searchLess(sort string) func(a, b SearchResult) bool {
+	switch sort {
+	case "downloads":
+		return func(a, b SearchResult) bool { return a.Downloads > b.Downloads }
+	case "likes":
+		return func(a, b SearchResult) bool { return a.Likes > b.Likes }
+	case "trending":
+		return func(a, b SearchResult) bool { return a.Trending > b.Trending }
+	case "lastModified":
+		return func(a, b SearchResult) bool { return a.UpdatedAt.After(b.UpdatedAt) }
+	}
+	return nil
 }
 
 // FileEntry is one file in a repository tree.

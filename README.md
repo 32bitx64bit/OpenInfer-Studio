@@ -15,9 +15,9 @@ quantize → serve works end to end. See *Known limitations* below.
 detected hardware (Vulkan, CUDA, HIP, or Metal). Theme follows the OS; dark
 and light are available.
 
-**Find and download.** Browse Hugging Face for GGUF repositories. Results are
-grouped by quantization and split set, with tags for vision, audio, MTP,
-embeddings, and speculative drafts. Downloads resume, support multiple
+**Find and download.** One search over Hugging Face for GGUF chat models and
+image/video generators. Results are grouped by quantization and split set, with
+tags for vision, audio, MTP, embeddings, speculative drafts, and image/video. Downloads resume, support multiple
 connections per file, and land in the library automatically. A Hugging Face
 token (OS keychain only) unlocks gated or private repos.
 
