@@ -182,8 +182,10 @@ func (m *Manager) Enqueue(kind, label, destDir string, files []FileSpec, meta an
 		id, kind, label, "queued", maxPos+1, total, destDir, string(metaJSON), now(), now()); err != nil {
 		return "", err
 	}
-	for _, f := range files {
-		partial := filepath.Join(m.partial, id+"-"+filepath.Base(f.DestPath)+".part")
+	for i, f := range files {
+		// The index keeps two files that share a base name (vae/model.safetensors,
+		// unet/model.safetensors) from sharing one partial file.
+		partial := filepath.Join(m.partial, fmt.Sprintf("%s-%d-%s.part", id, i, filepath.Base(f.DestPath)))
 		if _, err := tx.Exec(`INSERT INTO download_files
 			(id,download_id,url,dest_path,partial_path,total_bytes,done_bytes,sha256,state)
 			VALUES (?,?,?,?,?,?,0,?,'queued')`,

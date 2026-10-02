@@ -71,7 +71,11 @@ func roleFromName(base, dir string) string {
 		strings.Contains(dir, "control_net") || strings.Contains(dir, "control-net"):
 		return RoleControlNet
 	case strings.Contains(base, "vae") || strings.Contains(dir, "/vae") ||
-		strings.HasSuffix(dir, "vae") || strings.Contains(dir, "vae/"):
+		strings.HasSuffix(dir, "vae") || strings.Contains(dir, "vae/") ||
+		strings.TrimSuffix(base, filepath.Ext(base)) == "ae":
+		// "ae" is how FLUX-family releases name their autoencoder
+		// (ae.safetensors); its tensors carry no vae./first_stage_model.
+		// prefix, so the name is the only evidence.
 		return RoleVAE
 	case strings.Contains(base, "qwen3vl") || strings.Contains(base, "qwen2vl") ||
 		strings.Contains(base, "qwen2.5") || strings.Contains(base, "qwen_2.5") ||
@@ -204,9 +208,10 @@ func IsFullCheckpoint(tensorNames []string) bool {
 // Preference ranks how loadable a component file is for sd.cpp (higher is
 // better). GGUF is native and always preferred, regardless of quant tokens
 // in its name (a Qwen2.5-VL-7B-Instruct-Q8_0.gguf is still a perfectly
-// loadable GGUF). Plain bf16/f16/f32 safetensors load fine. Exotic quant
-// packs (ComfyUI int8_convrot, fp8_scaled, …) abort sd.cpp's Linear loader
-// and rank last so a usable sibling wins whenever one exists.
+// loadable GGUF). Plain bf16/f16/f32 safetensors load fine, plain fp8 casts
+// rank just below them. Exotic quant packs (ComfyUI int8_convrot,
+// fp8_scaled, …) abort sd.cpp's Linear loader and rank last so a usable
+// sibling wins whenever one exists.
 //
 // Shared by the mediagen launcher and the Hugging Face download grouper so
 // both pick the same file when a repo offers several variants.
@@ -217,12 +222,19 @@ func Preference(path string) int {
 		return 100
 	}
 	if strings.Contains(base, "convrot") || strings.Contains(base, "int8") ||
-		strings.Contains(base, "fp8") || strings.Contains(base, "_scaled") {
+		strings.Contains(base, "_scaled") {
 		return 5
 	}
+	// "fp16" does not contain "f16", and ComfyUI repos spell it fp16.
 	if strings.Contains(base, "bf16") || strings.Contains(base, "f16") ||
-		strings.Contains(base, "f32") {
+		strings.Contains(base, "fp16") || strings.Contains(base, "f32") ||
+		strings.Contains(base, "fp32") {
 		return 80
+	}
+	// Plain (unscaled) fp8 casts carry no side tensors, so they rank under
+	// float files but above packs that need scales.
+	if strings.Contains(base, "fp8") || strings.Contains(base, "e4m3") || strings.Contains(base, "e5m2") {
+		return 40
 	}
 	return 50
 }

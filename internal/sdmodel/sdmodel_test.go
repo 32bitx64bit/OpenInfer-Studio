@@ -119,6 +119,11 @@ func TestComponentRoleFromName(t *testing.T) {
 		"loras/add-detail-xl.safetensors":                   RoleLoRA,
 		"qwen-image-2.1-Q6_K.gguf":                          "",
 		"model-00001-of-00004.safetensors":                  "",
+		// FLUX-family autoencoders are just called "ae".
+		"ae.safetensors":                  RoleVAE,
+		"split_files/vae/ae.sft":          RoleVAE,
+		"flux1-dev.safetensors":           "",
+		"image_encoder/model.safetensors": "",
 	}
 	for path, want := range cases {
 		if got := ComponentRole(path, nil); got != want {
@@ -259,5 +264,24 @@ func TestIsFullCheckpoint(t *testing.T) {
 	noDiffusion := []string{"first_stage_model.encoder.conv_in.weight"}
 	if IsFullCheckpoint(noDiffusion) {
 		t.Fatal("VAE-only weights (no diffusion transformer) must not read as a full checkpoint")
+	}
+}
+
+func TestPreferenceRanksPlainFP8BetweenFloatsAndPacks(t *testing.T) {
+	order := []string{
+		"model-Q8_0.gguf",
+		"t5xxl_fp16.safetensors",
+		"t5xxl.safetensors",
+		"t5xxl_fp8_e4m3fn.safetensors",
+		"t5xxl_fp8_e4m3fn_scaled.safetensors",
+	}
+	for i := 0; i+1 < len(order); i++ {
+		if Preference(order[i]) <= Preference(order[i+1]) {
+			t.Errorf("Preference(%q)=%d should beat Preference(%q)=%d",
+				order[i], Preference(order[i]), order[i+1], Preference(order[i+1]))
+		}
+	}
+	if Preference("flux-int8_convrot.safetensors") >= Preference("flux-fp8.safetensors") {
+		t.Error("int8 packs must rank under plain fp8")
 	}
 }

@@ -14,20 +14,13 @@ Item {
     property bool searching: false
     property string searchError: ""
     property var detail: null
-    property var detailGroups: []
-    property var detailProjectors: []
-    property var detailDrafts: []
-    property var detailModalities: []
+    property var detailPlan: null
     property string detailMTP: ""
     property string detailDraft: ""
     property string detailEmbedding: ""
     property string detailDiffusion: ""
-    property var detailDiffusionGroups: []
-    property bool withVision: true
-    property bool withDraft: true
-    property bool showFilePaths: false
-    property bool hideQ8AndBelow: false
     property bool detailLoading: false
+    property bool cardOpen: false
     property bool hasToken: false
     signal downloadQueued(string label)
 
@@ -72,54 +65,6 @@ Item {
         return st
     }
 
-    function groupDraftTag(group) {
-        if (!group || !group.draft) return ""
-        return page.draftLabel(group.spec_type || "draft")
-    }
-
-    function projectorToggleLabel() {
-        var bytes = AppTheme.bytes(page.projectorBytes())
-        if (page.experimentalAudio) {
-            var mod = page.modalityLabel(page.detailModalities)
-            var hint = mod !== "" ? (" · " + mod) : ""
-            return "Download with multimodal projector (mmproj · " + bytes + ")" + hint
-        }
-        return "Download with vision (mmproj · " + bytes + ")"
-    }
-
-    function drafterToggleLabel() {
-        var bytes = AppTheme.bytes(page.draftBytesAll())
-        var kinds = []
-        var seen = {}
-        for (var i = 0; i < page.detailDrafts.length; i++) {
-            var lab = page.draftLabel(page.detailDrafts[i].spec_type || page.detailDraft || "draft")
-            if (lab && !seen[lab]) {
-                seen[lab] = true
-                kinds.push(lab)
-            }
-        }
-        var name = kinds.length ? kinds.join(" / ") : (page.draftLabel(page.detailDraft) || "drafter")
-        return "Download with speculative drafter (" + name + " · " + bytes + ")"
-    }
-
-    function groupModalityTag(group) {
-        if (group && group.draft) return ""
-        if (page.experimentalAudio) {
-            var label = page.modalityLabel(page.detailModalities)
-            if (label !== "") return label
-            if (group.vision) return "multimodal"
-            return ""
-        }
-        return group.vision ? "vision" : ""
-    }
-
-    function filteredDetailGroups() {
-        if (!page.hideQ8AndBelow) return page.detailGroups
-        return page.detailGroups.filter(function(g) {
-            return AppTheme.isFullPrecisionQuant(g.quant)
-        })
-    }
-
     function reload() {
         api.get("/api/v1/hf/token", function(st, data) {
             if (st === 200) page.hasToken = data && data.configured
@@ -145,31 +90,22 @@ Item {
     function openRepo(repoId) {
         page.detailLoading = true
         page.detail = null
-        page.detailModalities = []
+        page.detailPlan = null
+        page.cardOpen = false
         page.detailMTP = ""
         page.detailDraft = ""
         page.detailEmbedding = ""
         page.detailDiffusion = ""
-        page.detailDiffusionGroups = []
-        page.detailDrafts = []
-        page.withVision = true
-        page.withDraft = true
-        page.showFilePaths = false
         detailDialog.open()
         api.get("/api/v1/hf/repo/" + repoId, function(st, data) {
             page.detailLoading = false
             if (st === 200) {
                 page.detail = data.repo
-                page.detailGroups = data.groups || []
-                page.detailProjectors = data.projectors || []
-                page.detailDrafts = data.drafts || []
-                page.detailModalities = data.modalities || []
                 page.detailMTP = data.mtp || ""
                 page.detailDraft = data.draft || ""
                 page.detailEmbedding = data.embedding || ""
                 page.detailDiffusion = data.diffusion || ""
-                page.detailDiffusionGroups = data.diffusion_groups || []
-                page.withDraft = (page.detailDrafts || []).length > 0
+                page.detailPlan = data.plan || { "kind": "", "components": [], "notes": [] }
             } else {
                 page.searchError = (data && (data.detail || data.error)) || ("HTTP " + st)
                 detailDialog.close()
@@ -177,76 +113,24 @@ Item {
         })
     }
 
-    function projectorBytes() {
-        var t = 0
-        for (var i = 0; i < page.detailProjectors.length; i++) t += page.detailProjectors[i].size
-        return t
-    }
-
-    function draftBytesAll() {
-        var t = 0
-        for (var i = 0; i < page.detailDrafts.length; i++) t += page.detailDrafts[i].size
-        return t
-    }
-
-    function matchingDrafts(group) {
-        var list = page.detailDrafts || []
-        if (!group || list.length === 0) return []
-        var q = group.quant || ""
-        var same = []
-        for (var i = 0; i < list.length; i++) {
-            if (q && list[i].quant === q) same.push(list[i])
-        }
-        return same.length ? same : list
-    }
-
-    function downloadGroup(group) {
-        if (page.detailDiffusion !== "") {
-            page.downloadDiffusionGroup(group)
+    // Download what the picker confirmed: every ticked component, each at its
+    // chosen precision, as one queued download.
+    function downloadPlan(req) {
+        if (!page.detail || !req.files || req.files.length === 0)
             return
-        }
-        var files = group.files.map(function(f) { return { "path": f.path, "size": f.size } })
-        var isDraft = !!group.draft
-        var hasProjector = group.files.some(function(f) { return f.kind === "projector" })
-        if (page.withVision && !isDraft && !hasProjector) {
-            for (var i = 0; i < page.detailProjectors.length; i++)
-                files.push({ "path": page.detailProjectors[i].path, "size": page.detailProjectors[i].size })
-        }
-        if (page.withDraft && !isDraft) {
-            var ds = page.matchingDrafts(group)
-            for (var j = 0; j < ds.length; j++)
-                files.push({ "path": ds[j].path, "size": ds[j].size })
-        }
+        var name = page.detail.id
+        var label = req.summary !== "" ? name + " · " + req.summary : name
         api.post("/api/v1/downloads", {
             "kind": "model",
-            "label": (page.detail ? page.detail.id : "") + " " + group.label,
-            "repo": page.detail.id,
-            "group": group.id,
-            "files": files
+            "label": label,
+            "repo": name,
+            "group": req.group,
+            "files": req.files
         }, function(st, data) {
             if (st !== 201)
                 page.searchError = (data && (data.detail || data.error)) || "download failed"
             else
-                page.downloadQueued((page.detail ? page.detail.id : "Model") + " · " + group.label)
-        })
-        detailDialog.close()
-    }
-
-    // Diffusion checkpoints download as sd.cpp weight files (single
-    // checkpoint or diffusers bundle subset), never as GGUF quant groups.
-    function downloadDiffusionGroup(group) {
-        var files = group.files.map(function(f) { return { "path": f.path, "size": f.size } })
-        api.post("/api/v1/downloads", {
-            "kind": "model",
-            "label": (page.detail ? page.detail.id : "") + " " + group.label,
-            "repo": page.detail.id,
-            "group": group.id,
-            "files": files
-        }, function(st, data) {
-            if (st !== 201)
-                page.searchError = (data && (data.detail || data.error)) || "download failed"
-            else
-                page.downloadQueued((page.detail ? page.detail.id : "Model") + " · " + group.label)
+                page.downloadQueued(label)
         })
         detailDialog.close()
     }
@@ -502,257 +386,28 @@ Item {
                     font.pixelSize: AppTheme.fontSmall
                 }
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    visible: page.detailProjectors.length > 0
-                    spacing: 8
-                    AppSwitch {
-                        id: visionToggle
-                        checked: page.withVision
-                        onToggled: page.withVision = checked
-                    }
-                    Label {
-                        text: page.projectorToggleLabel()
-                        color: AppTheme.text
-                        ToolTip.visible: visionHover.hovered
-                        ToolTip.text: {
-                            var paths = page.detailProjectors.map(function(p) { return p.path }).join("\n")
-                            if (page.experimentalAudio && page.modalityLabel(page.detailModalities) !== "")
-                                return "Includes projector for " + page.modalityLabel(page.detailModalities) + "\n" + paths
-                            return paths
-                        }
-                        HoverHandler { id: visionHover }
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: visionToggle.toggle()
-                        }
-                    }
-                    Item { Layout.fillWidth: true }
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    visible: page.detailDrafts.length > 0
-                    spacing: 8
-                    AppSwitch {
-                        id: draftToggle
-                        checked: page.withDraft
-                        onToggled: page.withDraft = checked
-                    }
-                    Label {
-                        text: page.drafterToggleLabel()
-                        color: AppTheme.text
-                        wrapMode: Text.WordWrap
-                        Layout.fillWidth: true
-                        ToolTip.visible: draftHover.hovered
-                        ToolTip.text: {
-                            var paths = page.detailDrafts.map(function(p) { return p.path }).join("\n")
-                            return "Optional companion for speculative decoding. Same output, extra VRAM.\n" + paths
-                        }
-                        HoverHandler { id: draftHover }
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: draftToggle.toggle()
-                        }
-                    }
-                }
-
-                RowLayout {
-                    visible: page.detailDiffusion === "" && page.detailGroups.length > 0
-                    Layout.fillWidth: true
-                    spacing: AppTheme.gap
-                    AppCheckBox {
-                        text: "Show individual file paths"
-                        checked: page.showFilePaths
-                        onToggled: page.showFilePaths = checked
-                    }
-                    AppCheckBox {
-                        text: "Hide Q8 and below"
-                        checked: page.hideQ8AndBelow
-                        ToolTip.visible: hovered
-                        ToolTip.text: "Show only F32, F16, and BF16. Q8, K-quants, IQ, Unsloth UD, and OpenInfer OID files are hidden."
-                        onToggled: page.hideQ8AndBelow = checked
-                    }
-                    Item { Layout.fillWidth: true }
-                }
-
-                AppGroupBox {
-                    visible: page.detailDiffusion === ""
+                DownloadPlanPicker {
+                    id: planPicker
+                    objectName: "planPicker"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    title: "Available files (" + page.filteredDetailGroups().length + " groups)"
-                    ListView {
-                        anchors.fill: parent
-                        clip: true
-                        spacing: 8
-                        model: page.filteredDetailGroups()
-                        add: Transition {
-                            ParallelAnimation {
-                                NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppTheme.motion; easing.type: Easing.OutCubic }
-                                NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
-                            }
-                        }
-                        populate: Transition {
-                            NumberAnimation { property: "opacity"; from: 0; to: 1; duration: AppTheme.motionFast; easing.type: Easing.OutCubic }
-                        }
-                        displaced: Transition {
-                            NumberAnimation { property: "y"; duration: AppTheme.motion; easing.type: Easing.OutCubic }
-                        }
-                        delegate: Card {
-                            width: ListView.view.width - 4
-                            implicitHeight: gcol.implicitHeight + 20
-                            ColumnLayout {
-                                id: gcol
-                                anchors.fill: parent
-                                anchors.margins: 10
-                                spacing: 6
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Label { text: modelData.label; color: AppTheme.text; font.weight: Font.DemiBold }
-                                    Tag {
-                                        visible: AppTheme.isUnslothDynamicQuant(modelData.quant)
-                                        text: "UD"
-                                        tone: AppTheme.warning
-                                        Layout.minimumWidth: implicitWidth
-                                    }
-                                    Tag {
-                                        visible: AppTheme.isOpenInferDynamicQuant(modelData.quant)
-                                        text: "OID"
-                                        tone: AppTheme.accent
-                                        Layout.minimumWidth: implicitWidth
-                                    }
-                                    Tag { visible: modelData.split; text: modelData.parts + " parts"; tone: AppTheme.info; Layout.minimumWidth: implicitWidth }
-                                    Tag {
-                                        visible: page.mtpLabel(modelData.mtp) !== ""
-                                        text: page.mtpLabel(modelData.mtp)
-                                        tone: AppTheme.warning
-                                        Layout.minimumWidth: implicitWidth
-                                    }
-                                    Tag {
-                                        visible: page.groupDraftTag(modelData) !== ""
-                                        text: page.groupDraftTag(modelData)
-                                        tone: AppTheme.warning
-                                        Layout.minimumWidth: implicitWidth
-                                    }
-                                    Tag {
-                                        visible: page.groupModalityTag(modelData) !== ""
-                                        text: page.groupModalityTag(modelData)
-                                        tone: AppTheme.success
-                                        Layout.minimumWidth: implicitWidth
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                    Label {
-                                        text: {
-                                            var t = modelData.total_bytes
-                                            var isDraft = !!modelData.draft
-                                            var hasProj = modelData.files.some(function(f) { return f.kind === "projector" })
-                                            var parts = []
-                                            if (page.withVision && !isDraft && page.detailProjectors.length > 0 && !hasProj) {
-                                                t += page.projectorBytes()
-                                                parts.push(page.experimentalAudio ? "mmproj" : "vision")
-                                            }
-                                            if (page.withDraft && !isDraft && page.detailDrafts.length > 0) {
-                                                var ds = page.matchingDrafts(modelData)
-                                                for (var i = 0; i < ds.length; i++) t += ds[i].size
-                                                parts.push(page.draftLabel(page.detailDraft || (ds[0] && ds[0].spec_type) || "draft"))
-                                            }
-                                            var s = AppTheme.bytes(t)
-                                            if (parts.length) s += " (incl. " + parts.join(" + ") + ")"
-                                            return s
-                                        }
-                                        color: AppTheme.textDim
-                                        font.pixelSize: AppTheme.fontSmall
-                                    }
-                                }
-                                Label {
-                                    text: "Estimated memory: ~" + AppTheme.bytes(modelData.est_memory_bytes) + " (estimate)"
-                                    color: AppTheme.textFaint
-                                    font.pixelSize: AppTheme.fontSmall
-                                }
-                                Repeater {
-                                    model: page.showFilePaths ? modelData.files : []
-                                    Label {
-                                        text: "  " + modelData.path + "  ·  " + AppTheme.bytes(modelData.size)
-                                        color: AppTheme.textDim
-                                        font.pixelSize: AppTheme.fontSmall
-                                        font.family: "monospace"
-                                        elide: Text.ElideMiddle
-                                        Layout.fillWidth: true
-                                    }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Item { Layout.fillWidth: true }
-                                    AppButton {
-                                        text: "Download"
-                                        primary: true
-                                        onClicked: page.downloadGroup(modelData)
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    plan: page.detailPlan
+                    experimentalAudio: page.experimentalAudio
+                    onConfirmed: function(request) { page.downloadPlan(request) }
                 }
 
-                // Image/video generators: checkpoint + bundle groups with file
-                // roles (checkpoint/vae/encoder), no quant/version gating.
-                AppGroupBox {
-                    visible: page.detailDiffusion !== ""
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    title: "Generator files (" + page.detailDiffusionGroups.length + " groups · " + page.diffusionLabel(page.detailDiffusion) + ")"
-                    ListView {
-                        anchors.fill: parent
-                        clip: true
-                        spacing: 8
-                        model: page.detailDiffusionGroups
-                        delegate: Card {
-                            width: ListView.view.width - 4
-                            implicitHeight: dcol.implicitHeight + 20
-                            ColumnLayout {
-                                id: dcol
-                                anchors.fill: parent
-                                anchors.margins: 10
-                                spacing: 6
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Label { text: modelData.label; color: AppTheme.text; font.weight: Font.DemiBold }
-                                    Tag { visible: (modelData.kind || "") !== ""; text: modelData.kind; tone: AppTheme.accent; Layout.minimumWidth: implicitWidth }
-                                    Item { Layout.fillWidth: true }
-                                    Label {
-                                        text: AppTheme.bytes(modelData.total_bytes)
-                                        color: AppTheme.textDim
-                                        font.pixelSize: AppTheme.fontSmall
-                                    }
-                                }
-                                Repeater {
-                                    model: modelData.files
-                                    Label {
-                                        text: "  " + modelData.path + "  ·  " + modelData.role + "  ·  " + AppTheme.bytes(modelData.size)
-                                        color: AppTheme.textDim
-                                        font.pixelSize: AppTheme.fontSmall
-                                        font.family: "monospace"
-                                        elide: Text.ElideMiddle
-                                        Layout.fillWidth: true
-                                    }
-                                }
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Item { Layout.fillWidth: true }
-                                    AppButton {
-                                        text: "Download"
-                                        primary: true
-                                        onClicked: page.downloadDiffusionGroup(modelData)
-                                    }
-                                }
-                            }
-                        }
-                    }
+                // The picker is the point of this dialog: the card stays
+                // folded until asked for.
+                AppButton {
+                    text: page.cardOpen ? "Hide model card ▴" : "Show model card ▾"
+                    flat: true
+                    onClicked: page.cardOpen = !page.cardOpen
                 }
 
                 AppGroupBox {
+                    visible: page.cardOpen
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 160
+                    Layout.preferredHeight: 220
                     title: "Model card"
                     ScrollView {
                         anchors.fill: parent

@@ -20,15 +20,48 @@ Errors: `{"error": "message", "detail": "debug detail"}`.
 | Method & path | Purpose |
 |---|---|
 | GET `/hf/search?q=&sort=&limit=&kind=` | repo search (sort: downloads, likes, trending, lastModified). `kind=all` (what the app uses) merges GGUF repos with image/video generators (diffusers bundles and repos tagged text-to-image / text-to-video / image-to-video) into one deduplicated list and still answers if some sources fail; `kind=llm` (default) is GGUF only, `kind=diffusion` is diffusers generators only. Results include `modalities`, `mtp`, `embedding` (`embedding`\|`reranker`) and `diffusion` (`image`\|`video`\|`both`) when detectable |
-| GET `/hf/repo/{author}/{name}` | repo detail + grouped file sets + `modalities` + `mtp` + `embedding` + model card |
+| GET `/hf/repo/{author}/{name}` | repo detail + `plan` (see below) + `modalities` + `mtp` + `embedding` + `diffusion` + model card. The older `groups` / `projectors` / `drafts` / `diffusion_groups` fields are still returned |
 | GET/PUT/DELETE `/hf/token` | token status / store in OS keychain / remove |
+
+### Download plan
+
+`plan` describes a repository as components the user can include or leave out,
+each with one option per stored precision, so a client can offer "pick what you
+want, then confirm" instead of "download every variant":
+
+```json
+{"kind": "chat|generator",
+ "components": [{
+   "id": "model", "role": "model", "label": "Model", "short": "", "hint": "…",
+   "selected": true,            // included by default
+   "experimental": false,       // off until the matching feature is enabled
+   "default": "<option id>",
+   "follow_precision_of": "",   // a drafter tracks the model's precision
+   "options": [{
+     "id": "…", "label": "Q4_K_M", "variant": "", "precision": "q4_k_m",
+     "bits": 4.58, "class": "quant|full|fp8|int8|4bit", "kind": "",
+     "tags": ["3 parts"], "total_bytes": 0, "est_memory_bytes": 0,
+     "recommended": true, "warn": "",   // warn: unlikely to load, still selectable
+     "files": [{"path": "…", "size": 0, "part": 0, "dest": ""}]}]}],
+ "notes": ["…"]}
+```
+
+Chat repositories yield `model` (one option per quantization or split set),
+`projector` (one option per mmproj precision; llama.cpp loads one projector per
+model) and `drafter`. Generator repositories yield `model`, `vae`, text encoders
+(`t5xxl`, `clip_l`, `clip_g`, `llm`), `clip_vision`, `tokenizer` and optional
+`controlnet` / `esrgan` / `lora` / `taesd`. Precision comes from the file name
+(`fp16`, `bf16`, `fp8`, `int8`, GGUF quant). Packs stable-diffusion.cpp is known
+to reject (scaled FP8, INT8, 4-bit) and multi-file sets carry a `warn`. A
+repository's diffusers folders (`unet/`, `vae/`, …) become their own components,
+off by default when single-file weights exist.
 
 ## Downloads
 
 | Method & path | Purpose |
 |---|---|
 | GET `/downloads` | queue with per-file progress |
-| POST `/downloads` | enqueue `{kind,label,repo,group,files:[{path,size,url?}]}` |
+| POST `/downloads` | enqueue `{kind,label,repo,group,files:[{path,size,url?,dest?}]}`. Files are saved flat under `models/<owner>--<repo>/<group>/`; files that would share a name (`vae/model.safetensors`, `unet/model.safetensors`) keep their repo folders, and `dest` pins a folder-relative path. Two files that would land on the same path are rejected |
 | POST `/downloads/{id}/pause|resume|cancel|retry` | control |
 | POST `/downloads/{id}/reorder` | `{"position":n}` |
 | DELETE `/downloads/{id}` | remove record + partials |

@@ -308,3 +308,42 @@ func TestDownloadMultipart(t *testing.T) {
 		t.Fatalf("expected >=4 range requests, got %d", n)
 	}
 }
+
+// Two files of one download that share a base name (vae/model.safetensors and
+// unet/model.safetensors) must not share a partial file: both would be
+// written through the same path and one would corrupt the other.
+func TestDownloadSameBaseNameFilesKeepSeparatePartials(t *testing.T) {
+	m, db, dir := testManager(t)
+	bodyA := []byte(strings.Repeat("A", 40000))
+	bodyB := []byte(strings.Repeat("B", 30000))
+	mux := http.NewServeMux()
+	mux.HandleFunc("/vae/model.safetensors", (&rangeServer{body: bodyA, requests: new(int64)}).handler)
+	mux.HandleFunc("/unet/model.safetensors", (&rangeServer{body: bodyB, requests: new(int64)}).handler)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	destA := filepath.Join(dir, "out", "vae", "model.safetensors")
+	destB := filepath.Join(dir, "out", "unet", "model.safetensors")
+	id, err := m.Enqueue("model", "same-base", filepath.Join(dir, "out"), []FileSpec{
+		{URL: srv.URL + "/vae/model.safetensors", DestPath: destA, Size: int64(len(bodyA))},
+		{URL: srv.URL + "/unet/model.safetensors", DestPath: destB, Size: int64(len(bodyB))},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var distinct int
+	if err := db.QueryRow(`SELECT COUNT(DISTINCT partial_path) FROM download_files WHERE download_id = ?`, id).Scan(&distinct); err != nil {
+		t.Fatal(err)
+	}
+	if distinct != 2 {
+		t.Fatalf("two files share a partial path (%d distinct)", distinct)
+	}
+	if state, err := m.WaitComplete(context.Background(), id); err != nil || state != "complete" {
+		t.Fatalf("state=%s err=%v", state, err)
+	}
+	gotA, _ := os.ReadFile(destA)
+	gotB, _ := os.ReadFile(destB)
+	if string(gotA) != string(bodyA) || string(gotB) != string(bodyB) {
+		t.Errorf("contents crossed: A=%d bytes B=%d bytes", len(gotA), len(gotB))
+	}
+}

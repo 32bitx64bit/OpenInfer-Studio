@@ -16,8 +16,11 @@ detected hardware (Vulkan, CUDA, HIP, or Metal). Theme follows the OS; dark
 and light are available.
 
 **Find and download.** One search over Hugging Face for GGUF chat models and
-image/video generators. Results are grouped by quantization and split set, with
-tags for vision, audio, MTP, embeddings, speculative drafts, and image/video. Downloads resume, support multiple
+image/video generators. Opening a repository shows its parts (model, vision
+projector, drafter, VAE, text encoders, …): tick the ones you want, pick a
+precision for each (Q4_K_M, Q8_0, FP16, FP8, …), see the total, and confirm.
+Options stable-diffusion.cpp is known to reject are flagged. Tags mark vision,
+audio, MTP, embeddings, speculative drafts, and image/video. Downloads resume, support multiple
 connections per file, and land in the library automatically. A Hugging Face
 token (OS keychain only) unlocks gated or private repos.
 

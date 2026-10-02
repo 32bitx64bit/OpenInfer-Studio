@@ -31,6 +31,7 @@
         <file>qml/components/DialogEnter.qml</file>
         <file>qml/components/DialogExit.qml</file>
         <file>qml/components/DualStepper.qml</file>
+        <file>qml/components/DownloadPlanPicker.qml</file>
         <file>qml/pages/ReleaseList.qml</file>
         <file>qml/components/FormField.qml</file>
         <file>qml/components/StatusDot.qml</file>

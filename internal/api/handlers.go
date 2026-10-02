@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -155,6 +158,7 @@ func (h *handlers) hfRepo(w http.ResponseWriter, r *http.Request) {
 		"embedding":        huggingface.DetectEmbedding(info.ID, info.PipelineTag, info.Tags, filePaths),
 		"diffusion":        huggingface.DetectDiffusion(info.ID, info.PipelineTag, info.Tags, filePaths),
 		"diffusion_groups": huggingface.GroupDiffusionFiles(info.Files),
+		"plan":             huggingface.BuildPlan(info),
 		"download_base":    h.d.Layout.Models,
 	})
 }
@@ -204,15 +208,78 @@ func (h *handlers) listDownloads(w http.ResponseWriter, r *http.Request) {
 }
 
 type enqueueRequest struct {
-	Kind  string `json:"kind"` // model|runtime
-	Label string `json:"label"`
-	Repo  string `json:"repo"`
-	Group string `json:"group"` // group ID for folder naming
-	Files []struct {
-		Path string `json:"path"`
-		Size int64  `json:"size"`
-		URL  string `json:"url,omitempty"`
-	} `json:"files"`
+	Kind  string        `json:"kind"` // model|runtime
+	Label string        `json:"label"`
+	Repo  string        `json:"repo"`
+	Group string        `json:"group"` // group ID for folder naming
+	Files []enqueueFile `json:"files"`
+}
+
+// enqueueFile is one file of a download request.
+type enqueueFile struct {
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+	URL  string `json:"url,omitempty"`
+	// Dest is an optional folder-relative destination (vae/model.safetensors);
+	// without it the file is saved flat under its base name.
+	Dest string `json:"dest,omitempty"`
+}
+
+// downloadDests returns where each requested file lands, relative to the
+// download's folder. Files go flat under their base name unless the request
+// names a Dest. Two files that would land on the same name keep their
+// repository folders instead (vae/model.safetensors and unet/model.safetensors
+// are both "model.safetensors" otherwise); if they still collide the request
+// is rejected rather than letting one overwrite the other.
+func downloadDests(files []enqueueFile) ([]string, error) {
+	rel := make([]string, len(files))
+	explicit := make([]bool, len(files))
+	for i, f := range files {
+		if f.Dest != "" {
+			d, ok := cleanRelPath(f.Dest)
+			if !ok {
+				return nil, fmt.Errorf("invalid destination %q", f.Dest)
+			}
+			rel[i], explicit[i] = d, true
+			continue
+		}
+		rel[i] = path.Base(strings.ReplaceAll(f.Path, "\\", "/"))
+	}
+	count := map[string]int{}
+	for _, r := range rel {
+		count[strings.ToLower(r)]++
+	}
+	for i, f := range files {
+		if explicit[i] || count[strings.ToLower(rel[i])] < 2 {
+			continue
+		}
+		d, ok := cleanRelPath(f.Path)
+		if !ok {
+			return nil, fmt.Errorf("invalid file path %q", f.Path)
+		}
+		rel[i] = d
+	}
+	seen := map[string]string{}
+	for i, r := range rel {
+		key := strings.ToLower(r)
+		if other, dup := seen[key]; dup {
+			return nil, fmt.Errorf("%s and %s would be saved to the same place", other, files[i].Path)
+		}
+		seen[key] = files[i].Path
+	}
+	return rel, nil
+}
+
+var windowsDriveRe = regexp.MustCompile(`^[A-Za-z]:`)
+
+// cleanRelPath normalizes a slash path and reports whether it stays strictly
+// inside its folder (no absolute path, drive letter or parent traversal).
+func cleanRelPath(p string) (string, bool) {
+	p = path.Clean(strings.ReplaceAll(p, "\\", "/"))
+	if p == "." || p == ".." || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "../") || windowsDriveRe.MatchString(p) {
+		return "", false
+	}
+	return p, true
 }
 
 func (h *handlers) enqueueDownload(w http.ResponseWriter, r *http.Request) {
@@ -234,19 +301,26 @@ func (h *handlers) enqueueDownload(w http.ResponseWriter, r *http.Request) {
 		safeGroup = "files"
 	}
 	destDir := filepath.Join(h.d.Layout.Models, safeRepo, safeGroup)
-	specs := make([]downloads.FileSpec, 0, len(req.Files))
 	for _, f := range req.Files {
 		if f.Path == "" || strings.Contains(f.Path, "..") {
 			writeErr(w, 400, "invalid file path "+f.Path, nil)
 			return
 		}
+	}
+	dests, err := downloadDests(req.Files)
+	if err != nil {
+		writeErr(w, 400, "invalid download", err)
+		return
+	}
+	specs := make([]downloads.FileSpec, 0, len(req.Files))
+	for i, f := range req.Files {
 		url := f.URL
 		if url == "" {
 			url = h.d.HF.DownloadURL(req.Repo, f.Path)
 		}
 		specs = append(specs, downloads.FileSpec{
 			URL:      url,
-			DestPath: filepath.Join(destDir, filepath.Base(f.Path)),
+			DestPath: filepath.Join(destDir, filepath.FromSlash(dests[i])),
 			Size:     f.Size,
 		})
 	}
