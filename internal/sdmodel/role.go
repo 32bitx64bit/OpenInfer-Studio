@@ -12,6 +12,7 @@ import (
 // scanner and the mediagen launcher so they agree on what a file is.
 const (
 	RoleVAE        = "vae"
+	RoleAudioVAE   = "audio_vae"
 	RoleTAESD      = "taesd"
 	RoleLLM        = "llm"
 	RoleT5XXL      = "t5xxl"
@@ -70,6 +71,11 @@ func roleFromName(base, dir string) string {
 		strings.Contains(base, "control_net") || strings.Contains(dir, "controlnet") ||
 		strings.Contains(dir, "control_net") || strings.Contains(dir, "control-net"):
 		return RoleControlNet
+	case nameWords(base)["audio"] && (hasVAEWord(base) || dirIsVAE(dir)):
+		// An audio autoencoder (MiniMax-H3 ships one beside its video VAE) is
+		// not what --vae takes: handing it over fails with hundreds of "VAE
+		// tensor not in model metadata" errors.
+		return RoleAudioVAE
 	case hasVAEWord(base) || strings.Contains(dir, "/vae") ||
 		strings.HasSuffix(dir, "vae") || strings.Contains(dir, "vae/") ||
 		dirIsVAE(dir) ||

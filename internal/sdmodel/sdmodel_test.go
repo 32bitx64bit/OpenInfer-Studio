@@ -442,3 +442,18 @@ func TestPackedNameAndReason(t *testing.T) {
 		t.Errorf("an unreadable file is not called a pack: %s", why)
 	}
 }
+
+func TestAudioVAEIsNotTheVAE(t *testing.T) {
+	cases := map[string]string{
+		"vae/minimax_h3_audio_vae_fp32.safetensors": RoleAudioVAE,
+		"minimax_h3_audio_vae.safetensors":          RoleAudioVAE,
+		"vae/minimax_h3_video_vae_fp32.safetensors": RoleVAE,
+		"vae/audio_decoder.safetensors":             RoleAudioVAE, // in a vae/ folder, named for audio
+		"audio_model_bf16.safetensors":              "",           // no VAE in it: not this rule
+	}
+	for path, want := range cases {
+		if got := ComponentRole(path, nil); got != want {
+			t.Errorf("ComponentRole(%q) = %q, want %q", path, got, want)
+		}
+	}
+}

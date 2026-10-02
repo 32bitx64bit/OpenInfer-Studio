@@ -242,6 +242,8 @@ func manifestRole(role string) string {
 		return sdmodel.RoleModel
 	case "vae":
 		return sdmodel.RoleVAE
+	case "audio_vae":
+		return sdmodel.RoleAudioVAE
 	case "taesd":
 		return sdmodel.RoleTAESD
 	case "t5xxl":

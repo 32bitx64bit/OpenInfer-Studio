@@ -865,3 +865,28 @@ func TestGeneratorPlanNoPackNoteWhenASoundBuildExists(t *testing.T) {
 		t.Errorf("default model = %s: the pack must lose to the sound build", got.Precision)
 	}
 }
+
+// Abiray/MiniMax-H3-Pruned-GGUF ships an audio VAE next to the video VAE.
+// Only the video one is a --vae; the plan used to put both in one VAE
+// component and default to the smaller, the audio one.
+func TestGeneratorPlanKeepsTheAudioVAEOutOfTheVAE(t *testing.T) {
+	p := buildGeneratorPlan(entries(
+		"model-Q4_K_M/MiniMax-H3-FL2VA-Pruned-Q4_K_M.gguf", 11,
+		"text_encoders/qwen3vl_32b_minimax_h3-Q4_K_M.gguf", 19,
+		"vae/minimax_h3_audio_vae_fp32.safetensors", 1,
+		"vae/minimax_h3_video_vae_fp32.safetensors", 3,
+	))
+	vae := findComp(t, p, "vae")
+	if len(vae.Options) != 1 || !strings.Contains(vae.Options[0].Files[0].Path, "video_vae") || !vae.Selected {
+		t.Fatalf("the VAE component must be the video VAE only: %+v", vae)
+	}
+	audio := findComp(t, p, "audio_vae")
+	if audio.Selected || audio.Label != "Audio VAE" || len(audio.Options) != 1 {
+		t.Errorf("audio VAE should be its own optional component: %+v", audio)
+	}
+	// Its name already says "qwen3vl", so it needs no folder to be recognised.
+	enc := findComp(t, p, "llm")
+	if f := enc.Options[0].Files[0]; f.Dest != "" {
+		t.Errorf("encoder dest = %q, want flat", f.Dest)
+	}
+}

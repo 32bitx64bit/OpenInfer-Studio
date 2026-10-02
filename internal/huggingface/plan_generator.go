@@ -14,6 +14,7 @@ import (
 const (
 	genModel       = "model"
 	genVAE         = "vae"
+	genAudioVAE    = "audio_vae"
 	genTAESD       = "taesd"
 	genT5          = "t5xxl"
 	genClipL       = "clip_l"
@@ -30,6 +31,7 @@ const (
 var genLabels = map[string]string{
 	genModel:       "Diffusion model",
 	genVAE:         "VAE",
+	genAudioVAE:    "Audio VAE",
 	genTAESD:       "Tiny VAE (TAESD)",
 	genT5:          "T5-XXL text encoder",
 	genClipL:       "CLIP-L text encoder",
@@ -46,6 +48,7 @@ var genLabels = map[string]string{
 var genHints = map[string]string{
 	genModel:      "The diffusion weights. Pick a precision: smaller files need less memory.",
 	genVAE:        "Decodes the image. Small; keep it at 16-bit.",
+	genAudioVAE:   "Audio autoencoder. stable-diffusion.cpp's --vae does not take it, so it is not used to make images or video.",
 	genTAESD:      "Optional fast preview decoder.",
 	genT5:         "Text encoder for FLUX / SD3 / Wan style models.",
 	genClipL:      "Text encoder used alongside the main model.",
@@ -59,14 +62,14 @@ var genHints = map[string]string{
 }
 
 var genShort = map[string]string{
-	genVAE: "VAE", genTAESD: "TAESD", genT5: "T5", genClipL: "CLIP-L", genClipG: "CLIP-G",
+	genVAE: "VAE", genAudioVAE: "audio VAE", genTAESD: "TAESD", genT5: "T5", genClipL: "CLIP-L", genClipG: "CLIP-G",
 	genLLM: "LLM encoder", genTextEncoder: "text encoder", genClipVision: "CLIP vision",
 	genTokenizer: "tokenizer", genControlNet: "ControlNet", genUpscaler: "upscaler", genLoRA: "LoRA",
 }
 
 // genOrder is the display order of component roles.
 var genOrder = map[string]int{
-	genModel: 0, genVAE: 1, genTAESD: 2, genT5: 3, genClipL: 4, genClipG: 5, genLLM: 6,
+	genModel: 0, genVAE: 1, genAudioVAE: 1, genTAESD: 2, genT5: 3, genClipL: 4, genClipG: 5, genLLM: 6,
 	genTextEncoder: 7, genClipVision: 8, genTokenizer: 9, genControlNet: 10, genUpscaler: 11, genLoRA: 12,
 }
 
@@ -84,7 +87,7 @@ func genTargetBits(role string) float64 {
 // genSelectedByDefault says whether a role is part of a normal download.
 func genSelectedByDefault(role string) bool {
 	switch role {
-	case genTAESD, genControlNet, genUpscaler, genLoRA, genClipVision:
+	case genAudioVAE, genTAESD, genControlNet, genUpscaler, genLoRA, genClipVision:
 		return false
 	}
 	return true
@@ -294,6 +297,8 @@ func classifyGeneratorFile(f FileEntry, hasIndex bool) (genFile, bool) {
 	switch sdmodel.ComponentRole(f.Path, nil) {
 	case sdmodel.RoleVAE:
 		role = genVAE
+	case sdmodel.RoleAudioVAE:
+		role = genAudioVAE
 	case sdmodel.RoleTAESD:
 		role = genTAESD
 	case sdmodel.RoleLLM:
