@@ -317,6 +317,8 @@ type fakeRunner struct {
 	evaluated []string
 	// quantTypes records the target type of every llama-quantize run.
 	quantTypes []core.DType
+	// evalErr, when set, can fail a KLD evaluation of model on corpus.
+	evalErr func(model, corpus string) error
 	// corpora records every corpus path (-f) used by llama-perplexity.
 	corpora []string
 }
@@ -360,6 +362,11 @@ func (f *fakeRunner) Run(ctx context.Context, iv orchestrate.Invocation) (orches
 		f.lastPPLArgv = append([]string(nil), iv.Argv...)
 		f.corpora = append(f.corpora, perplexityCorpus(iv.Argv))
 		if compare {
+			if f.evalErr != nil {
+				if err := f.evalErr(model, perplexityCorpus(iv.Argv)); err != nil {
+					return orchestrate.Result{}, err
+				}
+			}
 			f.evaluated = append(f.evaluated, model)
 			if f.omitKLD {
 				return orchestrate.Result{Stdout: fmt.Sprintf("Final estimate: PPL = %.4f +/- 0.1000\n", f.candPPL)}, nil

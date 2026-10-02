@@ -371,8 +371,12 @@ func prepareCorpora(dir string, needSearch bool) (calib, search, eval string, er
 			return "", "", "", fmt.Errorf("pipeline: building calibration corpora: %w", err)
 		}
 		// Too few records for a tuning holdout: keep the historical
-		// calibration/evaluation split (refinement then skips).
+		// calibration/evaluation split (refinement then skips). Sources
+		// are one-shot iterators, so the retry gets a fresh one.
 		cfg.SearchPercent = 0
+		cfg.Domains = []calibrate.DomainSpec{
+			{Source: calibrate.SliceSource(calibrate.DomainGeneral, texts)},
+		}
 		os.Remove(filepath.Join(dir, "search.txt"))
 		if _, _, err := calibrate.Build(context.Background(), dir, cfg); err != nil {
 			return "", "", "", fmt.Errorf("pipeline: building calibration corpora: %w", err)

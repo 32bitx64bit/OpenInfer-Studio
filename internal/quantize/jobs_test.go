@@ -210,6 +210,10 @@ func writeQuantlabTestGGUF(t *testing.T, path, modelName string, tensors []quant
 			return elements * 4
 		case 1:
 			return elements * 2
+		case 8: // Q8_0
+			return elements / 32 * 34
+		case 39: // MXFP4
+			return elements / 32 * 17
 		default:
 			t.Fatalf("unsupported test tensor type %d", typ)
 			return 0
@@ -1926,5 +1930,31 @@ func TestDynamicKeepsNativeMXFP4(t *testing.T) {
 		if DynamicKeepsNative(q) {
 			t.Errorf("DynamicKeepsNative(%q) = true", q)
 		}
+	}
+}
+
+func TestMXFP4NativeSourceChecksTensorTable(t *testing.T) {
+	dir := t.TempDir()
+	native := filepath.Join(dir, "native.gguf")
+	writeQuantlabTestGGUF(t, native, "gpt", []quantlabTestTensor{
+		{"blk.0.attn_q.weight", 1, []uint64{64, 64}},
+		{"blk.0.ffn_down_exps.weight", 39, []uint64{64, 64, 4}},
+		{"blk.0.attn_norm.weight", 0, []uint64{64}},
+	})
+	if !MXFP4NativeSource(native) {
+		t.Error("MXFP4 experts + float matrices should qualify")
+	}
+	mixed := filepath.Join(dir, "mixed.gguf")
+	writeQuantlabTestGGUF(t, mixed, "gpt", []quantlabTestTensor{
+		{"blk.0.attn_q.weight", 8, []uint64{64, 64}},
+		{"blk.0.ffn_down_exps.weight", 39, []uint64{64, 64, 4}},
+	})
+	if MXFP4NativeSource(mixed) {
+		t.Error("Q8_0 non-expert matrices must not qualify (they would be requantized)")
+	}
+	floats := filepath.Join(dir, "floats.gguf")
+	writeQuantlabTestGGUF(t, floats, "m", []quantlabTestTensor{{"blk.0.attn_q.weight", 1, []uint64{64, 64}}})
+	if MXFP4NativeSource(floats) {
+		t.Error("a float-only file is not an MXFP4 source")
 	}
 }

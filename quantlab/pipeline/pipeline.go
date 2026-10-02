@@ -297,11 +297,15 @@ func (e *Engine) cleanupScratch() {
 	}
 	os.RemoveAll(e.searchDir())
 	os.RemoveAll(e.refineDir())
+	if matches, err := filepath.Glob(filepath.Join(e.workDir(), "candidate-refined-*.gguf")); err == nil {
+		for _, path := range matches {
+			os.Remove(path)
+		}
+	}
 	os.Remove(filepath.Join(e.workDir(), "search-checkpoint.json"))
 	os.Remove(filepath.Join(e.workDir(), "search-final.json"))
 	for _, path := range []string{
 		filepath.Join(e.workDir(), "candidate.gguf"),
-		e.refinedCandidatePath(),
 		filepath.Join(e.workDir(), "final.gguf"),
 		e.Extra.FoldedSourcePath,
 		e.Extra.FoldedImatrixPath,
@@ -679,7 +683,6 @@ func (e *Engine) stageSolve(ctx context.Context) error {
 						}
 					}
 					cands = filtered
-					req.Candidates = cands
 				}
 			} else {
 				// Legacy Go path (forced or probe-KLD blend needs
@@ -714,6 +717,9 @@ func (e *Engine) stageSolve(ctx context.Context) error {
 					return fmt.Errorf("pipeline: exact loss table: %w", lerr)
 				}
 			}
+			// The solver gets exactly the lattice the table priced: the
+			// IQ1 rungs added for tight budgets, minus unmeasured dtypes.
+			req.Candidates = cands
 			req.ExactLoss = table
 			covered := 0
 			for _, m := range table {

@@ -59,8 +59,13 @@ func (e *Engine) evaluateProfile(ctx context.Context) (string, error) {
 	}
 
 	_, hasBaseline := e.measurementForEval("baseline", core.MetricPerplexity, evalCfg, caps)
-	if (!e.recordedLogits(logits, evalCfg, caps) || !hasBaseline) &&
-		!e.hasAnyMeasurementForEval(core.MetricKLD, evalCfg, caps) {
+	_, bestScored := e.measurementForEval(e.Run.BestProfileID, core.MetricKLD, evalCfg, caps)
+	// Logits are needed whenever the current profile is still unscored (a
+	// refined profile arrives after the first candidate was scored); the
+	// baseline PPL record only when nothing was measured on this config.
+	needLogits := !bestScored && !e.recordedLogits(logits, evalCfg, caps)
+	needBaseline := !hasBaseline && !e.hasAnyMeasurementForEval(core.MetricKLD, evalCfg, caps)
+	if needLogits || needBaseline {
 		m, prov, err := e.captureBaselineLogits(ctx, evalCfg, caps, logits, "baseline eval")
 		if err != nil {
 			return "", err
@@ -68,15 +73,17 @@ func (e *Engine) evaluateProfile(ctx context.Context) (string, error) {
 		if !m.HasPPL {
 			return "", fmt.Errorf("baseline eval: no perplexity in tool output")
 		}
-		meas := core.Measurement{
-			ProfileID: "baseline",
-			Metric:    core.MetricPerplexity,
-			Value:     m.Perplexity,
-			Baseline:  m.Perplexity,
-			Prov:      prov,
-		}
-		if err := e.recordMeasurement(meas); err != nil {
-			return "", err
+		if !hasBaseline {
+			meas := core.Measurement{
+				ProfileID: "baseline",
+				Metric:    core.MetricPerplexity,
+				Value:     m.Perplexity,
+				Baseline:  m.Perplexity,
+				Prov:      prov,
+			}
+			if err := e.recordMeasurement(meas); err != nil {
+				return "", err
+			}
 		}
 		e.printf("  baseline: ppl %.4f\n", m.Perplexity)
 	}

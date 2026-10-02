@@ -273,30 +273,40 @@ func (e *Engine) calibrateSensitivity(ctx context.Context, bank *core.TensorBank
 	}
 	kind2 := e.secondProbeRungs(bank, todo, kind, table)
 
-	missing := 0
+	missing, missing2 := 0, 0
 	for _, g := range todo {
 		if !probeRecorded(st.Probes, g, kind[g.Role]) {
 			missing++
 		}
 		if d2, ok := kind2[g.Role]; ok && !probeRecorded(st.Probes2, g, d2) {
-			missing++
+			missing2++
 		}
 	}
 	if st.Background == nil {
 		missing++
 	}
-	if missing > 0 {
+	if missing+missing2 > 0 {
 		// Probe scratch peaks at the Q8_0 background anchor plus one
 		// assembled probe model. Without room, fall back to the
-		// uncalibrated solver rather than fail the run.
+		// uncalibrated solver rather than fail the run — unless only the
+		// optional second rung is missing, which is then dropped and the
+		// complete first-rung calibration kept.
 		if err := os.MkdirAll(e.probeDir(), 0o755); err != nil {
 			return nil, err
 		}
 		need := saturatingAdd(estimatedArtifact(bank, backgroundDType), estimatedArtifact(bank, backgroundDType))
 		need = saturatingAdd(need, need/10)
 		if free, ok := tensorbank.DiskFree(e.probeDir()); ok && free < need {
-			e.printf("  sensitivity: skipped (need ~%d MiB free for probe scratch, have %d MiB)\n", need>>20, free>>20)
-			return nil, nil
+			if missing > 0 {
+				e.printf("  sensitivity: skipped (need ~%d MiB free for probe scratch, have %d MiB)\n", need>>20, free>>20)
+				return nil, nil
+			}
+			e.printf("  sensitivity: second probe rung skipped (need ~%d MiB free, have %d MiB)\n", need>>20, free>>20)
+			for role, d2 := range kind2 {
+				if g, ok := groupByName(todo, role); !ok || !probeRecorded(st.Probes2, g, d2) {
+					delete(kind2, role)
+				}
+			}
 		}
 		if err := e.runSensitivityProbes(ctx, bank, set, evalCfg, capsP, st, todo, kind, kind2); err != nil {
 			// A too-short search holdout only surfaces from the tool: fall
@@ -359,7 +369,10 @@ func (e *Engine) calibrateSensitivity(ctx context.Context, bank *core.TensorBank
 	// Runs before probe-dir cleanup because it reuses the background anchor.
 	if e.depthProbesEnabled() {
 		saveFn := func() error { return e.writeJSON(e.sensitivityPath(), st) }
-		dm := e.runDepthProbes(ctx, bank, set, evalCfg, capsP, st, sens, todo, kind, saveFn)
+		dm, err := e.runDepthProbes(ctx, bank, set, evalCfg, capsP, st, sens, todo, kind, saveFn)
+		if err != nil {
+			return nil, err
+		}
 		if dm != nil {
 			sens.Depth = dm
 			if err := sens.Validate(); err != nil {
@@ -368,7 +381,11 @@ func (e *Engine) calibrateSensitivity(ctx context.Context, bank *core.TensorBank
 		}
 	}
 	// Probe scratch is model-sized; free it before the quantize stage.
+	// Every probe is recorded in sensitivity.json, so the probe baseline
+	// logits are no longer needed either.
 	os.RemoveAll(e.probeDir())
+	os.Remove(e.probeLogitsPath())
+	os.Remove(e.probeLogitsPath() + ".complete.json")
 	return sens, nil
 }
 
@@ -437,7 +454,7 @@ func (e *Engine) runDepthProbes(ctx context.Context, bank *core.TensorBank, set 
 	evalCfg orchestrate.EvalConfig, capsP *orchestrate.Capabilities,
 	st *sensitivityState, sens *profile.Sensitivity,
 	todo []profile.RoleGroup, kind map[string]core.DType,
-	save func() error) *profile.DepthModel {
+	save func() error) (*profile.DepthModel, error) {
 
 	// Determine layer count from calibrated tensors.
 	maxLayer := -1
@@ -451,7 +468,7 @@ func (e *Engine) runDepthProbes(ctx context.Context, bank *core.TensorBank, set 
 	n := maxLayer + 1
 	buckets := profile.DepthBuckets(n)
 	if len(buckets) == 0 {
-		return nil
+		return nil, nil
 	}
 	// Map every calibrated tensor name → role probe dtype.
 	probeDTypeOf := map[string]core.DType{}
@@ -463,7 +480,7 @@ func (e *Engine) runDepthProbes(ctx context.Context, bank *core.TensorBank, set 
 	}
 	plan := planDepthProbes(buckets, probeDTypeOf, e.depthSplitEnabled())
 	if len(plan) == 0 {
-		return nil
+		return nil, nil
 	}
 	// Clear stale depth state if the version or the probe set changed.
 	needClear := st.DepthVersion != depthStateVersion
@@ -496,7 +513,7 @@ func (e *Engine) runDepthProbes(ctx context.Context, bank *core.TensorBank, set 
 	}
 	if missing > 0 {
 		if err := os.MkdirAll(e.probeDir(), 0o755); err != nil {
-			return nil
+			return nil, nil
 		}
 		for done, p := range plan {
 			if _, ok := st.Buckets[p.key]; ok {
@@ -524,6 +541,9 @@ func (e *Engine) runDepthProbes(ctx context.Context, bank *core.TensorBank, set 
 			if err := e.runSparseTrimmedAnchorJobs(ctx, dts,
 				func(d core.DType) (map[string]struct{}, error) { return copyKeep(byDType[d]), nil },
 				depthDir, "meta.json"); err != nil {
+				if isCancel(err) {
+					return nil, err
+				}
 				e.printf("  sensitivity: %s probe failed: %v\n", label, err)
 				continue
 			}
@@ -531,6 +551,9 @@ func (e *Engine) runDepthProbes(ctx context.Context, bank *core.TensorBank, set 
 				[]string{bgDir, depthDir})
 			os.RemoveAll(depthDir)
 			if err != nil {
+				if isCancel(err) {
+					return nil, err
+				}
 				e.printf("  sensitivity: %s eval failed: %v\n", label, err)
 				continue
 			}
@@ -538,17 +561,29 @@ func (e *Engine) runDepthProbes(ctx context.Context, bank *core.TensorBank, set 
 				Role: p.key, KLD: e.probeValue(m), Perplexity: m.Perplexity,
 			}
 			if err := save(); err != nil {
-				return nil
+				return nil, nil
 			}
 		}
 	}
 
-	// ComputeDepthModel wants background-corrected KLD, like role probes.
+	// ComputeDepthModel wants background-corrected KLD. Unlike role
+	// probes, a bucket at the noise floor is dropped rather than floored:
+	// a single-layer family bucket can legitimately sit near the
+	// background, and a floored value would inflate its factor. A dropped
+	// bucket interpolates from its neighbours.
 	measured := map[string]float64{}
 	for key, p := range st.Buckets {
-		measured[key] = calibratedRoleKLD(p.KLD, sens.Background)
+		if kld := p.KLD - sens.Background; kld > minProbeMargin*sens.Background && kld > 1e-6 {
+			measured[key] = kld
+		}
 	}
-	return profile.ComputeDepthModel(bank, buckets, sens.Roles, measured, sens.Background)
+	return profile.ComputeDepthModel(bank, buckets, sens.Roles, measured, sens.Background), nil
+}
+
+// isCancel reports a pause/cancel, which must abort a stage instead of
+// being absorbed by a fail-open fallback.
+func isCancel(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func newSensitivityState(signature string) *sensitivityState {
@@ -717,14 +752,30 @@ func (e *Engine) runSensitivityProbes(ctx context.Context, bank *core.TensorBank
 	if st.Probes2 == nil {
 		st.Probes2 = map[string]sensitivityProbe{}
 	}
+	// The second rung only refines the exponent: a failed probe drops
+	// that role back to the linear model instead of failing the run.
 	for _, g := range todo {
 		if d2, ok := kind2[g.Role]; ok {
 			if err := probe(g, d2, st.Probes2, "rung2-"); err != nil {
-				return err
+				if isCancel(err) {
+					return err
+				}
+				e.printf("  sensitivity: %s second rung %s failed (%v); keeping the linear model\n", g.Role, d2, err)
+				delete(kind2, g.Role)
+				os.RemoveAll(filepath.Join(e.probeDir(), "rung2-"+sanitizeRole(g.Role)))
 			}
 		}
 	}
 	return nil
+}
+
+func groupByName(groups []profile.RoleGroup, role string) (profile.RoleGroup, bool) {
+	for _, g := range groups {
+		if g.Role == role {
+			return g, true
+		}
+	}
+	return profile.RoleGroup{}, false
 }
 
 // evalProbeModel assembles a probe GGUF (probed tensors at their target

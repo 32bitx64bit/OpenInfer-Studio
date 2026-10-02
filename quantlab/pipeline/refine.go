@@ -92,8 +92,8 @@ func (e *Engine) refineDir() string  { return filepath.Join(e.workDir(), "refine
 func (e *Engine) refineLogitsPath() string {
 	return filepath.Join(e.workDir(), "baseline-logits-refine.bin")
 }
-func (e *Engine) refinedCandidatePath() string {
-	return filepath.Join(e.workDir(), "candidate-refined.gguf")
+func (e *Engine) refinedCandidatePath(profileID string) string {
+	return filepath.Join(e.workDir(), "candidate-refined-"+profileID+".gguf")
 }
 
 // refineEnabled reports whether the search stage runs refinement rounds.
@@ -180,8 +180,18 @@ func (e *Engine) loadRefineState(sig string) *refineState {
 	return &st
 }
 
-// refine runs the refinement rounds. Failures other than cancellation are
-// fail-open: the solved profile stands.
+// installedError marks a failure after a refined profile was installed
+// (manifest, best profile and candidate artifact swapped and checkpointed).
+// From then on the run must not fail open: the search stage stays
+// incomplete so a resume finishes scoring the installed profile.
+type installedError struct{ err error }
+
+func (e installedError) Error() string { return e.err.Error() }
+func (e installedError) Unwrap() error { return e.err }
+
+// refine runs the refinement rounds. Failures before a refined profile is
+// installed are fail-open (the solved profile stands); cancellation and
+// failures after installation propagate.
 func (e *Engine) refine(ctx context.Context) error {
 	if !e.refineEnabled() {
 		return nil
@@ -190,7 +200,8 @@ func (e *Engine) refine(ctx context.Context) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	var inst installedError
+	if isCancel(err) || errors.As(err, &inst) {
 		return err
 	}
 	e.printf("  refine: stopped (%v); keeping %s\n", err, e.Run.BestProfileID)
@@ -239,6 +250,20 @@ func (e *Engine) runRefine(ctx context.Context) error {
 	if st.Done {
 		return e.finishRefine(ctx, st)
 	}
+	// Refinement is optional and outside the scratch estimate's bound: it
+	// runs only with room for one assembled variant, the extra ±1-rung
+	// anchors and the refined candidate (each ≤ the manifest), plus its
+	// holdout logits (sized like the evaluation logits).
+	if free, ok := tensorbank.DiskFree(e.workDir()); ok {
+		need := saturatingAdd(e.Run.Manifest.TotalBytes, e.Run.Manifest.TotalBytes, e.Run.Manifest.TotalBytes)
+		if st, err := os.Stat(e.logitsPath()); err == nil && !e.recordedLogits(e.refineLogitsPath(), evalCfg, capsP) {
+			need = saturatingAdd(need, uint64(st.Size()))
+		}
+		if free < need {
+			e.printf("  refine: skipped (need ~%d MiB free scratch, have %d MiB)\n", need>>20, free>>20)
+			return nil
+		}
+	}
 	set, err := e.deriveAnchors(bank)
 	if err != nil {
 		return err
@@ -279,6 +304,27 @@ func (e *Engine) runRefine(ctx context.Context) error {
 	cands := solved.Candidates
 	if len(cands) == 0 {
 		cands = e.candidateDTypes()
+	}
+	// Resuming between rounds: the next round starts from the last
+	// accepted re-solve (installed only at the end), and a recorded round
+	// that stopped the search ends it.
+	if n := len(st.Rounds); n > 0 {
+		last := st.Rounds[n-1]
+		if !last.Accepted {
+			st.Final, st.Done = last.BaseProfile, true
+			if err := save(); err != nil {
+				return err
+			}
+			return e.finishRefine(ctx, st)
+		}
+		p, err := e.refineSolve(bank, set, sens.Scaled(last.Lambdas, last.DefaultScale), table, cands)
+		if err != nil {
+			return err
+		}
+		if p.ID != last.Resolved {
+			return fmt.Errorf("refine: re-solve of round %d gave %s, recorded %s", n, p.ID, last.Resolved)
+		}
+		base, baseArtifact = p, ""
 	}
 	for round := len(st.Rounds); round < e.refineRounds(); round++ {
 		rr := refineRound{BaseProfile: base.ID}
@@ -376,13 +422,20 @@ func acceptWord(ok bool) string {
 // finishRefine installs the refined profile (when one was accepted and is
 // not installed yet) and measures it on the evaluation corpus.
 func (e *Engine) finishRefine(ctx context.Context, st *refineState) error {
-	defer os.RemoveAll(e.refineDir())
+	defer func() {
+		os.RemoveAll(e.refineDir())
+		os.Remove(e.refineLogitsPath())
+		os.Remove(e.refineLogitsPath() + ".complete.json")
+	}()
 	if st.Final == "" || st.Final == e.Run.BestProfileID {
 		if st.Final != "" && len(st.Rounds) > 0 && st.Final != st.Rounds[0].BaseProfile {
-			// Installed on an earlier attempt; make sure it is scored.
-			if art, err := e.evaluateProfile(ctx); err != nil {
-				return err
-			} else if art != "" {
+			// Installed on an earlier attempt; make sure it is scored
+			// (evaluateProfile skips what is already recorded).
+			art, err := e.evaluateProfile(ctx)
+			if err != nil {
+				return installedError{err}
+			}
+			if art != "" {
 				e.Run.Artifacts[core.StageEvaluate] = art
 			}
 		}
@@ -403,26 +456,31 @@ func (e *Engine) finishRefine(ctx context.Context, st *refineState) error {
 	if err != nil {
 		return err
 	}
-	out := e.refinedCandidatePath()
+	// A per-profile path never aliases the live artifact, so a failed
+	// build (which removes only its own temp file) cannot take it down.
+	out := e.refinedCandidatePath(prof.ID)
 	err = tensorbank.NewAssembler().Build(ctx, srcs, manifest, out, e.progressFunc(core.StageSearch, "assembling refined candidate"))
 	closeSrcs()
 	if err != nil {
-		os.Remove(out)
 		return err
 	}
-	prev := e.Run.BestProfileID
+	prev, prevArtifact := e.Run.BestProfileID, e.Run.Artifacts[core.StageQuantize]
 	e.Run.Manifest = manifest
 	e.Run.BestProfileID = prof.ID
 	e.Run.Artifacts[core.StageQuantize] = out
 	// Checkpoint before scoring so a crash never pairs the new artifact
 	// with the old manifest.
 	if err := e.Store.Save(e.Run); err != nil {
-		return err
+		return installedError{err}
 	}
 	e.printf("  refine: %s replaces %s (%d bytes planned)\n", prof.ID, prev, manifest.TotalBytes)
+	// The replaced candidate is model-sized scratch nothing references now.
+	if prevArtifact != "" && prevArtifact != out && generatedUnder(e.workDir(), prevArtifact) {
+		os.Remove(prevArtifact)
+	}
 	art, err := e.evaluateProfile(ctx)
 	if err != nil {
-		return err
+		return installedError{err}
 	}
 	if art != "" {
 		e.Run.Artifacts[core.StageEvaluate] = art

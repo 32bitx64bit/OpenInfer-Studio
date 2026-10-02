@@ -613,7 +613,8 @@ Item {
         var p = page.preview
         if (!page.useFromHF()) {
             if (p && p.blockers && p.blockers.length) return p.blockers[0]
-            if (p && !p.high_precision_source && (!page.allowRequantize || !page.ackRequantize))
+            if (p && !p.high_precision_source && !(page.dynamicEnabled && p.dynamic_keeps_native)
+                    && (!page.allowRequantize || !page.ackRequantize))
                 return "Requantize is blocked until you enable it in Advanced"
         }
         var meta = page.ftypeMeta(page.ftype)

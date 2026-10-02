@@ -116,6 +116,9 @@ func EstimateScratch(bank *core.TensorBank, effort Effort, budget uint64, eval E
 	//  - Quantize: workers source subsets + workers quantized outputs +
 	//    accumulated trimmed variants.
 	//  - Evaluation: variants + candidate + concurrent logits.
+	//  - Search-stage refinement is optional and outside this bound: it
+	//    checks free space itself and skips when the extra variant,
+	//    anchors and holdout logits do not fit.
 	// Source repair, generated imatrix, and the job-private payload clone
 	// persist across stages and are included in each peak through common.
 	quantizePeak := saturatingAdd(common, quantizeWorking)

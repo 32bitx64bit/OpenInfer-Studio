@@ -138,20 +138,6 @@ func (e *Engine) ensureVariantAnchors(ctx context.Context) error {
 	return e.runTrimmedAnchorJobs(ctx, dtypes, keepFor, e.variantsDir(), "meta.json")
 }
 
-// keepHasQuantized reports whether any kept tensor is stored quantized in
-// the source.
-func (e *Engine) keepHasQuantized(keep map[string]struct{}) bool {
-	if e.Run == nil || e.Run.Bank == nil {
-		return false
-	}
-	for name := range keep {
-		if t, ok := e.Run.Bank.Find(name); ok && t.DType.IsQuant() {
-			return true
-		}
-	}
-	return false
-}
-
 // nativeOption reports an option that keeps a tensor in its already-
 // quantized source storage (e.g. MXFP4 experts): the primary payload
 // provides it bit-for-bit, so no anchor is built and nothing is
@@ -221,7 +207,39 @@ func (e *Engine) fillQuantizeRequest(req *orchestrate.QuantizeRequest) {
 	if ip := e.imatrixPath(); ip != "" {
 		req.ImatrixPath = ip
 	}
-	req.SourceQuantized = orchestrate.SourceIsQuantized(e.Run.Bank)
+	req.SourceQuantized = e.requantizes(req.SourcePath)
+}
+
+// requantizes reports whether quantizing the GGUF at path would requantize
+// already-quantized tensors. It inspects the job's actual input (a trimmed
+// subset or row sample, not the whole model) and ignores natively kept
+// MXFP4 tensors, which real jobs never include. An unreadable file falls
+// back to the whole bank.
+func (e *Engine) requantizes(path string) bool {
+	quantized := func(d core.DType) bool { return d.IsQuant() && d != core.DTypeMXFP4 }
+	if path != "" {
+		if s, err := tensorbank.OpenSource(path); err == nil {
+			f, perr := tensorbank.Parse(s)
+			s.Close()
+			if perr == nil {
+				for _, ti := range f.Tensors {
+					if quantized(ti.DType) {
+						return true
+					}
+				}
+				return false
+			}
+		}
+	}
+	if e.Run == nil || e.Run.Bank == nil {
+		return false
+	}
+	for _, t := range e.Run.Bank.Tensors {
+		if quantized(t.DType) {
+			return true
+		}
+	}
+	return false
 }
 
 // splitThreads divides cfg.Threads across in-flight llama-quantize jobs.
@@ -453,9 +471,6 @@ func (e *Engine) runOneTrimmedAnchor(ctx context.Context, caps *orchestrate.Capa
 		}
 		e.fillQuantizeRequest(&req)
 		req.Threads = threads
-		// The job reads the trimmed subset, not the whole source: natively
-		// kept quantized tensors (MXFP4 experts) are outside it.
-		req.SourceQuantized = e.keepHasQuantized(keep)
 		iv, err := orchestrate.PlanQuantize(req, caps, e.Run.Config.Tools.LlamaQuantize)
 		if err != nil {
 			os.Remove(subsetPath)

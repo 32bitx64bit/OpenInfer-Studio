@@ -38,6 +38,10 @@ type Preview struct {
 	IMatrixRequired    bool               `json:"imatrix_required"`
 	IMatrixRecommended bool               `json:"imatrix_recommended"`
 	HighPrecision      bool               `json:"high_precision_source"`
+	// DynamicKeepsNative: the source's quantized tensors are all MXFP4,
+	// which Dynamic keeps as stored (lossless) — Dynamic needs no
+	// requantize confirmation for it; standard types still do.
+	DynamicKeepsNative bool `json:"dynamic_keeps_native,omitempty"`
 }
 
 func sourceBPW(quant string) float64 {
@@ -143,6 +147,7 @@ func BuildPreview(in EstimateInput, rec Recommendation) Preview {
 		IMatrixRequired:    RequiresIMatrix(in.FType.Name),
 		IMatrixRecommended: RecommendsIMatrix(in.FType.Name),
 		HighPrecision:      HighPrecision(in.Source.Quantization),
+		DynamicKeepsNative: DynamicKeepsNative(in.Source.Quantization) && MXFP4NativeSource(in.Source.PrimaryPath),
 		DiskFreeBytes:      in.DiskFree,
 		QuantizeRAMBytes:   in.Source.SizeBytes,
 	}
@@ -164,7 +169,9 @@ func BuildPreview(in EstimateInput, rec Recommendation) Preview {
 	}
 	p.Fit = instances.EstimateMemory(estimateInputFromModel(in.Source, weights, in.DraftBytes, in.Hardware, in.Context))
 
-	if !p.HighPrecision {
+	if p.DynamicKeepsNative {
+		p.Warnings = append(p.Warnings, "Source stores its experts as MXFP4. Dynamic keeps them as-is (lossless) and optimizes only the float tensors; standard types would requantize them, which can reduce quality.")
+	} else if !p.HighPrecision {
 		p.Warnings = append(p.Warnings, "Source is already quantized. Requantizing from "+in.Source.Quantization+" can severely reduce quality. Use a F16/BF16/F32/Q8 source, or enable requantize in Advanced.")
 	}
 	if p.IMatrixRequired {

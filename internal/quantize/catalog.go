@@ -3,8 +3,11 @@
 package quantize
 
 import (
+	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/openinfer/openinfer-studio/internal/gguf"
 )
 
 // IMatrixPolicy describes whether a ftype needs an importance matrix.
@@ -158,17 +161,53 @@ func HighPrecision(quant string) bool {
 	return false
 }
 
-// DynamicKeepsNative reports sources whose quantized tensors Dynamic keeps
-// bit-for-bit instead of requantizing: MXFP4 is the native training format
-// of MXFP4 models (gpt-oss experts), so keeping it is lossless and the
-// requantize confirmation does not apply. Their float tensors are still
-// optimized normally.
+// DynamicKeepsNative reports source labels whose quantized tensors Dynamic
+// may keep bit-for-bit instead of requantizing: MXFP4 is the native
+// training format of MXFP4 models (gpt-oss experts), so keeping it is
+// lossless. It is a cheap label check; MXFP4NativeSource confirms the file.
 func DynamicKeepsNative(quant string) bool {
 	switch stripDynamicPrefix(quant) {
 	case "MXFP4", "MXFP4_MOE":
 		return true
 	}
 	return false
+}
+
+var splitShardRe = regexp.MustCompile(`(?i)-\d{5}-of-\d{5}\.gguf$`)
+
+// MXFP4NativeSource reports a GGUF (all shards of a split) whose matrices
+// are MXFP4 or float only, with at least one MXFP4: Dynamic keeps the MXFP4
+// tensors as stored and optimizes the float ones, so nothing is
+// requantized and the requantize confirmation does not apply. A file whose
+// other matrices are quantized (llama-quantize's MXFP4_MOE writes them as
+// Q8_0) does not qualify. Only the tensor table is read.
+func MXFP4NativeSource(path string) bool {
+	paths := []string{path}
+	if isSplitPath(path) {
+		if matches, err := filepath.Glob(splitShardRe.ReplaceAllString(path, "") + "-*-of-*.gguf"); err == nil && len(matches) > 0 {
+			paths = matches
+		}
+	}
+	sawMXFP4 := false
+	for _, p := range paths {
+		tensors, _, err := gguf.ListTensors(p)
+		if err != nil {
+			return false
+		}
+		for _, t := range tensors {
+			if len(t.Shape) < 2 {
+				continue
+			}
+			switch strings.ToLower(t.TypeName) {
+			case "f32", "f16", "bf16":
+			case "mxfp4":
+				sawMXFP4 = true
+			default:
+				return false
+			}
+		}
+	}
+	return sawMXFP4
 }
 
 func stripDynamicPrefix(quant string) string {

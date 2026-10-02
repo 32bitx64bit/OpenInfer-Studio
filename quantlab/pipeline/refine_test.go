@@ -144,7 +144,7 @@ func TestRefineMeasuresInContextAndKeepsOnlyImprovements(t *testing.T) {
 		if e.Run.BestProfileID != st.Final || e.Run.Manifest.ProfileID != st.Final {
 			t.Errorf("accepted %s but run holds best=%s manifest=%s", st.Final, e.Run.BestProfileID, e.Run.Manifest.ProfileID)
 		}
-		if got := e.Run.Artifacts[core.StageQuantize]; got != e.refinedCandidatePath() {
+		if got := e.Run.Artifacts[core.StageQuantize]; got != e.refinedCandidatePath(st.Final) {
 			t.Errorf("candidate artifact = %s, want the refined candidate", got)
 		}
 		caps, err := e.caps(context.Background(), orchestrate.ToolPerplexity)
@@ -273,7 +273,7 @@ func TestRefineInstallsAcceptedProfile(t *testing.T) {
 	if _, more := e2.Run.NextStage(); more {
 		t.Fatal("run not complete after emit")
 	}
-	if _, err := os.Stat(e2.refinedCandidatePath()); !os.IsNotExist(err) {
+	if _, err := os.Stat(e2.refinedCandidatePath(next.ID)); !os.IsNotExist(err) {
 		t.Error("refined candidate scratch left after emit")
 	}
 }
@@ -293,10 +293,112 @@ func TestPlanReservesSearchHoldoutForRefinement(t *testing.T) {
 		t.Fatalf("profiled plan built no search holdout (search=%q eval=%q)", r.Config.SearchCorpus, r.Config.EvalCorpus)
 	}
 
-	// Too few records for a holdout: the plan still succeeds without one.
+	// Too few distinct records for a holdout: the plan still succeeds
+	// without one (historical split), and refinement will skip.
 	g := newFixture(t, 520000)
+	if err := os.WriteFile(filepath.Join(g.calibDir, "docs.txt"),
+		[]byte(strings.Repeat("alpha beta gamma delta.\n\nepsilon zeta eta theta.\n\n", 40)), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	r2 := g.planEffort("tiny", "profiled", nil)
 	if _, ok := g.engine(r2).searchCorpusPath(); ok {
-		t.Log("tiny corpus produced a holdout; fallback path not exercised")
+		t.Error("two distinct records still produced a holdout; fallback not exercised")
+	}
+}
+
+// acceptedRefineState records one accepted round whose re-solve moves bytes
+// toward attention, after the run has completed evaluate.
+func acceptedRefineState(t *testing.T, e *Engine, done bool) string {
+	t.Helper()
+	solved, err := e.loadSolveArtifact()
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := e.deriveAnchors(e.Run.Bank)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lambdas := map[string]float64{"attn_q": refineLambdaMax, "ffn_down": refineLambdaMin}
+	next, err := e.refineSolve(e.Run.Bank, set, solved.Sensitivity.Scaled(lambdas, 1), e.loadExactLoss(e.Run.Bank), solved.Candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.ID == e.Run.BestProfileID {
+		t.Fatal("fixture: correction should move bytes")
+	}
+	evalCfg, _ := e.refineEvalConfig()
+	sig, err := e.refineSignature(solved, evalCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &refineState{Version: refineStateVersion, Signature: sig, Measured: map[string]refineMeasure{},
+		Rounds: []refineRound{{BaseProfile: e.Run.BestProfileID, Lambdas: lambdas, DefaultScale: 1, Resolved: next.ID, Accepted: true}}}
+	if done {
+		st.Done, st.Final = true, next.ID
+	}
+	if err := e.writeJSON(e.refinePath(), st); err != nil {
+		t.Fatal(err)
+	}
+	return next.ID
+}
+
+// A failure while scoring an installed refined profile must not fail open:
+// the search stage stays incomplete and a resume finishes the scoring.
+func TestRefineInstalledScoringFailurePropagates(t *testing.T) {
+	f, e := refineFixture(t, true)
+	e.StageLimit = 5
+	if err := e.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	nextID := acceptedRefineState(t, e, true)
+	f.runner.evalErr = func(model, corpus string) error {
+		if strings.Contains(model, "candidate-refined") && strings.Contains(corpus, "evaluation") {
+			return fmt.Errorf("llama-perplexity crashed")
+		}
+		return nil
+	}
+	e2 := f.engine(e.Run)
+	e2.StageLimit = 1
+	if err := e2.Resume(context.Background()); err == nil {
+		t.Fatal("scoring failure after install was swallowed")
+	}
+	store := e2.Store
+	saved, err := store.Load(e2.Run.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.BestProfileID != nextID {
+		t.Fatalf("checkpoint best = %s, want installed %s", saved.BestProfileID, nextID)
+	}
+	if next, _ := saved.NextStage(); next != core.StageSearch {
+		t.Fatalf("next stage = %s, want search to be retried", next)
+	}
+	f.runner.evalErr = nil
+	e3 := f.engine(saved)
+	e3.StageLimit = 1
+	if err := e3.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := e3.measurement(nextID, core.MetricKLD); !ok {
+		t.Error("installed profile still unscored after resume")
+	}
+}
+
+// Resuming between rounds continues from the last accepted re-solve, not
+// from the manifest (which holds the pre-refinement profile until the end).
+func TestRefineResumeBetweenRoundsContinuesFromAccepted(t *testing.T) {
+	f, e := refineFixture(t, true)
+	e.StageLimit = 5
+	if err := e.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	nextID := acceptedRefineState(t, e, false) // 1 round recorded, not done
+	e2 := f.engine(e.Run)
+	e2.StageLimit = 1
+	if err := e2.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if e2.Run.BestProfileID != nextID {
+		t.Fatalf("best = %s, want the accepted re-solve %s", e2.Run.BestProfileID, nextID)
 	}
 }

@@ -147,7 +147,7 @@ type DepthBucket struct {
 	Last         int     `json:"last"`
 	MeasuredKLD  float64 `json:"measuredKLD"`
 	PredictedKLD float64 `json:"predictedKLD"`
-	// Factor is the bucket's knot value ρ after the interpolation fit.
+	// Factor is the bucket's knot value ρ (measured / predicted, guarded).
 	Factor float64 `json:"factor"`
 	// Clamped reports that Factor hit the [DepthFactorMin, DepthFactorMax]
 	// guard, i.e. the measurement asked for more than the model allows.
@@ -155,11 +155,12 @@ type DepthBucket struct {
 }
 
 // DepthModel redistributes each role's probe-measured KLD across layers
-// using a few depth-bucket probes. Per family, the bucket knots ρ are
-// interpolated log-linearly between bucket centers (so adjacent layers on
-// either side of a bucket edge never jump) and fitted so the interpolated
-// profile still reproduces each bucket's measured KLD; each role's total is
-// then renormalized so it still equals its measured KLD at the probe rung.
+// using a few depth-bucket probes. Per family, each bucket's factor ρ =
+// measured / depth-flat prediction; single-layer edge buckets apply to their
+// own layer, and interior layers interpolate log-linearly between the
+// multi-layer bucket centers (adjacent layers never jump at a bucket edge,
+// and a uniform interior stays uniform). Each role's total is then
+// renormalized so it still equals its measured KLD at the probe rung.
 type DepthModel struct {
 	Buckets []DepthBucket `json:"buckets,omitempty"`
 	// Shares maps tensor name → per-weight share_t (KLD × ρ / Z).
@@ -239,7 +240,11 @@ func (s *Sensitivity) PinnedRate(name string) (float64, bool) {
 		if !(r.SumWSSE > 0) || !(r.KLD > 0) {
 			continue
 		}
-		if fam != "" && len(r.Tensors) > 0 && DepthFamily(r.Tensors[0]) != fam {
+		// Layer tensors compare against layer roles of their family only:
+		// the output head and embeddings sit outside the layer stack and
+		// their logit-facing rates are not a family's.
+		if fam != "" && len(r.Tensors) > 0 &&
+			(LayerIndex(r.Tensors[0]) < 0 || DepthFamily(r.Tensors[0]) != fam) {
 			continue
 		}
 		if k := r.KLD / r.SumWSSE; k > best && !math.IsInf(k, 0) {
@@ -501,9 +506,6 @@ func DepthKey(family string, b [2]int) string {
 const (
 	DepthFactorMin = 0.125
 	DepthFactorMax = 8.0
-	// depthFitRounds bounds the knot refit that makes the interpolated
-	// profile reproduce each bucket's measured total.
-	depthFitRounds = 8
 )
 
 // DepthBuckets computes the layer-bucket edges for depth probes: {0},
@@ -532,28 +534,47 @@ func DepthBuckets(n int) [][2]int {
 
 // depthKnot is one fitted bucket of a family profile.
 type depthKnot struct {
-	bucket   int     // index into buckets
-	center   float64 // (first+last)/2
-	measured float64
-	logRho   float64
+	bucket int     // index into buckets
+	first  int     // bucket's first layer
+	last   int     // bucket's last layer
+	center float64 // (first+last)/2
+	logRho float64
 }
 
-// interpolate evaluates a family profile at layer l: log-linear between
-// knot centers, constant beyond the outermost knots.
+// point reports a single-layer bucket: its factor applies to that layer
+// only and never bleeds into neighbours (the edge layers 0 and n-1
+// routinely measure several times the flat prediction).
+func (k depthKnot) point() bool { return k.first == k.last }
+
+// interpolateKnots evaluates a family profile at layer l: a single-layer
+// knot's own factor on its layer; otherwise log-linear between the centers
+// of the multi-layer knots, constant beyond the outermost ones. Point knots
+// never take part in the interpolation, so a large edge factor cannot leak
+// into the interior, and monotone interior knots give a monotone profile.
 func interpolateKnots(knots []depthKnot, l int) float64 {
-	if len(knots) == 0 {
+	var span []depthKnot
+	for _, k := range knots {
+		if k.point() {
+			if k.first == l {
+				return math.Exp(k.logRho)
+			}
+			continue
+		}
+		span = append(span, k)
+	}
+	if len(span) == 0 {
 		return 1
 	}
 	x := float64(l)
-	if x <= knots[0].center {
-		return math.Exp(knots[0].logRho)
+	if x <= span[0].center {
+		return math.Exp(span[0].logRho)
 	}
-	last := knots[len(knots)-1]
+	last := span[len(span)-1]
 	if x >= last.center {
 		return math.Exp(last.logRho)
 	}
-	for i := 0; i+1 < len(knots); i++ {
-		a, b := knots[i], knots[i+1]
+	for i := 0; i+1 < len(span); i++ {
+		a, b := span[i], span[i+1]
 		if x >= a.center && x <= b.center {
 			t := (x - a.center) / (b.center - a.center)
 			return math.Exp(a.logRho + t*(b.logRho-a.logRho))
@@ -625,6 +646,7 @@ func ComputeDepthModel(bank *core.TensorBank, buckets [][2]int,
 		// Members of this family per bucket, and the probe that measured
 		// them: a family probe, else the combined probe.
 		var knots []depthKnot
+		measuredOf := map[int]float64{}
 		for bi, b := range buckets {
 			mb, ok := measured[DepthKey(fam, b)]
 			combined := false
@@ -662,31 +684,13 @@ func ComputeDepthModel(bank *core.TensorBank, buckets [][2]int,
 			}
 			f, _ := clampDepthFactor(mb / pb)
 			knots = append(knots, depthKnot{
-				bucket: bi, center: float64(b[0]+b[1]) / 2,
-				measured: mb, logRho: math.Log(f),
+				bucket: bi, first: b[0], last: b[1],
+				center: float64(b[0]+b[1]) / 2, logRho: math.Log(f),
 			})
+			measuredOf[bi] = mb
 		}
 		if len(knots) == 0 {
 			continue
-		}
-		// Refit: under interpolation a bucket's predicted total is the sum
-		// of pred_t × ρ(l_t), not pred × knot; rescale each knot until the
-		// profile reproduces the measurement (or hits the guard).
-		for round := 0; round < depthFitRounds; round++ {
-			for k := range knots {
-				b := buckets[knots[k].bucket]
-				var p float64
-				for _, ti := range tensors {
-					if ti.family == fam && inBucket(ti.layer, b) {
-						p += ti.pred * interpolateKnots(knots, ti.layer)
-					}
-				}
-				if !(p > 0) {
-					continue
-				}
-				f, _ := clampDepthFactor(math.Exp(knots[k].logRho) * knots[k].measured / p)
-				knots[k].logRho = math.Log(f)
-			}
 		}
 		profiles[fam] = knots
 		for _, k := range knots {
@@ -707,7 +711,7 @@ func ComputeDepthModel(bank *core.TensorBank, buckets [][2]int,
 			}
 			dm.Buckets = append(dm.Buckets, DepthBucket{
 				Family: fam, First: b[0], Last: b[1],
-				MeasuredKLD: k.measured, PredictedKLD: p, Factor: f, Clamped: clamped,
+				MeasuredKLD: measuredOf[k.bucket], PredictedKLD: p, Factor: f, Clamped: clamped,
 			})
 		}
 	}

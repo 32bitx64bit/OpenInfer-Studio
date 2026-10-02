@@ -488,10 +488,11 @@ func TestComputeDepthModelInterpolatesAndReproducesBuckets(t *testing.T) {
 	if share(3, "attn_q") == share(4, "attn_q") {
 		t.Error("layers 3 and 4 share a factor; expected interpolation")
 	}
-	// The bucket-total fit may dip a knot to keep a neighbour's average
-	// honest, but the overall trend follows the measurements.
-	if !(share(9, "ffn_up") > share(6, "ffn_up") && share(6, "ffn_up") > share(2, "ffn_up")) {
-		t.Errorf("ffn trend lost: l2=%v l6=%v l9=%v", share(2, "ffn_up"), share(6, "ffn_up"), share(9, "ffn_up"))
+	// Monotone measurements give a monotone profile (no invented dips).
+	for l := 0; l < 9; l++ {
+		if share(l+1, "ffn_up") < share(l, "ffn_up")*(1-1e-9) {
+			t.Errorf("ffn profile not monotone at %d: %v -> %v", l, share(l, "ffn_up"), share(l+1, "ffn_up"))
+		}
 	}
 	// The fit reproduces each bucket's measured/predicted ratio in total:
 	// Σ_{t∈b} pred_t·ρ(l_t) ≈ measured_b, i.e. bucket shares are
@@ -506,7 +507,13 @@ func TestComputeDepthModelInterpolatesAndReproducesBuckets(t *testing.T) {
 			got += share(l, "attn_q")
 		}
 		want := attn[i] / sumMeasured * 1.0
-		if math.Abs(got-want) > 0.02*want+1e-6 {
+		// Interpolation smooths across bucket edges, so interior totals
+		// track measurements approximately; single-layer edges exactly.
+		tol := 0.15 * want
+		if b[0] == b[1] {
+			tol = 1e-9 + 0.02*want
+		}
+		if math.Abs(got-want) > tol {
 			t.Errorf("attn bucket %v share %.4f, want ≈ %.4f", b, got, want)
 		}
 	}
@@ -700,5 +707,66 @@ func TestSensitivityResolvesMergedRole(t *testing.T) {
 	td := core.TensorDesc{Name: "blk.0.ssm_x.weight", DType: core.DTypeF16, Shape: []uint64{256, 16}, Elements: 4096}
 	if l, ok := sens.Loss(td, core.DTypeQ3_K, map[core.DType]float64{core.DTypeQ3_K: 2}); !ok || math.Abs(l-0.05) > 1e-12 {
 		t.Errorf("merged-role loss = %v %v, want 0.05", l, ok)
+	}
+}
+
+// Large single-layer edge factors must not leak into the interior: with a
+// uniform interior, every interior layer keeps the same weight.
+func TestComputeDepthModelEdgesDoNotCarveInterior(t *testing.T) {
+	for _, n := range []int{16, 64} {
+		bank := &core.TensorBank{ModelID: "m"}
+		for l := 0; l < n; l++ {
+			bank.Tensors = append(bank.Tensors, core.TensorDesc{
+				Name: fmt.Sprintf("blk.%d.attn_q.weight", l), DType: core.DTypeF16,
+				Shape: []uint64{256, 16}, Elements: 4096,
+			})
+		}
+		sens := map[string]RoleSensitivity{
+			"attn_q": {Role: "attn_q", KLD: 1.0, Elements: uint64(4096 * n), ProbeDType: core.DTypeQ3_K},
+		}
+		buckets := DepthBuckets(n)
+		per := 1.0 / float64(n)
+		measured := map[string]float64{}
+		for _, b := range buckets {
+			layers := float64(b[1] - b[0] + 1)
+			f := 0.83
+			if b[0] == b[1] {
+				f = 5
+			}
+			measured[DepthKey(DepthFamilyMix, b)] = f * per * layers
+		}
+		dm := ComputeDepthModel(bank, buckets, sens, measured, 0)
+		if dm == nil {
+			t.Fatal("nil depth model")
+		}
+		for _, b := range dm.Buckets {
+			if b.Clamped {
+				t.Errorf("n=%d: bucket %d-%d clamped", n, b.First, b.Last)
+			}
+		}
+		ref := dm.Shares["blk.1.attn_q.weight"]
+		for l := 1; l < n-1; l++ {
+			got := dm.Shares[fmt.Sprintf("blk.%d.attn_q.weight", l)]
+			if math.Abs(got-ref) > 1e-12*ref {
+				t.Fatalf("n=%d: interior layer %d share %v != layer 1 %v (edge leaked)", n, l, got, ref)
+			}
+		}
+		edge := dm.Shares["blk.0.attn_q.weight"]
+		if r := edge / ref; math.Abs(r-5/0.83) > 1e-9 {
+			t.Errorf("n=%d: edge/interior = %v, want %v", n, r, 5/0.83)
+		}
+	}
+}
+
+func TestPinnedRateIgnoresHeadForLayerTensors(t *testing.T) {
+	sens := &Sensitivity{Roles: map[string]RoleSensitivity{
+		"output": {Role: "output", ProbeDType: core.DTypeQ3_K, KLD: 1, SumWSSE: 1, Elements: 1, Tensors: []string{"output.weight"}},
+		"attn_q": {Role: "attn_q", ProbeDType: core.DTypeQ3_K, KLD: 1, SumWSSE: 100, Elements: 1, Tensors: []string{"blk.0.attn_q.weight"}},
+	}}
+	if r, ok := sens.PinnedRate("blk.0.attn_k_b.weight"); !ok || r != 0.01 {
+		t.Errorf("layer tensor rate = %v %v, want attn_q's 0.01 (not the head's 1)", r, ok)
+	}
+	if r, ok := sens.PinnedRate("some_global.weight"); !ok || r != 1 {
+		t.Errorf("global tensor rate = %v %v, want the max over all roles", r, ok)
 	}
 }
