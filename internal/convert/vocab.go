@@ -6,7 +6,8 @@ import (
 )
 
 func isVocabWeight(ggufName string) bool {
-	return ggufName == "token_embd.weight" || ggufName == "output.weight"
+	return ggufName == "token_embd.weight" || ggufName == "output.weight" ||
+		ggufName == "per_layer_token_embd.weight"
 }
 
 func vocabRows(t TensorRef) int {
@@ -14,6 +15,7 @@ func vocabRows(t TensorRef) int {
 	stem := strings.TrimSuffix(n, ".weight")
 	switch {
 	case strings.HasSuffix(stem, "embed_tokens") || stem == "embed_tokens" || stem == "model.embed_tokens":
+	case strings.HasSuffix(stem, "embed_tokens_per_layer"):
 	case stem == "lm_head" || strings.HasSuffix(stem, ".lm_head"):
 	default:
 		return 0
@@ -52,6 +54,9 @@ func (t *ggmlTokenizer) padTo(n int) {
 		i := len(t.Tokens)
 		t.Tokens = append(t.Tokens, fmt.Sprintf("[PAD%d]", i))
 		t.TokenType = append(t.TokenType, tokenTypeUnused)
+		if len(t.Scores) > 0 {
+			t.Scores = append(t.Scores, spmPadScore)
+		}
 	}
 }
 

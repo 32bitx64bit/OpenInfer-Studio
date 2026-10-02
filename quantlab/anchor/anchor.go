@@ -337,6 +337,13 @@ func Derive(bank *core.TensorBank, explicit []core.Anchor, pol Policy) (*Set, er
 				Kind: core.AnchorAttention, Pattern: t.Name,
 				DType: pol.DownPrior, Weight: w,
 			})
+		case role == rolePerLayerEmbed && t.Quantizable() && pol.EmbeddingFloor != "":
+			// A separate lookup table, never the output head: the plain
+			// embedding floor applies even when token_embd is tied.
+			s.Hard = append(s.Hard, core.Anchor{
+				Kind: core.AnchorExplicit, Name: t.Name,
+				MinDType: pol.EmbeddingFloor, Reason: ReasonTokenEmbeddings,
+			})
 		case role == roleEmbed && t.Quantizable() && embedFloor != "":
 			s.Hard = append(s.Hard, core.Anchor{
 				Kind: core.AnchorExplicit, Name: t.Name,

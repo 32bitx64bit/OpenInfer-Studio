@@ -23,6 +23,10 @@ const (
 	roleEmbed
 	roleOutput
 	roleFFN
+	// rolePerLayerEmbed is gemma3n/gemma4's per-layer token embedding table:
+	// a lookup like token_embd, but a separate (and for E-series models
+	// enormous) table that is not tied to the output head.
+	rolePerLayerEmbed
 )
 
 func keepFloat(r tensorRole) bool {
@@ -79,6 +83,8 @@ func classify(name string, linear map[int]struct{}) tensorRole {
 	loc := strings.ToLower(localName(name))
 
 	switch {
+	case strings.Contains(n, "per_layer_token_embd"):
+		return rolePerLayerEmbed
 	case strings.Contains(n, "token_embd"), strings.Contains(n, "tok_embeddings"),
 		strings.Contains(n, "word_embd"):
 		return roleEmbed
@@ -131,6 +137,13 @@ func classify(name string, linear map[int]struct{}) tensorRole {
 	}
 
 	if strings.HasPrefix(loc, "ffn_") || strings.Contains(loc, ".ffn_") {
+		return roleFFN
+	}
+	// gemma3n/gemma4 per-layer-embedding gate and projection: ordinary
+	// matrices llama-quantize quantizes. The sibling altup*, laurel* and
+	// per_layer_model_proj tensors stay unknown (preserved): llama-quantize
+	// leaves them in their stored type too.
+	if loc == "inp_gate.weight" || loc == "proj.weight" {
 		return roleFFN
 	}
 	return roleUnknown

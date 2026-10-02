@@ -39,7 +39,10 @@ type layout struct {
 	AttnGate    bool
 	InternLM    bool
 	MLA         bool
-	block       string
+	// GemmaN is "gemma3n" or "gemma4" for the AltUp / per-layer-embedding
+	// Gemma families this converter maps natively.
+	GemmaN string
+	block  string
 }
 
 func tensorNames(tensors []TensorRef) []string {
@@ -66,8 +69,14 @@ func detectLayout(cfg map[string]any, names []string) layout {
 	}
 	if cfgInt(cfg, "altup_num_inputs", "hidden_size_per_layer_input") > 0 ||
 		has("altup") || has("per_layer_input") {
-		f.block = "altup / per-layer embeddings are not convertible"
-		return f
+		// Gemma 3n (AltUp + per-layer embeddings + LAuReL) and Gemma 4
+		// (per-layer embeddings) have native mappings; any other
+		// architecture carrying these tensors still fails closed.
+		f.GemmaN = gemmaNFamily(cfg)
+		if f.GemmaN == "" {
+			f.block = "altup / per-layer embeddings are not convertible for this architecture (only Gemma 3n and Gemma 4 are mapped)"
+			return f
+		}
 	}
 	if has("in_proj_qkvz") || has("in_proj_ba") && !has("in_proj_qkv") {
 		f.block = "packed linear-attention weights (Qwen3-Next style) are not convertible"
@@ -132,6 +141,22 @@ func cfgBool(cfg map[string]any, keys ...string) bool {
 	return false
 }
 
+// gemmaNFamily names the AltUp / per-layer-embedding Gemma family a config
+// declares ("" for anything else). A Gemma 4 name wins over a Gemma 3n one.
+func gemmaNFamily(cfg map[string]any) string {
+	blob := strings.ToLower(cfgString(cfg, "model_type"))
+	for _, a := range stringSlice(cfg["architectures"]) {
+		blob += " " + strings.ToLower(a)
+	}
+	switch {
+	case strings.Contains(blob, "gemma4"):
+		return "gemma4"
+	case strings.Contains(blob, "gemma3n"):
+		return "gemma3n"
+	}
+	return ""
+}
+
 func inferArch(cfg map[string]any, feat layout) (string, error) {
 	if feat.block != "" {
 		return "", fmt.Errorf("%s", feat.block)
@@ -149,6 +174,14 @@ func inferArch(cfg map[string]any, feat layout) (string, error) {
 			continue
 		}
 		return withMoESuffix(c, feat), nil
+	}
+
+	// A declared Gemma 3n / Gemma 4 checkpoint must resolve to its own
+	// llama.cpp architecture; the generic graph heuristics below would
+	// silently turn it into plain gemma3.
+	if feat.GemmaN != "" {
+		mt, _ := cfg["model_type"].(string)
+		return "", fmt.Errorf("llama.cpp has no loader for %s variant %q (tried %s)", feat.GemmaN, mt, strings.Join(cands, ", "))
 	}
 
 	// HF's model_type is often not a GGUF architecture (mistral, mixtral).
@@ -214,6 +247,12 @@ func requireConvertible(arch string, feat layout) error {
 	if strings.HasPrefix(arch, "rwkv") || strings.HasPrefix(arch, "arwkv") ||
 		strings.HasPrefix(arch, "mamba") || arch == "jamba" {
 		return fmt.Errorf("llama.cpp can load %s, but this converter cannot emit those tensors", arch)
+	}
+	if arch == "gemma4-assistant" {
+		return fmt.Errorf("Gemma 4 assistant (speculative draft) checkpoints are not convertible; convert the main Gemma 4 model")
+	}
+	if (arch == "gemma4" || arch == "gemma3n") && feat.MoE {
+		return fmt.Errorf("%s mixture-of-experts checkpoints are not convertible yet (dense variants such as E2B/E4B are)", arch)
 	}
 	// llama.cpp's qwen3next loader is the packed graph; we only emit split Qwen3.5 projections.
 	if arch == "qwen3next" && !feat.SplitLinear {

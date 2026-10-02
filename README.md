@@ -144,9 +144,11 @@ tokens live in the OS keychain, never in logs or SQLite.
   (mirrors llama.cpp’s experimental libmtmd audio input; quality may vary —
   remains gated until upstream treats audio as stable).
 - Hugging Face convert supports architectures llama.cpp can load as GGUF from
-  BF16/F16/F32 safetensors. NVFP4 / GPTQ / AWQ and some layouts (MLA, packed
-  Qwen3-Next, RWKV/Mamba, altup) fail closed. Vision weights are skipped, so
-  the converted GGUF is language-only.
+  BF16/F16/F32 safetensors, including Gemma 3n (AltUp / per-layer embeddings /
+  LAuReL) and the dense Gemma 4 models (E2B/E4B/31B; per-layer embeddings).
+  NVFP4 / GPTQ / AWQ and some layouts (MLA, packed Qwen3-Next, RWKV/Mamba,
+  Gemma 4 mixture-of-experts, AltUp outside Gemma 3n) fail closed. Vision and
+  audio weights are skipped, so the converted GGUF is language-only.
 
 ## License
 

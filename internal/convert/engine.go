@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 )
 
@@ -19,6 +20,13 @@ const (
 	kindNegExp     workKind = "neg_exp"
 	kindConv1d     workKind = "conv1d"
 	kindStack      workKind = "stack"
+	// kindStackIdx stacks N sibling tensors (…projections.0, .1, …) along a
+	// new leading axis, ordered by their trailing index (Gemma 3n AltUp).
+	kindStackIdx workKind = "stack_idx"
+	// kindF32 copies a matrix as F32 (small tensors llama.cpp reads as float).
+	kindF32 workKind = "f32"
+	// kindData is a generated tensor whose payload is workItem.Data.
+	kindData workKind = "data"
 )
 
 type workItem struct {
@@ -32,14 +40,26 @@ type workItem struct {
 	Reorder string
 	NHeads  int
 	NExpert int
+	Data    []byte // kindData payload
 }
 
 func convertFamily(f Family, dir string, tensors []TensorRef, cfg map[string]any, w *Writer) (*ConvertStats, error) {
-	tok, err := loadTokenizer(dir)
+	h := parseHyper(cfg, f)
+	if f.Gemma != "" {
+		if err := validateGemmaN(f, cfg, h); err != nil {
+			return nil, err
+		}
+	}
+	var tok *ggmlTokenizer
+	var err error
+	if f.Gemma != "" {
+		tok, err = loadGemmaTokenizer(dir, f.Gemma, h.vocab)
+	} else {
+		tok, err = loadTokenizer(dir)
+	}
 	if err != nil {
 		return nil, err
 	}
-	h := parseHyper(cfg, f)
 	h.vocab = alignVocab(tok, tensors, h.vocab)
 	weightDType := inferWeightDType(tensors)
 	store, err := storeType(weightDType)
@@ -56,7 +76,16 @@ func convertFamily(f Family, dir string, tensors []TensorRef, cfg map[string]any
 	}
 
 	writeFamilyKV(w, f, name, cfg, h, fileType)
+	if f.Gemma != "" {
+		writeGemmaNKV(w, f, cfg, h)
+	}
 	pre := sniffTokenizerPre(tok, tokenizerFallback(f.GGUFArch))
+	switch tok.Model {
+	case "llama":
+		pre = "default" // SentencePiece models ignore it; llama.cpp's converter writes "default"
+	case "gemma4":
+		pre = "gemma4"
+	}
 	f.UnpermuteQK = shouldUnpermute(f.GGUFArch, pre)
 	w.addTokenizer(tok, pre)
 
@@ -65,6 +94,11 @@ func convertFamily(f Family, dir string, tensors []TensorRef, cfg map[string]any
 	if err != nil {
 		return stats, err
 	}
+	extra, err := gemmaExtraWork(f, cfg)
+	if err != nil {
+		return stats, err
+	}
+	items = append(items, extra...)
 
 	for _, item := range items {
 		if err := w.PlanTensor(item.GGUF, item.Shape, item.DType); err != nil {
@@ -129,6 +163,7 @@ func planFamilyWork(f Family, tensors []TensorRef, h hyper, store int, stats *Co
 	haveOutput := false
 	var embed *TensorRef
 	stacked := map[string][]TensorRef{}
+	stackedIdx := map[string][]stackSrc{}
 
 	for i := range tensors {
 		t := tensors[i]
@@ -149,6 +184,10 @@ func planFamilyWork(f Family, tensors []TensorRef, h hyper, store int, stats *Co
 		}
 		if m.Kind == kindStack {
 			stacked[m.GGUF] = append(stacked[m.GGUF], tensors[i])
+			continue
+		}
+		if m.Kind == kindStackIdx {
+			stackedIdx[m.GGUF] = append(stackedIdx[m.GGUF], stackSrc{idx: m.Expert, ref: tensors[i]})
 			continue
 		}
 		if m.GGUF == "output.weight" {
@@ -178,7 +217,37 @@ func planFamilyWork(f Family, tensors []TensorRef, h hyper, store int, stats *Co
 		work = append(work, item)
 	}
 
-	for ggufName, srcs := range stacked {
+	stackedNames := make([]string, 0, len(stackedIdx))
+	for name := range stackedIdx {
+		stackedNames = append(stackedNames, name)
+	}
+	sort.Strings(stackedNames)
+	for _, ggufName := range stackedNames {
+		want := 0
+		if f.Gemma == "gemma3n" {
+			want = 3 // altup_num_inputs - 1, validated to be 4 inputs
+		}
+		refs, hfShape, err := orderStack(ggufName, stackedIdx[ggufName], want)
+		if err != nil {
+			return nil, err
+		}
+		work = append(work, workItem{
+			GGUF:    ggufName,
+			Shape:   ggufDims(hfShape),
+			HFShape: hfShape,
+			DType:   store,
+			Srcs:    refs,
+			Kind:    kindStackIdx,
+		})
+	}
+
+	expertNames := make([]string, 0, len(stacked))
+	for name := range stacked {
+		expertNames = append(expertNames, name)
+	}
+	sort.Strings(expertNames)
+	for _, ggufName := range expertNames {
+		srcs := stacked[ggufName]
 		hfShape, err := expertPlanShape(srcs, h.nExpert)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", ggufName, err)
@@ -223,6 +292,8 @@ func familyStore(kind workKind, hfShape []int64, store int) (dtype int, shape []
 	switch kind {
 	case kindRMS, kindRMSPlus, kindNegExp:
 		return GGMLF32, append([]int64(nil), hfShape...)
+	case kindF32:
+		return GGMLF32, shape
 	case kindConv1d:
 		// llama.cpp's SSM conv kernels read the conv weights as raw F32
 		// (ggml asserts src1->nb[0] == sizeof(float) on CPU and CUDA).
@@ -237,6 +308,16 @@ func familyStore(kind workKind, hfShape []int64, store int) (dtype int, shape []
 }
 
 func familyPayload(item workItem, srcDType string, elem int, h hyper) ([]byte, error) {
+	if item.Kind == kindData {
+		return item.Data, nil
+	}
+	if item.Kind == kindStackIdx {
+		raw, err := stackByOrder(item.Srcs)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", item.GGUF, err)
+		}
+		return convertPayload(raw, item.Srcs[0].DType, item.DType)
+	}
 	if item.Kind == kindStack {
 		raw, _, err := stackExperts(item.Srcs, item.NExpert)
 		if err != nil {
@@ -307,7 +388,7 @@ func familyPayload(item workItem, srcDType string, elem int, h hyper) ([]byte, e
 			return nil, fmt.Errorf("%s: %w", item.GGUF, err)
 		}
 		return convertPayload(unp, srcDType, item.DType)
-	case kindCopy, kindTie, kindConv1d:
+	case kindCopy, kindTie, kindConv1d, kindF32:
 		if item.DType == GGMLF32 && strings.ToUpper(item.Src.DType) != "F32" {
 			return toF32(raw, item.Src.DType)
 		}

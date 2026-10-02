@@ -47,11 +47,14 @@ type ggmlTokenizer struct {
 	Model                   string
 	Tokens                  []string
 	Merges                  []string
+	Scores                  []float32 // SentencePiece ("llama") models only
 	TokenType               []int32
 	Bos, Eos, Unk, Pad, Eot int32
 	Eog                     []int32 // eos + eot; never <|eom|>
 	AddBos, AddEos          bool
 	ChatTemplate            string
+	// NoSpacePrefix writes tokenizer.ggml.add_space_prefix=false (Gemma).
+	NoSpacePrefix bool
 }
 
 func loadTokenizer(dir string) (*ggmlTokenizer, error) {
@@ -125,6 +128,15 @@ func loadTokenizer(dir string) (*ggmlTokenizer, error) {
 		out.Model = strings.ToLower(tj.Model.Type)
 	}
 
+	finishTokenizer(dir, out)
+	return out, nil
+}
+
+// finishTokenizer reads tokenizer_config.json / generation_config.json and
+// fills the chat template, add-bos/eos flags and the special token ids of a
+// tokenizer whose tokens are already loaded. Shared by every loader.
+func finishTokenizer(dir string, out *ggmlTokenizer) {
+	tokens := out.Tokens
 	var tc hfTokenizerConfig
 	if b, err := os.ReadFile(filepath.Join(dir, "tokenizer_config.json")); err == nil {
 		_ = json.Unmarshal(b, &tc)
@@ -177,12 +189,11 @@ func loadTokenizer(dir string) (*ggmlTokenizer, error) {
 	}
 	applyGenerationConfig(dir, out, tokens)
 	out.Eog = eogIDs(out, tokens)
-	return out, nil
 }
 
 func isEOTToken(t string) bool {
 	switch t {
-	case "<|eot|>", "<|eot_id|>", "<|im_end|>":
+	case "<|eot|>", "<|eot_id|>", "<|im_end|>", "<end_of_turn>", "<turn|>":
 		return true
 	default:
 		return false
@@ -348,7 +359,13 @@ func (w *Writer) addTokenizer(t *ggmlTokenizer, pre string) {
 	if len(t.Merges) > 0 {
 		w.AddKV("tokenizer.ggml.merges", t.Merges)
 	}
+	if len(t.Scores) > 0 {
+		w.AddKV("tokenizer.ggml.scores", t.Scores)
+	}
 	w.AddKV("tokenizer.ggml.token_type", t.TokenType)
+	if t.NoSpacePrefix {
+		w.AddKV("tokenizer.ggml.add_space_prefix", false)
+	}
 	w.AddKV("tokenizer.ggml.add_bos_token", t.AddBos)
 	w.AddKV("tokenizer.ggml.add_eos_token", t.AddEos)
 	w.AddKV("tokenizer.ggml.add_sep_token", false)

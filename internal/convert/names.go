@@ -110,6 +110,9 @@ func familyFor(arch string, feat layout) Family {
 	if feat.GemmaFF || feat.LinearAttn || strings.HasPrefix(arch, "gemma") {
 		f.RMSPlus = rmsPlusAll
 	}
+	if arch == "gemma3n" || arch == "gemma4" {
+		configureGemmaN(&f, arch)
+	}
 	return f
 }
 
@@ -167,6 +170,11 @@ func (f Family) MapName(hfName string) mappedTensor {
 	case stem == "model.norm" || stem == "norm" || strings.HasSuffix(stem, ".model.norm"):
 		return mappedTensor{GGUF: "output_norm.weight", Kind: f.normKind("output_norm.weight"), Expert: -1}
 	}
+	if f.Gemma != "" {
+		if m, ok := f.gemmaGlobal(stem); ok {
+			return m
+		}
+	}
 
 	m := layerRe.FindStringSubmatch(stem)
 	if m == nil {
@@ -202,6 +210,9 @@ func (f Family) MapName(hfName string) mappedTensor {
 }
 
 func (f Family) tensorKind(ggufName, rest string) workKind {
+	if f.Gemma != "" && gemmaForcesF32(ggufName) {
+		return kindF32
+	}
 	if rest == "linear_attn.A_log" {
 		return kindNegExp
 	}
@@ -276,5 +287,9 @@ func isVisionTensor(name string) bool {
 		strings.Contains(n, "mm_projector") ||
 		strings.Contains(n, "multi_modal") ||
 		strings.Contains(n, "audio_tower") ||
-		strings.Contains(n, "audio_model")
+		strings.Contains(n, "audio_model") ||
+		// Gemma 3n / 4 multimodal embedders that feed the vision and
+		// audio towers into the language model.
+		strings.Contains(n, "embed_vision") ||
+		strings.Contains(n, "embed_audio")
 }

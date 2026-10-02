@@ -144,7 +144,9 @@ overrides the BPW target.
 library GGUF. Convert detects the graph from `config.json` and tensor names,
 maps it onto a llama.cpp `general.architecture` (from llama.cpp
 `MODEL_ARCH_NAMES`), and fail-closes if llama.cpp has no loader or the weight
-layout cannot be emitted (MLA, packed Qwen3-Next, RWKV/Mamba, altup). Hugging
+layout cannot be emitted (MLA, packed Qwen3-Next, RWKV/Mamba, Gemma 4
+mixture-of-experts, altup outside Gemma 3n). Gemma 3n and dense Gemma 4
+(per-layer embeddings, AltUp, LAuReL) are mapped natively. Hugging
 Face class names are not allowlisted — Mistral/Mixtral write GGUF `llama`
 because that is the loader llama.cpp uses. Vision weights are skipped so the
 GGUF is language-only. Then the same quantize / OID path runs as a library

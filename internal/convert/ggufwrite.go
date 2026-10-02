@@ -72,6 +72,28 @@ func NewWriter(path string) (*Writer, error) {
 
 func (w *Writer) AddKV(key string, value any) { w.kv = append(w.kv, KV{Key: key, Value: value}) }
 
+// SetKV adds key, replacing any earlier value: GGUF readers reject duplicate
+// keys, so families that refine a standard key must replace it, not add.
+func (w *Writer) SetKV(key string, value any) {
+	for i := range w.kv {
+		if w.kv[i].Key == key {
+			w.kv[i].Value = value
+			return
+		}
+	}
+	w.AddKV(key, value)
+}
+
+// HasKV reports whether key was already added.
+func (w *Writer) HasKV(key string) bool {
+	for _, kv := range w.kv {
+		if kv.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *Writer) PlanTensor(name string, shape []int64, dtype int) error {
 	if w.hdrDone {
 		return fmt.Errorf("cannot plan tensor after WriteHeader")
@@ -347,6 +369,22 @@ func writeValue(w io.Writer, v any) error {
 		}
 		for _, n := range x {
 			if err := binary.Write(w, binary.LittleEndian, n); err != nil {
+				return err
+			}
+		}
+		return nil
+	case []float32:
+		if err := binary.Write(w, binary.LittleEndian, uint32(ggufTypeArray)); err != nil {
+			return err
+		}
+		if err := binary.Write(w, binary.LittleEndian, uint32(ggufTypeFloat32)); err != nil {
+			return err
+		}
+		if err := binary.Write(w, binary.LittleEndian, uint64(len(x))); err != nil {
+			return err
+		}
+		for _, f := range x {
+			if err := binary.Write(w, binary.LittleEndian, f); err != nil {
 				return err
 			}
 		}

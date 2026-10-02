@@ -28,7 +28,10 @@ type Family struct {
 	LinearAttn  bool
 	MoE         bool
 	RopePartial bool // rope.dimension_count = head_dim * partial_rotary_factor
-	Layers      map[string]string
+	// Gemma is "gemma3n" or "gemma4": per-layer embeddings (and, for 3n,
+	// AltUp / LAuReL), see arch_gemma_n.go.
+	Gemma  string
+	Layers map[string]string
 }
 
 type hyper struct {

@@ -559,3 +559,111 @@ func TestRelaxEmbeddingFloorOnlyMovesUntiedEmbedding(t *testing.T) {
 		t.Error("tied embedding (output head) floor must not relax")
 	}
 }
+
+// gemma3nBank mirrors the tensors of a gemma3n GGUF (tied output).
+func gemma3nBank() *core.TensorBank {
+	f16 := func(name string, shape ...uint64) core.TensorDesc {
+		n := uint64(1)
+		for _, d := range shape {
+			n *= d
+		}
+		return core.TensorDesc{Name: name, DType: core.DTypeF16, Shape: shape, Elements: n, Length: n * 2}
+	}
+	return &core.TensorBank{ModelID: "g3n", Tensors: []core.TensorDesc{
+		f16("token_embd.weight", 512, 4096),
+		f16("per_layer_token_embd.weight", 1024, 4096), // {n_layer*n_embd_altup, n_vocab}
+		f16("per_layer_model_proj.weight", 512, 1024),
+		f16("per_layer_proj_norm.weight", 256),
+		f16("altup_proj.weight", 512, 512, 3),
+		f16("altup_unembd_proj.weight", 512, 512, 3),
+		f16("output_norm.weight", 512),
+		f16("blk.0.attn_q.weight", 512, 512),
+		f16("blk.0.ffn_down.weight", 1024, 512),
+		f16("blk.0.inp_gate.weight", 512, 256),
+		f16("blk.0.proj.weight", 256, 512),
+		f16("blk.0.post_norm.weight", 512),
+		f16("blk.0.altup_router.weight", 512, 4),
+		f16("blk.0.altup_correct_coef.weight", 4, 4),
+		f16("blk.0.altup_predict_coef.weight", 4, 16),
+		f16("blk.0.altup_correct_scale.weight", 512),
+		f16("blk.0.laurel_l.weight", 512, 64),
+		f16("blk.0.laurel_r.weight", 64, 512),
+		f16("blk.0.laurel_post_norm.weight", 512),
+	}}
+}
+
+func TestDeriveGemma3nPerLayerEmbeddings(t *testing.T) {
+	bank := gemma3nBank()
+	set, err := Derive(bank, nil, PolicyForBPW(3.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// token_embd is tied to the output head (no output.weight): output floor.
+	if f, ok := set.Floor("token_embd.weight"); !ok || f != core.DTypeQ5_K_T {
+		t.Errorf("token_embd floor = %s %v, want the Q5_K output floor at 3.5 bpw", f, ok)
+	}
+	// The per-layer table is a separate lookup: the plain embedding floor
+	// (Q4_K at 3.5 bpw), and it is the relaxable kind.
+	if f, ok := set.Floor("per_layer_token_embd.weight"); !ok || f != core.DTypeQ4_K_T {
+		t.Errorf("per_layer_token_embd floor = %s %v, want the Q4_K embedding floor", f, ok)
+	}
+	if !set.RelaxEmbeddingFloor("per_layer_token_embd.weight", core.DTypeQ3_K, "per-row check") {
+		t.Error("the per-layer table's floor should be relaxable by the per-row check")
+	}
+	if set.RelaxEmbeddingFloor("token_embd.weight", core.DTypeQ3_K, "") {
+		t.Error("the tied token_embd (output head) floor must never relax")
+	}
+
+	preserved := map[string]bool{}
+	for _, t := range bank.Tensors {
+		if set.Preserved(t) {
+			preserved[t.Name] = true
+		}
+	}
+	// llama-quantize leaves these in their stored type; so do we.
+	for _, name := range []string{
+		"per_layer_model_proj.weight", "per_layer_proj_norm.weight", "altup_proj.weight",
+		"altup_unembd_proj.weight", "output_norm.weight", "blk.0.post_norm.weight",
+		"blk.0.altup_router.weight", "blk.0.altup_correct_coef.weight", "blk.0.altup_predict_coef.weight",
+		"blk.0.altup_correct_scale.weight", "blk.0.laurel_l.weight", "blk.0.laurel_r.weight",
+		"blk.0.laurel_post_norm.weight",
+	} {
+		if !preserved[name] {
+			t.Errorf("%s should be preserved (llama-quantize does not quantize it)", name)
+		}
+	}
+	// llama-quantize does quantize these; they are ordinary tensors here.
+	for _, name := range []string{
+		"token_embd.weight", "per_layer_token_embd.weight", "blk.0.attn_q.weight",
+		"blk.0.ffn_down.weight", "blk.0.inp_gate.weight", "blk.0.proj.weight",
+	} {
+		if preserved[name] {
+			t.Errorf("%s must stay quantizable", name)
+		}
+	}
+	for _, name := range []string{"blk.0.inp_gate.weight", "blk.0.proj.weight"} {
+		if f, ok := set.Floor(name); ok {
+			t.Errorf("%s has an unexpected floor %s", name, f)
+		}
+	}
+}
+
+func TestDeriveUntiedModelKeepsPerLayerFloorSeparate(t *testing.T) {
+	bank := gemma3nBank()
+	bank.Tensors = append(bank.Tensors, core.TensorDesc{
+		Name: "output.weight", DType: core.DTypeF16, Shape: []uint64{512, 4096}, Elements: 512 * 4096, Length: 512 * 4096 * 2,
+	})
+	set, err := Derive(bank, nil, PolicyForBPW(3.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, _ := set.Floor("token_embd.weight"); f != core.DTypeQ4_K_T {
+		t.Errorf("untied token_embd floor = %s, want the Q4_K embedding floor", f)
+	}
+	if f, _ := set.Floor("output.weight"); f != core.DTypeQ5_K_T {
+		t.Errorf("output floor = %s", f)
+	}
+	if f, _ := set.Floor("per_layer_token_embd.weight"); f != core.DTypeQ4_K_T {
+		t.Errorf("per-layer floor = %s", f)
+	}
+}
