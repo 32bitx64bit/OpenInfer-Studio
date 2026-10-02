@@ -50,17 +50,20 @@ var diffusionLibraryTags = map[string]bool{
 	"diffusers": true, "stable-diffusion": true, "stable-diffusion-xl": true,
 	"flux": true, "text-to-image": true, "text-to-video": true,
 	"image-to-video": true, "unconditional-image-generation": true,
+	"comfyui": true, "diffusion-single-file": true,
 }
 
 // diffusionFamilyHints are repo-id / filename tokens for generator families.
 // Checked as substrings on the lowercased id/blob; deliberately specific so
-// LLM repos (llama, qwen, gemma, …) never match.
+// LLM repos (llama, qwen, gemma, …) never match. "minimax" is left out on
+// purpose: MiniMax publishes language models (MiniMax-M2) as well as video
+// models, so only tags or the ComfyUI organisation decide for it.
 var diffusionFamilyHints = []string{
 	"stable-diffusion", "stable_diffusion", "sdxl", "sd-xl", "sd1.", "sd-1.",
 	"sd2.", "sd-2.", "sd3", "sd-3", "sdxl-turbo", "sd-turbo",
 	"flux", "chroma", "qwen-image", "z-image", "ideogram", "krea",
 	"wan2", "wan-2", "wanx", "ltx", "hunyuanvideo", "hunyuan-video",
-	"minimax", "hailuo", "mochi", "cogvideo", "svd", "animatediff",
+	"hailuo", "mochi", "cogvideo", "svd", "animatediff",
 	"controlnet", "t2i-adapter",
 }
 
@@ -207,6 +210,16 @@ func DetectDiffusion(repoID, pipelineTag string, tags []string, filePaths []stri
 			return DiffusionImage
 		}
 		// Bare "diffusers" library tag: image unless video tokens present.
+		return DiffusionImage
+	}
+
+	// ComfyUI's own organisation publishes repackaged diffusion weights
+	// (split_files/diffusion_models, text_encoders, vae). Whatever the repo
+	// is called or tagged, safetensors weights from there are generator parts.
+	if strings.HasPrefix(lowerID, "comfy-org/") && hasWeight {
+		if videoHint {
+			return DiffusionVideo
+		}
 		return DiffusionImage
 	}
 

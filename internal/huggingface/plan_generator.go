@@ -90,10 +90,11 @@ func genSelectedByDefault(role string) bool {
 	return true
 }
 
-// diffusersDirs are the component folders of a diffusers repository.
-var diffusersDirRe = regexp.MustCompile(`^(unet|transformer(_\d+)?|prior|vae|text_encoder(_\d+)?|image_encoder|controlnet)$`)
+// diffusersDirRe matches the component folders of a diffusers repository,
+// including numbered or named siblings (text_encoder_2, vae_1_0, vae_decoder).
+var diffusersDirRe = regexp.MustCompile(`^(unet|transformer|prior|vae|text_encoder|image_encoder|controlnet)(_[a-z0-9_]+)?$`)
 
-var shardPartRe = regexp.MustCompile(`(?i)-(\d{5})-of-(\d{5})\.(safetensors|gguf)$`)
+var shardPartRe = regexp.MustCompile(`(?i)-(\d{5})-of-(\d{5})\.(safetensors|gguf|bin)$`)
 
 // genFile is one classified weight file of a generator repository.
 type genFile struct {
@@ -144,6 +145,13 @@ func buildGeneratorPlan(files []FileEntry) Plan {
 			hasGGUFModel = true
 		}
 	}
+	splitStyle := len(byKey[genVAE]) > 0
+	hasFlatEncoder := false
+	for _, k := range []string{genT5, genClipL, genClipG, genLLM} {
+		if len(byKey[k]) > 0 {
+			hasFlatEncoder = true
+		}
+	}
 	// An image-to-video-only repository needs the CLIP vision encoder; one
 	// that also holds text-to-video models leaves the choice to the user.
 	i2v := len(byKey[genModel]) > 0
@@ -165,9 +173,12 @@ func buildGeneratorPlan(files []FileEntry) Plan {
 			c.Selected = true
 		}
 		// The folders of a diffusers layout are a second way to get the same
-		// parts. When single-file weights exist they are the ones to take.
+		// parts. When single-file weights exist they are the ones to take,
+		// except for text encoders a split-component release (a flat model
+		// with its own flat VAE, like FLUX's flux1-dev + ae) only ships in
+		// folders: without them the model cannot run.
 		if fs[0].diffDir != "" && hasFlatModel {
-			c.Selected = false
+			c.Selected = c.Role == genTextEncoder && splitStyle && !hasFlatEncoder
 		}
 		comps = append(comps, c)
 	}
@@ -185,7 +196,7 @@ func buildGeneratorPlan(files []FileEntry) Plan {
 	plan.Components = comps
 
 	if len(comps) == 0 {
-		plan.Notes = append(plan.Notes, "No loadable weight files found in this repository.")
+		plan.Notes = append(plan.Notes, "No loadable weight files found in this repository. "+fileCensus(files))
 		return plan
 	}
 
@@ -238,15 +249,14 @@ func classifyGeneratorFile(f FileEntry, hasIndex bool) (genFile, bool) {
 				g.diffDir = dl
 				g.key = "d_" + dl
 				switch {
-				case dl == "vae":
-					g.role, g.label = genVAE, "VAE (diffusers folder)"
+				case strings.HasPrefix(dl, "vae"):
+					g.role, g.label = genVAE, "VAE ("+dl+"/)"
 				case strings.HasPrefix(dl, "text_encoder"):
-					g.role = genTextEncoder
-					g.label = "Text encoder (" + dl + "/)"
-				case dl == "image_encoder":
-					g.role, g.label = genClipVision, "CLIP vision encoder (image_encoder/)"
-				case dl == "controlnet":
-					g.role, g.label = genControlNet, "ControlNet (controlnet/)"
+					g.role, g.label = genTextEncoder, "Text encoder ("+dl+"/)"
+				case strings.HasPrefix(dl, "image_encoder"):
+					g.role, g.label = genClipVision, "CLIP vision encoder ("+dl+"/)"
+				case strings.HasPrefix(dl, "controlnet"):
+					g.role, g.label = genControlNet, "ControlNet ("+dl+"/)"
 				default:
 					g.role, g.label = genModel, "Diffusion model ("+dl+"/)"
 				}
@@ -373,8 +383,14 @@ func generatorComponent(fs []genFile) PlanComponent {
 				part, _ = strconv.Atoi(m[1])
 			}
 			pf := PlanFile{Path: g.Path, Size: g.Size, Part: part}
-			if g.diffDir != "" {
+			switch {
+			case g.diffDir != "":
 				pf.Dest = g.Path
+			case sdmodel.ComponentRole(path.Base(g.Path), nil) != sdmodel.ComponentRole(g.Path, nil):
+				// The folder is what says this file is a text encoder / VAE /
+				// LoRA (text_encoders/qwen_3_4b.safetensors); saved flat the
+				// name alone would not, so keep the folder.
+				pf.Dest = path.Join(path.Base(path.Dir(g.Path)), path.Base(g.Path))
 			}
 			opt.Files = append(opt.Files, pf)
 			opt.TotalBytes += g.Size
@@ -388,7 +404,7 @@ func generatorComponent(fs []genFile) PlanComponent {
 		opt.Warn = sdLoadWarning(head.prec, len(s.files))
 
 		// The same weights listed twice (a mirrored folder) are one option.
-		dup := opt.Variant + "|" + opt.Precision + "|" + strconv.FormatInt(opt.TotalBytes, 10)
+		dup := opt.Variant + "|" + opt.Precision + "|" + strconv.FormatInt(opt.TotalBytes, 10) + "|" + path.Base(head.Path)
 		if seen[dup] {
 			continue
 		}

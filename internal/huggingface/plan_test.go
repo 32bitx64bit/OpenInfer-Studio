@@ -607,3 +607,222 @@ func TestGeneratorPlanOptionIDsAreFolderSafeAndUnique(t *testing.T) {
 		t.Errorf("same-named files with different sizes are different options: %v", optLabels(m))
 	}
 }
+
+func TestEmptyPlansExplainWhatTheRepoHolds(t *testing.T) {
+	gen := buildGeneratorPlan(entries("README.md", 1, "config.json", 1, "extra.json", 1, "img.png", 5))
+	if len(gen.Components) != 0 || len(gen.Notes) != 1 ||
+		!strings.Contains(gen.Notes[0], "4 files") || !strings.Contains(gen.Notes[0], ".json ×2") {
+		t.Errorf("generator notes = %v", gen.Notes)
+	}
+	chat := buildChatPlan(entries("model.safetensors", 9, "config.json", 1), nil)
+	if len(chat.Notes) != 1 || !strings.Contains(chat.Notes[0], "2 files") || !strings.Contains(chat.Notes[0], "Quantize") {
+		t.Errorf("chat notes = %v", chat.Notes)
+	}
+	none := buildChatPlan(nil, nil)
+	if len(none.Notes) != 1 || !strings.Contains(none.Notes[0], "token") {
+		t.Errorf("a repo with no file list should point at gating / the token: %v", none.Notes)
+	}
+}
+
+// The reported case: an untagged ComfyUI repackage of safetensors weights.
+func TestBuildPlanComfyOrgSafetensorsVideoRepo(t *testing.T) {
+	p := BuildPlan(&RepoInfo{
+		ID: "Comfy-Org/MiniMax-H3",
+		Files: entries(
+			"split_files/diffusion_models/minimax_h3_fp8_scaled.safetensors", 20,
+			"split_files/diffusion_models/minimax_h3_bf16.safetensors", 40,
+			"split_files/text_encoders/umt5_xxl_fp16.safetensors", 11,
+			"split_files/vae/minimax_vae.safetensors", 1,
+			"README.md", 1,
+		),
+	})
+	if p.Kind != PlanGenerator {
+		t.Fatalf("kind = %s: an untagged comfy-org safetensors repo is a generator", p.Kind)
+	}
+	m := findComp(t, p, "model")
+	if len(m.Options) != 2 {
+		t.Fatalf("model options = %v", optLabels(m))
+	}
+	// The scaled pack warns, so the sound bf16 build is the default.
+	if got := defaultOpt(t, m); got.Precision != "bf16" {
+		t.Errorf("default = %s", got.Precision)
+	}
+	for _, id := range []string{"vae", "t5xxl"} {
+		if !findComp(t, p, id).Selected {
+			t.Errorf("%s should be included", id)
+		}
+	}
+}
+
+// ---- review findings ----------------------------------------------------------
+
+func TestChatPlanSeveralModelsLeavesProjectorAndDrafterOff(t *testing.T) {
+	for name, files := range map[string][]FileEntry{
+		"named": entries(
+			"Gemma-VL-4B-Q4_K_M.gguf", 2, "Gemma-VL-12B-Q4_K_M.gguf", 7,
+			"mmproj-Gemma-VL-4B-F16.gguf", 1, "mmproj-Gemma-VL-12B-F16.gguf", 1,
+			"dflash-Gemma-VL-12B-Q4_K_M.gguf", 1),
+		"folders": entries(
+			"4B/Gemma-Q4_K_M.gguf", 2, "12B/Gemma-Q4_K_M.gguf", 7,
+			"4B/mmproj-F16.gguf", 1, "12B/mmproj-F16.gguf", 1),
+	} {
+		p := buildChatPlan(files, []string{"vision"})
+		m := findComp(t, p, "model")
+		for _, o := range m.Options {
+			if o.Variant == "" {
+				t.Errorf("%s: model option %q needs a variant to tell the models apart", name, o.Label)
+			}
+		}
+		proj := findComp(t, p, "projector")
+		if proj.Selected {
+			t.Errorf("%s: a projector cannot be matched to one of several models, so it must start off", name)
+		}
+		seen := map[string]bool{}
+		for _, o := range proj.Options {
+			if o.Variant == "" || seen[o.Variant] {
+				t.Errorf("%s: projector options must be told apart: %+v", name, proj.Options)
+			}
+			seen[o.Variant] = true
+		}
+		if len(p.Notes) != 1 || !strings.Contains(p.Notes[0], "several models") {
+			t.Errorf("%s: notes = %v", name, p.Notes)
+		}
+		if hasComp(p, "drafter") && findComp(t, p, "drafter").Selected {
+			t.Errorf("%s: drafter must start off too", name)
+		}
+	}
+}
+
+func TestChatPlanBuildsOfOneModelAreNotSeveralModels(t *testing.T) {
+	p := buildChatPlan(entries(
+		"Qwen3.6-NEO-Q4_K_M.gguf", 4, "Qwen3.6-NEO-MTP-Q4_K_M.gguf", 4,
+		"Qwen3.6-NEO-AMD-MTP-Q4_K_M.gguf", 4, "mmproj-F16.gguf", 1,
+	), []string{"vision"})
+	if len(p.Notes) != 0 || !findComp(t, p, "projector").Selected {
+		t.Errorf("MTP / AMD builds of one model must not trigger the multi-model guard: notes=%v", p.Notes)
+	}
+	// Quantization folders are not separate models either.
+	p = buildChatPlan(entries("Q4_K_M/M-Q4_K_M.gguf", 4, "UD-Q8_0/M-UD-Q8_0.gguf", 8, "mmproj-F16.gguf", 1), []string{"vision"})
+	if len(p.Notes) != 0 {
+		t.Errorf("quant folders flagged as models: %v", p.Notes)
+	}
+}
+
+func TestGeneratorPlanFluxLayoutKeepsTextEncoders(t *testing.T) {
+	p := buildGeneratorPlan(entries(
+		"model_index.json", 1, "flux1-dev.safetensors", 23, "ae.safetensors", 1,
+		"text_encoder/model.safetensors", 1,
+		"text_encoder_2/model-00001-of-00002.safetensors", 5, "text_encoder_2/model-00002-of-00002.safetensors", 5,
+		"vae/diffusion_pytorch_model.safetensors", 1, "transformer/diffusion_pytorch_model-00001-of-00003.safetensors", 8,
+	))
+	if !findComp(t, p, "model").Selected || !findComp(t, p, "vae").Selected {
+		t.Fatal("flat model and ae are the download")
+	}
+	for _, id := range []string{"d_text_encoder", "d_text_encoder_2"} {
+		if !findComp(t, p, id).Selected {
+			t.Errorf("%s: the flat model has no flat text encoder, so the folder one is needed", id)
+		}
+	}
+	for _, id := range []string{"d_vae", "d_transformer"} {
+		if findComp(t, p, id).Selected {
+			t.Errorf("%s duplicates a flat component and must start off", id)
+		}
+	}
+}
+
+func TestGeneratorPlanAllInOneCheckpointDropsEveryFolder(t *testing.T) {
+	p := buildGeneratorPlan(entries(
+		"model_index.json", 1, "sd_xl_base_1.0.safetensors", 7,
+		"unet/diffusion_pytorch_model.safetensors", 10, "vae/diffusion_pytorch_model.safetensors", 1,
+		"text_encoder/model.safetensors", 1, "text_encoder_2/model.safetensors", 3,
+	))
+	for _, c := range p.Components {
+		if strings.HasPrefix(c.ID, "d_") && c.Selected {
+			t.Errorf("%s: an all-in-one checkpoint already contains it", c.ID)
+		}
+	}
+}
+
+func TestGeneratorPlanSiblingFoldersAndCheckpointNamedForAVAE(t *testing.T) {
+	p := buildGeneratorPlan(entries(
+		"model_index.json", 1,
+		"sd_xl_base_1.0.safetensors", 7000,
+		"sd_xl_base_1.0_0.9vae.safetensors", 7000,
+		"vae_1_0/diffusion_pytorch_model.fp16.safetensors", 167,
+		"vae_decoder/diffusion_pytorch_model.safetensors", 80,
+		"unet/diffusion_pytorch_model.safetensors", 10000,
+	))
+	m := findComp(t, p, "model")
+	if len(m.Options) != 2 {
+		t.Fatalf("both checkpoints are models (one was built with the 0.9 VAE): %v", optLabels(m))
+	}
+	if got := defaultOpt(t, m); got.TotalBytes != 7000 {
+		t.Errorf("default model = %+v: a 167 MB VAE folder must never be the model", got)
+	}
+	if hasComp(p, "vae") {
+		t.Error("sd_xl_base_1.0_0.9vae.safetensors is a checkpoint, not a VAE")
+	}
+	for _, id := range []string{"d_vae_1_0", "d_vae_decoder"} {
+		c := findComp(t, p, id)
+		if c.Role != "vae" || c.Selected {
+			t.Errorf("%s = role %s selected %v: a VAE folder, off while a flat checkpoint exists", id, c.Role, c.Selected)
+		}
+	}
+}
+
+func TestGeneratorPlanKeepsFolderWhenItIsWhatNamesTheRole(t *testing.T) {
+	p := buildGeneratorPlan(entries(
+		"split_files/diffusion_models/z_image_turbo_bf16.safetensors", 12,
+		"split_files/text_encoders/qwen_3_4b.safetensors", 8,
+		"split_files/text_encoders/umt5_xxl_fp16.safetensors", 11,
+		"split_files/vae/z_vae.safetensors", 1,
+		"split_files/loras/detail-lora.safetensors", 1,
+		"text_encoders/Qwen3-4B-Q8_0.gguf", 4,
+	))
+	dest := map[string]string{}
+	for _, c := range p.Components {
+		for _, o := range c.Options {
+			for _, f := range o.Files {
+				dest[f.Path] = f.Dest
+			}
+		}
+	}
+	if dest["split_files/text_encoders/qwen_3_4b.safetensors"] != "text_encoders/qwen_3_4b.safetensors" {
+		t.Errorf("qwen_3_4b is only a text encoder because of its folder; dest = %q", dest["split_files/text_encoders/qwen_3_4b.safetensors"])
+	}
+	if dest["text_encoders/Qwen3-4B-Q8_0.gguf"] != "text_encoders/Qwen3-4B-Q8_0.gguf" {
+		t.Errorf("a GGUF encoder saved flat would be listed as a chat model; dest = %q", dest["text_encoders/Qwen3-4B-Q8_0.gguf"])
+	}
+	for _, path := range []string{
+		"split_files/diffusion_models/z_image_turbo_bf16.safetensors", // no role from the folder
+		"split_files/text_encoders/umt5_xxl_fp16.safetensors",         // its name says t5
+		"split_files/vae/z_vae.safetensors",                           // its name says vae
+	} {
+		if dest[path] != "" {
+			t.Errorf("%s needs no folder, dest = %q", path, dest[path])
+		}
+	}
+}
+
+func TestGeneratorPlanShardedBinSetIsOneOption(t *testing.T) {
+	p := buildGeneratorPlan(entries(
+		"model_index.json", 1,
+		"text_encoder_2/pytorch_model-00001-of-00002.bin", 4990,
+		"text_encoder_2/pytorch_model-00002-of-00002.bin", 4990,
+	))
+	c := findComp(t, p, "d_text_encoder_2")
+	if len(c.Options) != 1 || len(c.Options[0].Files) != 2 || c.Options[0].TotalBytes != 9980 {
+		t.Fatalf("both shards belong to the set: %+v", c.Options)
+	}
+}
+
+func TestPrecisionIgnoresWordsThatOnlyLookLikeFormats(t *testing.T) {
+	for _, name := range []string{"kl-f8-anime2.ckpt", "Half-Life-Alyx-Style.safetensors"} {
+		if got := PrecisionOf(name); got.Known() {
+			t.Errorf("PrecisionOf(%q) = %+v, want no precision", name, got)
+		}
+	}
+	if got := stemSansPrecision("Half-Life-Alyx-Style.safetensors"); got != "Half-Life-Alyx-Style" {
+		t.Errorf("stem = %q", got)
+	}
+}

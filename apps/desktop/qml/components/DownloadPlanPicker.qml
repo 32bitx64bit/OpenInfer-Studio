@@ -150,14 +150,23 @@ Item {
         return same[0]
     }
 
-    // Presets move every component's precision; what is ticked stays.
+    // Presets move every component's precision, never to a different build:
+    // when a component holds several models (Wan 14B and 1.3B), the preset
+    // stays with the one picked. What is ticked stays too.
     function applyPreset(kind) {
         var cs = root.comps()
         var sel = root.copySelection()
         for (var i = 0; i < cs.length; i++) {
             var c = cs[i]
             if (!sel[c.id]) continue
-            var pick = kind === "balanced" ? root.optById(c, c.default) : root.extreme(c, kind)
+            var pool = root.sameVariant(c, root.current(c))
+            var pick = null
+            if (kind === "balanced") {
+                var rec = root.optById(c, c.default)
+                pick = root.nearest(pool, rec)
+            } else {
+                pick = root.extreme(c, kind, pool)
+            }
             if (pick) sel[c.id].opt = pick.id
             sel[c.id].touched = false
         }
@@ -165,11 +174,34 @@ Item {
         root.followAll()
     }
 
-    // "smallest" / "best" option of a component, skipping options that are
+    // Options of the same model as `cur` (all of them when there is only one).
+    function sameVariant(c, cur) {
+        var o = root.optsOf(c)
+        if (!cur || !cur.variant) return o
+        var same = o.filter(function(x) { return x.variant === cur.variant })
+        return same.length > 0 ? same : o
+    }
+
+    // The option in pool nearest `target` in bits (the target itself when it
+    // is in the pool); ties go to the smaller file.
+    function nearest(pool, target) {
+        if (!target) return pool.length > 0 ? pool[0] : null
+        var best = null
+        for (var i = 0; i < pool.length; i++) {
+            var x = pool[i]
+            if (!best) { best = x; continue }
+            var dx = Math.abs(x.bits - target.bits), db = Math.abs(best.bits - target.bits)
+            if (x.id === target.id || dx < db || (dx === db && best.id !== target.id && x.total_bytes < best.total_bytes))
+                best = x
+        }
+        return best
+    }
+
+    // "smallest" / "best" option of a pool, skipping options that are
     // unlikely to load while a sound one exists and never choosing 32-bit
     // floats when a 16-bit-or-smaller option exists.
-    function extreme(c, kind) {
-        var o = root.optsOf(c)
+    function extreme(c, kind, opts) {
+        var o = opts || root.optsOf(c)
         var pool = o.filter(function(x) { return !x.warn })
         if (pool.length === 0) pool = o
         if (kind === "best") {

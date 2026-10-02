@@ -71,17 +71,41 @@ Item {
         })
     }
 
+    // "owner/name" from a pasted Hugging Face URL or a bare owner/name id,
+    // else "".
+    function repoRef(text) {
+        var t = String(text || "").trim()
+        if (t === "" || /\s/.test(t)) return ""
+        var m = t.match(/^(?:https?:\/\/)?(?:www\.)?(?:huggingface\.co|hf\.co)\/([A-Za-z0-9][\w.-]*)\/([A-Za-z0-9][\w.-]*)(?:[\/?#].*)?$/i)
+        if (m) {
+            var pages = ["models", "datasets", "spaces", "docs", "blog", "papers", "collections",
+                         "organizations", "settings", "api", "join", "login", "pricing", "tasks"]
+            return pages.indexOf(m[1].toLowerCase()) >= 0 ? "" : m[1] + "/" + m[2]
+        }
+        m = t.match(/^([A-Za-z0-9][\w.-]*)\/([A-Za-z0-9][\w.-]*)$/)
+        return m ? m[1] + "/" + m[2] : ""
+    }
+
     function search() {
         page.searching = true
         page.searchError = ""
-        var q = encodeURIComponent(searchField.text)
+        var text = searchField.text
+        var ref = page.repoRef(text)
+        // A pasted URL is a request to open that repository, tagged or not.
+        var pasted = ref !== "" && /^(https?:\/\/|www\.|huggingface\.co|hf\.co)/i.test(text.trim())
+        if (pasted) page.openRepo(ref)
+        var q = encodeURIComponent(text)
         var sort = sortCombo.currentValue
         // One corpus: GGUF chat models and image/video generators together.
         api.get("/api/v1/hf/search?q=" + q + "&sort=" + sort + "&limit=40&kind=all", function(st, data) {
             page.searching = false
             if (st === 200) {
                 page.results = (data && data.results) || []
-            } else {
+                // A bare owner/name that matches a repository exactly opens it.
+                if (ref !== "" && !pasted && page.results.length > 0
+                        && String(page.results[0].id).toLowerCase() === ref.toLowerCase())
+                    page.openRepo(page.results[0].id)
+            } else if (!pasted) {
                 page.searchError = (data && (data.detail || data.error)) || ("HTTP " + st)
             }
         })
@@ -150,8 +174,9 @@ Item {
             spacing: 8
             SearchField {
                 id: searchField
+                objectName: "searchField"
                 Layout.fillWidth: true
-                placeholderText: "Search Hugging Face for models…"
+                placeholderText: "Search Hugging Face, or paste a model URL or owner/name…"
                 searchLabel: "Search Hugging Face models"
                 onAccepted: page.search()
             }

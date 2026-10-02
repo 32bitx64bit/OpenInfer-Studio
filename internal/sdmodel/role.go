@@ -70,8 +70,9 @@ func roleFromName(base, dir string) string {
 		strings.Contains(base, "control_net") || strings.Contains(dir, "controlnet") ||
 		strings.Contains(dir, "control_net") || strings.Contains(dir, "control-net"):
 		return RoleControlNet
-	case strings.Contains(base, "vae") || strings.Contains(dir, "/vae") ||
+	case hasVAEWord(base) || strings.Contains(dir, "/vae") ||
 		strings.HasSuffix(dir, "vae") || strings.Contains(dir, "vae/") ||
+		dirIsVAE(dir) ||
 		strings.TrimSuffix(base, filepath.Ext(base)) == "ae":
 		// "ae" is how FLUX-family releases name their autoencoder
 		// (ae.safetensors); its tensors carry no vae./first_stage_model.
@@ -86,6 +87,48 @@ func roleFromName(base, dir string) string {
 		return RoleLLM
 	}
 	return ""
+}
+
+// hasVAEWord reports whether a file name names a VAE: a "vae" word (ae.vae,
+// sdxl_vae, vae-ft-mse) or a name ending in "vae" after a letter (ClearVAE).
+// A digit in front ("sd_xl_base_1.0_0.9vae") means a full checkpoint built
+// with that VAE, not the VAE itself.
+func hasVAEWord(base string) bool {
+	for _, w := range strings.FieldsFunc(base, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9')
+	}) {
+		if w == "vae" {
+			return true
+		}
+		if strings.HasSuffix(w, "vae") {
+			if c := w[len(w)-4]; c >= 'a' && c <= 'z' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// dirIsVAE reports whether any folder of a path is a VAE folder: vae, or a
+// numbered / named sibling such as vae_1_0 or vae_decoder.
+func dirIsVAE(dir string) bool {
+	for _, seg := range strings.Split(dir, "/") {
+		if seg == "vae" || strings.HasPrefix(seg, "vae_") || strings.HasPrefix(seg, "vae-") {
+			return true
+		}
+	}
+	return false
+}
+
+// nameWords splits a lower-case file name into alphanumeric words.
+func nameWords(base string) map[string]bool {
+	out := map[string]bool{}
+	for _, w := range strings.FieldsFunc(base, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
+	}) {
+		out[w] = true
+	}
+	return out
 }
 
 // roleFromTensors classifies a component from tensor-name evidence alone,
@@ -221,8 +264,9 @@ func Preference(path string) int {
 	if ext == ".gguf" {
 		return 100
 	}
-	if strings.Contains(base, "convrot") || strings.Contains(base, "int8") ||
-		strings.Contains(base, "_scaled") {
+	words := nameWords(base)
+	if words["scaled"] || words["convrot"] || words["int8"] || words["w8a8"] ||
+		words["nf4"] || words["fp4"] || words["nvfp4"] || words["int4"] || words["svdq"] {
 		return 5
 	}
 	// "fp16" does not contain "f16", and ComfyUI repos spell it fp16.
@@ -233,7 +277,7 @@ func Preference(path string) int {
 	}
 	// Plain (unscaled) fp8 casts carry no side tensors, so they rank under
 	// float files but above packs that need scales.
-	if strings.Contains(base, "fp8") || strings.Contains(base, "e4m3") || strings.Contains(base, "e5m2") {
+	if words["fp8"] || words["float8"] || words["e4m3"] || words["e4m3fn"] || words["e5m2"] {
 		return 40
 	}
 	return 50

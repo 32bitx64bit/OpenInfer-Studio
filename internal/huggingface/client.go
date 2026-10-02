@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -177,29 +178,101 @@ const (
 type searchSpec struct {
 	filter      string // library/format tag ("gguf", "diffusers")
 	pipelineTag string // task tag; the Hub accepts only one per request
+	// untagged runs the query with no tag filter and keeps only rows that
+	// look loadable (GGUF files or an image/video generator). Many ComfyUI
+	// repackages carry no gguf, diffusers or task tag, so no tagged source
+	// can find them by name.
+	untagged bool
 }
 
 // searchSpecs returns the Hub queries a kind expands to. The unified search
 // asks for every source that can hold a loadable model: GGUF repositories
 // (chat models and GGUF-quantized diffusion transformers), diffusers
-// bundles, and repositories tagged with an image/video generation task but
-// shipping single-file checkpoints (ComfyUI repackages carry no diffusers
-// tag).
-func searchSpecs(kind string) []searchSpec {
+// bundles, single-file / ComfyUI safetensors repositories, repositories
+// tagged with an image/video generation task, and, when there is a query to
+// match names against, untagged repositories.
+func searchSpecs(kind, query string) []searchSpec {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case SearchKindDiffusion:
-		return []searchSpec{{filter: "diffusers"}}
+		return []searchSpec{{filter: "diffusers"}, {filter: "diffusion-single-file"}, {filter: "comfyui"}}
 	case SearchKindAll:
-		return []searchSpec{
+		specs := []searchSpec{
 			{filter: "gguf"},
 			{filter: "diffusers"},
+			// Single-file checkpoints and ComfyUI repackages (safetensors) are
+			// tagged with these libraries, not with diffusers.
+			{filter: "diffusion-single-file"},
+			{filter: "comfyui"},
 			{pipelineTag: "text-to-image"},
 			{pipelineTag: "text-to-video"},
 			{pipelineTag: "image-to-video"},
 		}
+		if strings.TrimSpace(query) != "" {
+			specs = append(specs, searchSpec{untagged: true})
+		}
+		return specs
 	default:
 		return []searchSpec{{filter: "gguf"}}
 	}
+}
+
+var repoRefRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// huggingFacePages are first path segments of huggingface.co that are not an
+// owner.
+var huggingFacePages = map[string]bool{
+	"models": true, "datasets": true, "spaces": true, "docs": true, "blog": true,
+	"papers": true, "collections": true, "organizations": true, "settings": true,
+	"api": true, "join": true, "login": true, "pricing": true, "tasks": true,
+}
+
+// RepoRef returns "owner/name" when q is a pasted Hugging Face repository URL
+// (https://huggingface.co/owner/name, …/tree/main, hf.co/owner/name, …) or a
+// bare owner/name id, else "".
+func RepoRef(q string) string {
+	q = strings.TrimSpace(q)
+	if q == "" || strings.ContainsAny(q, " \t\n") {
+		return ""
+	}
+	scheme := false
+	for _, prefix := range []string{"https://", "http://"} {
+		if rest, ok := strings.CutPrefix(strings.ToLower(q), prefix); ok {
+			q = q[len(q)-len(rest):]
+			scheme = true
+			break
+		}
+	}
+	host := false
+	for _, h := range []string{"www.huggingface.co/", "huggingface.co/", "hf.co/"} {
+		if len(q) > len(h) && strings.EqualFold(q[:len(h)], h) {
+			q = q[len(h):]
+			host = true
+			break
+		}
+	}
+	if scheme && !host {
+		return "" // a URL, but not a Hugging Face one
+	}
+	if i := strings.IndexAny(q, "?#"); i >= 0 {
+		q = q[:i]
+	}
+	if !host {
+		// A bare id is exactly owner/name: no leading or trailing slash.
+		if repoRefRe.MatchString(q) {
+			return q
+		}
+		return ""
+	}
+	q = strings.Trim(q, "/")
+	parts := strings.Split(q, "/")
+	if len(parts) < 2 || huggingFacePages[strings.ToLower(parts[0])] {
+		return ""
+	}
+	ref := parts[0] + "/" + parts[1]
+	if !repoRefRe.MatchString(ref) {
+		return ""
+	}
+	return ref
 }
 
 // Search queries model repositories (GGUF text models; see SearchKind).
@@ -214,13 +287,19 @@ func (c *Client) SearchKind(ctx context.Context, query, sort string, limit int, 
 	if limit <= 0 || limit > 100 {
 		limit = 30
 	}
-	specs := searchSpecs(kind)
-	if len(specs) == 1 {
-		rows, err := c.searchOnce(ctx, query, sort, limit, kind, specs[0])
-		if err != nil {
-			return nil, err
+
+	// A pasted URL or owner/name id means one specific repository: look it
+	// up directly (tags or no tags) and search for its id besides.
+	var ref string
+	if strings.EqualFold(strings.TrimSpace(kind), SearchKindAll) {
+		if ref = RepoRef(query); ref != "" {
+			query = ref
 		}
-		return rows, nil
+	}
+
+	specs := searchSpecs(kind, query)
+	if len(specs) == 1 {
+		return c.searchOnce(ctx, query, sort, limit, kind, specs[0])
 	}
 
 	type outcome struct {
@@ -228,6 +307,7 @@ func (c *Client) SearchKind(ctx context.Context, query, sort string, limit int, 
 		err  error
 	}
 	outs := make([]outcome, len(specs))
+	var exact *SearchResult
 	var wg sync.WaitGroup
 	for i, spec := range specs {
 		wg.Add(1)
@@ -235,6 +315,17 @@ func (c *Client) SearchKind(ctx context.Context, query, sort string, limit int, 
 			defer wg.Done()
 			outs[i].rows, outs[i].err = c.searchOnce(ctx, query, sort, limit, kind, spec)
 		}(i, spec)
+	}
+	if ref != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var m hfModel
+			if err := c.do(ctx, "/api/models/"+ref, url.Values{"full": {"true"}}, &m); err == nil && m.ID != "" {
+				r, _ := resultOf(m)
+				exact = &r
+			}
+		}()
 	}
 	wg.Wait()
 
@@ -251,10 +342,24 @@ func (c *Client) SearchKind(ctx context.Context, query, sort string, limit int, 
 		}
 		lists = append(lists, o.rows)
 	}
-	if len(lists) == 0 {
+	if len(lists) == 0 && exact == nil {
 		return nil, firstErr
 	}
-	return mergeSearchResults(lists, sort, limit), nil
+	merged := mergeSearchResults(lists, sort, limit)
+	if exact != nil {
+		// The repository that was asked for by name goes first.
+		out := []SearchResult{*exact}
+		for _, r := range merged {
+			if !strings.EqualFold(r.ID, exact.ID) {
+				out = append(out, r)
+			}
+		}
+		if len(out) > limit {
+			out = out[:limit]
+		}
+		merged = out
+	}
+	return merged, nil
 }
 
 // searchOnce runs one Hub query and converts its rows.
@@ -289,26 +394,54 @@ func (c *Client) searchOnce(ctx context.Context, query, sort string, limit int, 
 	}
 	out := make([]SearchResult, 0, len(rows))
 	for _, m := range rows {
-		author := m.Author
-		if author == "" {
-			author, _, _ = strings.Cut(m.ID, "/")
+		r, files := resultOf(m)
+		if spec.untagged && !looksLoadable(m.Tags, files, r.Diffusion) {
+			continue
 		}
-		files := make([]string, 0, len(m.Siblings))
-		for _, s := range m.Siblings {
-			files = append(files, s.RFileName)
-		}
-		out = append(out, SearchResult{
-			ID: m.ID, Author: author, Downloads: m.Downloads, Likes: m.Likes,
-			Trending: m.TrendingScore, UpdatedAt: m.LastModified, Tags: m.Tags,
-			Private: m.Private, Gated: m.Gated, PipelineTag: m.PipelineTag,
-			Modalities: DetectModalities(m.ID, m.PipelineTag, m.Tags, files),
-			MTP:        DetectMTP(m.ID, m.Tags, files),
-			Draft:      DetectDraftSidecar(m.ID, m.Tags, files),
-			Embedding:  DetectEmbedding(m.ID, m.PipelineTag, m.Tags, files),
-			Diffusion:  DetectDiffusion(m.ID, m.PipelineTag, m.Tags, files),
-		})
+		out = append(out, r)
 	}
 	return out, nil
+}
+
+// resultOf converts a Hub model row into a Discover row, with its file names.
+func resultOf(m hfModel) (SearchResult, []string) {
+	author := m.Author
+	if author == "" {
+		author, _, _ = strings.Cut(m.ID, "/")
+	}
+	files := make([]string, 0, len(m.Siblings))
+	for _, s := range m.Siblings {
+		files = append(files, s.RFileName)
+	}
+	return SearchResult{
+		ID: m.ID, Author: author, Downloads: m.Downloads, Likes: m.Likes,
+		Trending: m.TrendingScore, UpdatedAt: m.LastModified, Tags: m.Tags,
+		Private: m.Private, Gated: m.Gated, PipelineTag: m.PipelineTag,
+		Modalities: DetectModalities(m.ID, m.PipelineTag, m.Tags, files),
+		MTP:        DetectMTP(m.ID, m.Tags, files),
+		Draft:      DetectDraftSidecar(m.ID, m.Tags, files),
+		Embedding:  DetectEmbedding(m.ID, m.PipelineTag, m.Tags, files),
+		Diffusion:  DetectDiffusion(m.ID, m.PipelineTag, m.Tags, files),
+	}, files
+}
+
+// looksLoadable reports whether an untagged search hit is something this app
+// can download for use: a GGUF repository or an image/video generator.
+func looksLoadable(tags, files []string, diffusion string) bool {
+	if diffusion != DiffusionNone {
+		return true
+	}
+	for _, t := range tags {
+		if strings.EqualFold(t, "gguf") {
+			return true
+		}
+	}
+	for _, f := range files {
+		if strings.HasSuffix(strings.ToLower(f), ".gguf") {
+			return true
+		}
+	}
+	return false
 }
 
 // mergeSearchResults folds per-source result lists into one list of at most

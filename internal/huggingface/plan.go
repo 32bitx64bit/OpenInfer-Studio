@@ -2,6 +2,7 @@ package huggingface
 
 import (
 	"math"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -190,6 +191,46 @@ func optionIndex(opts []PlanOption, id string) int {
 		}
 	}
 	return -1
+}
+
+// fileCensus says what a repository holds when none of it is usable, so an
+// empty picker explains itself ("14 files: .json x9, .md x1") instead of
+// leaving the user guessing.
+func fileCensus(files []FileEntry) string {
+	if len(files) == 0 {
+		return "Hugging Face returned no file list for this repository. It may be gated or private: accept its terms on Hugging Face and add your access token in Settings."
+	}
+	counts := map[string]int{}
+	for _, f := range files {
+		ext := strings.ToLower(path.Ext(f.Path))
+		if ext == "" {
+			ext = "(no extension)"
+		}
+		counts[ext]++
+	}
+	type kv struct {
+		ext string
+		n   int
+	}
+	var list []kv
+	for e, n := range counts {
+		list = append(list, kv{e, n})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].n != list[j].n {
+			return list[i].n > list[j].n
+		}
+		return list[i].ext < list[j].ext
+	})
+	parts := make([]string, 0, 6)
+	for i, e := range list {
+		if i == 5 {
+			parts = append(parts, "…")
+			break
+		}
+		parts = append(parts, e.ext+" ×"+strconv.Itoa(e.n))
+	}
+	return "The repository holds " + strconv.Itoa(len(files)) + " files (" + strings.Join(parts, ", ") + ")."
 }
 
 func hasModality(mods []string, m string) bool {

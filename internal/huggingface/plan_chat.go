@@ -1,6 +1,7 @@
 package huggingface
 
 import (
+	"path"
 	"strconv"
 	"strings"
 
@@ -44,6 +45,7 @@ func buildChatPlan(files []FileEntry, mods []string) Plan {
 		plan.Components = append(plan.Components, c)
 		model = &plan.Components[len(plan.Components)-1]
 	}
+	first := len(plan.Components)
 	if len(projectors) > 0 {
 		plan.Components = append(plan.Components, chatProjectorComponent(projectors, mods))
 	}
@@ -53,9 +55,20 @@ func buildChatPlan(files []FileEntry, mods []string) Plan {
 			plan.Components[len(plan.Components)-1].FollowPrecisionOf = ""
 		}
 	}
+	// One repository holding several different models: a projector or drafter
+	// belongs to one of them, and the library pairs a folder's projector with
+	// every model in it. Nothing here can tell which file goes with which, so
+	// leave them off until the user picks the ones named for their model.
+	if names := distinctModels(trunk); len(names) > 1 && len(plan.Components) > first {
+		for i := first; i < len(plan.Components); i++ {
+			plan.Components[i].Selected = false
+		}
+		plan.Notes = append(plan.Notes, "This repository holds several models ("+strings.Join(names, ", ")+
+			"). Projector and drafter files are not tied to one of them here: tick the ones named for the model you pick.")
+	}
 	if len(plan.Components) == 0 {
 		plan.Notes = append(plan.Notes,
-			"No GGUF files in this repository. For a safetensors checkpoint, convert it to GGUF from the Quantize page.")
+			"No GGUF files in this repository. For a safetensors language model, convert it to GGUF from the Quantize page. "+fileCensus(files))
 	}
 	return plan
 }
@@ -65,11 +78,18 @@ func chatModelComponent(trunk []FileGroup) PlanComponent {
 		ID: "model", Role: "model", Label: "Model", Selected: true,
 		Hint: "Pick a quantization. Smaller files use less memory and lose some quality.",
 	}
+	variants := map[string]bool{}
+	for _, g := range trunk {
+		variants[modelVariant(g.Files[0].Path)] = true
+	}
 	for _, g := range trunk {
 		p := ggufPrecision(g.Quant)
 		opt := PlanOption{
 			ID: g.ID, Label: g.Label, Precision: p.ID, Bits: p.effectiveBits(), Class: p.Class,
 			TotalBytes: g.TotalBytes, EstMemBytes: g.EstMemBytes,
+		}
+		if len(variants) > 1 {
+			opt.Variant = modelVariant(g.Files[0].Path)
 		}
 		for _, f := range g.Files {
 			opt.Files = append(opt.Files, PlanFile{Path: f.Path, Size: f.Size, Part: f.Part})
@@ -143,7 +163,7 @@ func chatProjectorComponent(projectors []GroupedFile, mods []string) PlanCompone
 
 	stems := map[string]bool{}
 	for _, p := range projectors {
-		stems[stemSansPrecision(p.Path)] = true
+		stems[modelVariant(p.Path)] = true
 	}
 	for _, p := range projectors {
 		pr := PrecisionOf(p.Path)
@@ -156,7 +176,7 @@ func chatProjectorComponent(projectors []GroupedFile, mods []string) PlanCompone
 			opt.Label = "Default"
 		}
 		if len(stems) > 1 {
-			opt.Variant = stemSansPrecision(p.Path)
+			opt.Variant = modelVariant(p.Path)
 		}
 		c.Options = append(c.Options, opt)
 	}
@@ -173,6 +193,10 @@ func chatDrafterComponent(drafts []GroupedFile, model *PlanComponent) PlanCompon
 		Hint:              "Optional. Speeds up generation with identical output, at the cost of extra VRAM.",
 		FollowPrecisionOf: "model",
 	}
+	draftVariants := map[string]bool{}
+	for _, d := range drafts {
+		draftVariants[modelVariant(d.Path)] = true
+	}
 	for _, d := range drafts {
 		pr := ggufPrecision(d.Quant)
 		mtp := ""
@@ -180,11 +204,15 @@ func chatDrafterComponent(drafts []GroupedFile, model *PlanComponent) PlanCompon
 			mtp = "mtp-draft"
 		}
 		label := quantLabel(d.Quant, mtp, d.SpecType, d.Path)
-		c.Options = append(c.Options, PlanOption{
+		opt := PlanOption{
 			ID: "drafter-" + safeGroupID(d.Path), Label: label, Precision: pr.ID,
 			Bits: pr.effectiveBits(), Class: pr.Class, Kind: d.SpecType, TotalBytes: d.Size,
 			Files: []PlanFile{{Path: d.Path, Size: d.Size}},
-		})
+		}
+		if len(draftVariants) > 1 {
+			opt.Variant = modelVariant(d.Path)
+		}
+		c.Options = append(c.Options, opt)
 	}
 	sortOptions(c.Options)
 	uniqueOptionIDs(c.Options)
@@ -209,4 +237,42 @@ func chatDrafterComponent(drafts []GroupedFile, model *PlanComponent) PlanCompon
 	}
 	setDefault(&c, idx)
 	return c
+}
+
+// modelVariant names which model a GGUF belongs to when a repository holds
+// several: its file name without precision, with the folder in front when the
+// folder names the model (4B/, 12B/) rather than a quantization.
+func modelVariant(p string) string {
+	stem := stemSansPrecision(p)
+	if dir := path.Dir(p); dir != "." {
+		last := path.Base(dir)
+		bare := strings.TrimPrefix(strings.TrimPrefix(strings.ToUpper(last), "UD-"), "OID-")
+		if _, isQuant := quantRanks[bare]; !isQuant {
+			stem = last + "/" + stem
+		}
+	}
+	return stem
+}
+
+// buildTags are name tokens that mark a build of one model (MTP, AMD tuning)
+// rather than a different model.
+var buildTags = map[string]bool{
+	"mtp": true, "amd": true, "low": true, "high": true, "ultra": true,
+	"fast": true, "sparse": true, "dense": true,
+}
+
+// distinctModels lists the different models among trunk groups, ignoring
+// build tags and precisions. One name means a single model.
+func distinctModels(trunk []FileGroup) []string {
+	seen := map[string]bool{}
+	var names []string
+	for _, g := range trunk {
+		name := dropTokens(modelVariant(g.Files[0].Path), func(l string) bool { return buildTags[l] })
+		key := strings.ToLower(name)
+		if !seen[key] {
+			seen[key] = true
+			names = append(names, name)
+		}
+	}
+	return names
 }

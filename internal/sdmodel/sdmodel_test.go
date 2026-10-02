@@ -285,3 +285,35 @@ func TestPreferenceRanksPlainFP8BetweenFloatsAndPacks(t *testing.T) {
 		t.Error("int8 packs must rank under plain fp8")
 	}
 }
+
+func TestPreferenceTreatsScaledAndFourBitPacksAsLast(t *testing.T) {
+	plain := Preference("model-fp8.safetensors")
+	for _, packed := range []string{
+		"model-fp8-scaled.safetensors", "scaled_fp8_model.safetensors", "model_fp8_e4m3fn_scaled.safetensors",
+		"flux-nf4.safetensors", "flux-fp4.safetensors", "svdq-int4-flux.safetensors", "flux-int8.safetensors",
+	} {
+		if Preference(packed) >= plain {
+			t.Errorf("Preference(%q)=%d must rank under plain fp8 (%d)", packed, Preference(packed), plain)
+		}
+	}
+	// "unscaled" and "scalediffusion" are not the word "scaled".
+	if Preference("unscaled-model.safetensors") != 50 {
+		t.Errorf("unscaled-model scored %d", Preference("unscaled-model.safetensors"))
+	}
+}
+
+func TestVAENamesAreWordsNotSubstrings(t *testing.T) {
+	cases := map[string]string{
+		"sd_xl_base_1.0_0.9vae.safetensors":           "", // a checkpoint built with the 0.9 VAE
+		"ClearVAE_V2.3.safetensors":                   RoleVAE,
+		"vae-ft-mse-840000-ema-pruned.safetensors":    RoleVAE,
+		"sdxl_vae.safetensors":                        RoleVAE,
+		"flux.vae.safetensors":                        RoleVAE,
+		"vae_1_0/diffusion_pytorch_model.safetensors": RoleVAE,
+	}
+	for path, want := range cases {
+		if got := ComponentRole(path, nil); got != want {
+			t.Errorf("ComponentRole(%q) = %q, want %q", path, got, want)
+		}
+	}
+}

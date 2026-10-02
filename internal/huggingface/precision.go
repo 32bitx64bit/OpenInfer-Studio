@@ -93,9 +93,9 @@ func ggufPrecision(quant string) Precision {
 // "flux1" never reads as a float format.
 var precisionTokens = map[string]bool{
 	"fp32": true, "f32": true, "float32": true,
-	"fp16": true, "f16": true, "float16": true, "half": true,
+	"fp16": true, "f16": true, "float16": true,
 	"bf16": true, "bfloat16": true,
-	"fp8": true, "f8": true, "float8": true, "e4m3": true, "e4m3fn": true, "e4m3fnuz": true, "e5m2": true,
+	"fp8": true, "float8": true, "e4m3": true, "e4m3fn": true, "e4m3fnuz": true, "e5m2": true,
 	"scaled": true, "int8": true, "i8": true, "w8a8": true, "convrot": true,
 	"nf4": true, "fp4": true, "nvfp4": true, "int4": true, "svdq": true,
 	// GGUF dynamic-quant prefixes that stay behind once the quant is removed.
@@ -151,7 +151,7 @@ func PrecisionOf(path string) Precision {
 		// There is no plain int8 weight layout in safetensors: these files
 		// carry scales (and sometimes a rotation) that loaders must apply.
 		return Precision{ID: "int8", Label: "INT8", Bits: 8, Class: ClassInt8, Packed: true}
-	case has("fp8", "f8", "float8", "e4m3", "e4m3fn", "e4m3fnuz", "e5m2"):
+	case has("fp8", "float8", "e4m3", "e4m3fn", "e4m3fnuz", "e5m2"):
 		detail := ""
 		switch {
 		case has("e5m2"):
@@ -175,7 +175,7 @@ func PrecisionOf(path string) Precision {
 		return p
 	case has("bf16", "bfloat16"):
 		return Precision{ID: "bf16", Label: "BF16", Bits: 16, Class: ClassFull}
-	case has("fp16", "f16", "float16", "half"):
+	case has("fp16", "f16", "float16"):
 		return Precision{ID: "fp16", Label: "FP16", Bits: 16, Class: ClassFull}
 	case has("fp32", "f32", "float32"):
 		return Precision{ID: "fp32", Label: "FP32", Bits: 32, Class: ClassFull}
@@ -198,7 +198,12 @@ func stemSansPrecision(path string) string {
 			stem = quantRe.ReplaceAllString(stem, "")
 		}
 	}
-	// Walk tokens, keeping the separators between the ones that survive.
+	return dropTokens(stem, func(lower string) bool { return precisionTokens[lower] })
+}
+
+// dropTokens removes the alphanumeric tokens drop() accepts (given the token
+// in lower case) from a stem, keeping the separators between the rest.
+func dropTokens(stem string, drop func(lower string) bool) string {
 	locs := nameTokenRe.FindAllStringIndex(stem, -1)
 	var b strings.Builder
 	prevEnd := 0
@@ -206,7 +211,7 @@ func stemSansPrecision(path string) string {
 		tok := stem[loc[0]:loc[1]]
 		sep := stem[prevEnd:loc[0]] // separator right before this token
 		prevEnd = loc[1]
-		if precisionTokens[strings.ToLower(tok)] {
+		if drop(strings.ToLower(tok)) {
 			continue
 		}
 		if b.Len() > 0 {

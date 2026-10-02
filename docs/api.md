@@ -19,7 +19,7 @@ Errors: `{"error": "message", "detail": "debug detail"}`.
 
 | Method & path | Purpose |
 |---|---|
-| GET `/hf/search?q=&sort=&limit=&kind=` | repo search (sort: downloads, likes, trending, lastModified). `kind=all` (what the app uses) merges GGUF repos with image/video generators (diffusers bundles and repos tagged text-to-image / text-to-video / image-to-video) into one deduplicated list and still answers if some sources fail; `kind=llm` (default) is GGUF only, `kind=diffusion` is diffusers generators only. Results include `modalities`, `mtp`, `embedding` (`embedding`\|`reranker`) and `diffusion` (`image`\|`video`\|`both`) when detectable |
+| GET `/hf/search?q=&sort=&limit=&kind=` | repo search (sort: downloads, likes, trending, lastModified). `kind=all` (what the app uses) merges GGUF repos with image/video generators — diffusers bundles, single-file / ComfyUI safetensors repos (`diffusion-single-file`, `comfyui` tags), repos tagged text-to-image / text-to-video / image-to-video, and, for a non-empty query, untagged repos whose files are GGUF or generator weights — into one deduplicated list, and still answers if some sources fail. A pasted Hugging Face URL or `owner/name` is looked up directly and listed first. `kind=llm` (default) is GGUF only, `kind=diffusion` is generators only. Results include `modalities`, `mtp`, `embedding` (`embedding`\|`reranker`) and `diffusion` (`image`\|`video`\|`both`) when detectable |
 | GET `/hf/repo/{author}/{name}` | repo detail + `plan` (see below) + `modalities` + `mtp` + `embedding` + `diffusion` + model card. The older `groups` / `projectors` / `drafts` / `diffusion_groups` fields are still returned |
 | GET/PUT/DELETE `/hf/token` | token status / store in OS keychain / remove |
 
