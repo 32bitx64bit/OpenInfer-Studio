@@ -149,6 +149,8 @@ Item {
             "label": label,
             "repo": name,
             "group": req.group,
+            "plan": req.plan,
+            "diffusion": page.detailDiffusion,
             "files": req.files
         }, function(st, data) {
             if (st !== 201)

@@ -273,12 +273,13 @@ Item {
                 var f = o.files[j]
                 if (seen[f.path]) continue
                 seen[f.path] = true
-                var entry = { "path": f.path, "size": f.size }
+                var entry = { "path": f.path, "size": f.size, "role": cs[i].role }
                 if (f.dest) entry["dest"] = f.dest
                 files.push(entry)
             }
         }
-        return { "group": root.groupId(), "files": files, "summary": root.summary() }
+        return { "group": root.groupId(), "files": files, "summary": root.summary(),
+                 "plan": root.plan ? root.plan.kind : "" }
     }
 
     function optionText(o) {

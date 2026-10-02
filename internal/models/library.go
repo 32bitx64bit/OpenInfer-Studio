@@ -283,21 +283,44 @@ func canvasLengthFor(md *gguf.Metadata, isSDGGUF bool) uint32 {
 	return md.CanvasLength
 }
 
-// isUnambiguousDiffusionName is the filename fallback for weight files
-// whose header cannot be read. Only names that can never be a pipeline
-// component or an LLM shard qualify; component filenames are already
-// rejected by sdmodel.ComponentRole before this runs.
+// diffusionFileHints are file-name fragments that can never be a pipeline
+// component or an LLM shard.
+var diffusionFileHints = []string{
+	"unet", "diffusion_model", "model.diffusion", "checkpoint",
+	"-ckpt", "_ckpt", ".ckpt", "pruned", "emaonly", "ema-only",
+	"sd15", "sd-15", "sd1.", "v1-5", "v1.5", "sdxl", "sd-xl", "sd3",
+	"flux", "qwen-image", "qwen_image", "wan2", "wan-2",
+	"hunyuan", "ltx", "minimax", "playground", "illustrious",
+}
+
+// diffusionRepoHints are fragments of a managed <owner>--<repo> folder that
+// say the repository is a generator. A repo name speaks for every file in
+// it, so a file named just "model.safetensors" still counts.
+var diffusionRepoHints = []string{
+	"comfy-org--", "stable-diffusion", "sdxl", "sd3", "flux", "qwen-image", "qwen_image",
+	"wan2", "wan-2", "hunyuan", "ltx", "minimax", "mochi", "cogvideo", "playground", "illustrious",
+}
+
+// isUnambiguousDiffusionName is the name fallback for weight files whose
+// header cannot be read or whose tensors no signature recognizes. Only names
+// that can never be a pipeline component or an LLM shard qualify (component
+// filenames are rejected by sdmodel.ComponentRole before this runs); the
+// managed repository folder counts too.
 func isUnambiguousDiffusionName(path string) bool {
 	base := strings.ToLower(filepath.Base(path))
-	for _, hint := range []string{
-		"unet", "diffusion_model", "model.diffusion", "checkpoint",
-		"-ckpt", "_ckpt", ".ckpt", "pruned", "emaonly", "ema-only",
-		"sd15", "sd-15", "sd1.", "v1-5", "v1.5", "sdxl", "sd-xl", "sd3",
-		"flux", "qwen-image", "qwen_image", "wan2", "wan-2",
-		"hunyuan", "ltx", "minimax", "playground", "illustrious",
-	} {
+	for _, hint := range diffusionFileHints {
 		if strings.Contains(base, hint) {
 			return true
+		}
+	}
+	for _, seg := range strings.Split(strings.ToLower(filepath.ToSlash(path)), "/") {
+		if !strings.Contains(seg, "--") {
+			continue
+		}
+		for _, hint := range diffusionRepoHints {
+			if strings.Contains(seg, hint) {
+				return true
+			}
 		}
 	}
 	return false
@@ -310,14 +333,44 @@ func isUnambiguousDiffusionName(path string) bool {
 // text encoder, CLIP/T5 tower, upscaler or ControlNet must never appear as
 // a loadable image model, and HF LLM safetensors shards must not either.
 func isStandaloneDiffusionWeight(path string) bool {
+	ok, _ := diffusionWeightVerdict(path)
+	return ok
+}
+
+// diffusionWeightVerdict is isStandaloneDiffusionWeight with the reason, so a
+// weight the library leaves out can say why. In order: what the download
+// recorded, a component by name, diffusion tensors, a component by tensors,
+// and last a name hint for tensors no signature knows (never for an LLM).
+func diffusionWeightVerdict(path string) (bool, string) {
+	if role, ok := sdmodel.DeclaredRole(path); ok {
+		if role == sdmodel.RoleModel {
+			return true, "recorded by the download as the diffusion model"
+		}
+		return false, "recorded by the download as " + role
+	}
 	if role := sdmodel.ComponentRole(path, nil); role != "" {
-		return false
+		return false, "pipeline component by name (" + role + ")"
 	}
 	tensors, err := sdmodel.TensorNames(path)
 	if err != nil || len(tensors) == 0 {
-		return isUnambiguousDiffusionName(path)
+		if isUnambiguousDiffusionName(path) {
+			return true, "name says generator (header unreadable)"
+		}
+		return false, "header unreadable and no generator name hint"
 	}
-	return sdmodel.DiffusionKind(tensors) != ""
+	if sdmodel.DiffusionKind(tensors) != "" {
+		return true, "diffusion tensors"
+	}
+	if role := sdmodel.ComponentRole(path, tensors); role != "" {
+		return false, "pipeline component by tensors (" + role + ")"
+	}
+	if sdmodel.LooksLikeLLM(tensors) {
+		return false, "language-model tensors"
+	}
+	if isUnambiguousDiffusionName(path) {
+		return true, "name says generator (tensors not recognized)"
+	}
+	return false, "no diffusion evidence in tensors or name"
 }
 
 // isDiffusionRepoComponent reports whether a GGUF is a pipeline component
@@ -326,6 +379,9 @@ func isStandaloneDiffusionWeight(path string) bool {
 // checkpoint) rather than a standalone chat LLM. Plain LLM GGUFs in
 // ordinary model directories are never affected.
 func isDiffusionRepoComponent(path string) bool {
+	if role, ok := sdmodel.DeclaredRole(path); ok {
+		return role != sdmodel.RoleModel
+	}
 	lower := strings.ToLower(filepath.ToSlash(path))
 	for _, seg := range []string{"/components/", "/vae/", "/text_encoders/", "/text_encoder/",
 		"/clip_l/", "/clip_g/", "/clip_vision/", "/taesd/", "/controlnet/", "/control_net/", "/lora/"} {
@@ -400,8 +456,14 @@ func (l *Library) Scan() (int, error) {
 			// components (VAE, text encoders, CLIP/T5, LoRA, ControlNet,
 			// upscalers) and HF LLM safetensors shards are skipped.
 			if IsDiffusionWeightPath(e.Name()) {
-				if st, err := e.Info(); err == nil && isStandaloneDiffusionWeight(p) {
-					checkpoints = append(checkpoints, found{p, st.Size()})
+				if st, err := e.Info(); err == nil {
+					if ok, why := diffusionWeightVerdict(p); ok {
+						checkpoints = append(checkpoints, found{p, st.Size()})
+					} else {
+						// The file a user downloaded and cannot find: say
+						// why it is not a library model.
+						l.log.Info("weight file left out of the library", "path", p, "why", why)
+					}
 				}
 			}
 			return nil
@@ -526,6 +588,17 @@ func (l *Library) Scan() (int, error) {
 		// flags cleared. is_diffusion + canvas_length stay reserved for
 		// block-diffusion LMs (DiffusionGemma), which load via the LLM path.
 		isSDGGUF := gguf.IsSDCheckpoint(primary, primary, tensorNames)
+		// A download that recorded this GGUF as the diffusion model settles it
+		// for architectures no tensor signature knows.
+		if role, ok := sdmodel.DeclaredRole(primary); ok && role == sdmodel.RoleModel {
+			isSDGGUF = true
+			if sdKind == "" {
+				sdKind = sdmodel.DeclaredKind(primary)
+				if sdKind == "" {
+					sdKind = diffusionKindHint(primary)
+				}
+			}
+		}
 		meta := map[string]any{
 			"name": md.Name, "tokenizer": md.Tokenizer,
 			"multimodal": multimodal, "has_vision": hasVision, "has_audio": hasAudio,
@@ -609,7 +682,7 @@ func (l *Library) Scan() (int, error) {
 	for _, cp := range checkpoints {
 		id := stableID(cp.path)
 		alias := diffusionAlias(cp.path)
-		kind := diffusionKindHint(cp.path)
+		kind := diffusionKindFor(cp.path)
 		metaJSON, _ := json.Marshal(map[string]any{
 			"name": alias, "modality": "diffusion", "diffusion_kind": kind,
 			"is_diffusion": false, // GGUF block-diffusion LM flag; checkpoints use modality
@@ -698,14 +771,39 @@ func diffusionAlias(path string) string {
 	return base
 }
 
-// diffusionKindHint guesses image vs video from the checkpoint filename.
-// Library rows store this as metadata_json.diffusion_kind; the sd-server
-// capability document is authoritative at generate time.
+// diffusionKindFor says whether a checkpoint file is an image or a video
+// generator: what the download recorded, else its tensors, else its name.
+func diffusionKindFor(path string) string {
+	if k := sdmodel.DeclaredKind(path); k != "" {
+		return k
+	}
+	if tensors, err := sdmodel.TensorNames(path); err == nil && len(tensors) > 0 {
+		if k := sdmodel.DiffusionKind(tensors); k == "image" || k == "video" {
+			return k
+		}
+	}
+	return diffusionKindHint(path)
+}
+
+// videoHints are name fragments of video generators.
+var videoHints = []string{"wan", "ltx", "hunyuanvideo", "hunyuan-video", "minimax", "mochi", "cogvideo", "svd", "animatediff", "vid", "video"}
+
+// diffusionKindHint guesses image vs video from the checkpoint filename and,
+// for a managed download, its <owner>--<repo> folder. Library rows store this
+// as metadata_json.diffusion_kind; the sd-server capability document is
+// authoritative at generate time.
 func diffusionKindHint(path string) string {
-	lower := strings.ToLower(filepath.Base(path))
-	for _, h := range []string{"wan", "ltx", "hunyuanvideo", "hunyuan-video", "minimax", "mochi", "cogvideo", "svd", "animatediff", "vid", "video"} {
-		if strings.Contains(lower, h) {
-			return "video"
+	names := []string{strings.ToLower(filepath.Base(path))}
+	for _, seg := range strings.Split(strings.ToLower(filepath.ToSlash(path)), "/") {
+		if strings.Contains(seg, "--") {
+			names = append(names, seg)
+		}
+	}
+	for _, lower := range names {
+		for _, h := range videoHints {
+			if strings.Contains(lower, h) {
+				return "video"
+			}
 		}
 	}
 	return "image"

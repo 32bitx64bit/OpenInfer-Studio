@@ -1,6 +1,7 @@
 package mediagen
 
 import (
+	"github.com/openinfer/openinfer-studio/internal/sdmodel"
 	"os"
 	"path/filepath"
 	"strings"
@@ -195,5 +196,37 @@ func TestDiscoverCompanionsPrefersBF16OverInt8(t *testing.T) {
 	got := DiscoverCompanions(root, primary)
 	if got[CompanionLLM] != bf16 {
 		t.Fatalf("llm companion = %q, want bf16 %q (int8_convrot breaks sd.cpp)", got[CompanionLLM], bf16)
+	}
+}
+
+// A download that recorded what each file is beats guessing from its name.
+func TestClassifyCompanionTrustsTheDownloadRecord(t *testing.T) {
+	dir := t.TempDir()
+	for _, f := range []string{"weights_a.safetensors", "weights_b.safetensors", "mystery_model.safetensors", "plain.safetensors"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sdmodel.WriteManifest(dir, sdmodel.Manifest{Version: 1, Files: map[string]string{
+		"weights_a.safetensors":     sdmodel.RoleVAE,
+		"weights_b.safetensors":     sdmodel.RoleT5XXL,
+		"mystery_model.safetensors": sdmodel.RoleModel,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	for file, want := range map[string]string{
+		"weights_a.safetensors":     CompanionVAE,
+		"weights_b.safetensors":     CompanionT5XXL,
+		"mystery_model.safetensors": "", // the model itself is never a companion
+		"plain.safetensors":         "", // not recorded, no hint: unchanged behaviour
+	} {
+		if got := classifyCompanion(filepath.Join(dir, file)); got != want {
+			t.Errorf("classifyCompanion(%s) = %q, want %q", file, got, want)
+		}
+	}
+	// The recorded companions are what discovery wires up.
+	found := DiscoverCompanions(dir, filepath.Join(dir, "mystery_model.safetensors"))
+	if found[CompanionVAE] == "" || found[CompanionT5XXL] == "" {
+		t.Errorf("discovery ignored the record: %v", found)
 	}
 }

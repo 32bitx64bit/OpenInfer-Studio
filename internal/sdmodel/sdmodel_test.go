@@ -317,3 +317,86 @@ func TestVAENamesAreWordsNotSubstrings(t *testing.T) {
 		}
 	}
 }
+
+func TestManifestRoundTripMergeAndNestedLookup(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteManifest(dir, Manifest{Version: 1, Repo: "Comfy-Org/MiniMax-H3", DiffusionKind: "video",
+		Files: map[string]string{"minimax_h3_bf16.safetensors": RoleModel, "text_encoders/enc.safetensors": RoleT5XXL}}); err != nil {
+		t.Fatal(err)
+	}
+	// A later download into the same folder keeps what the first recorded.
+	if err := WriteManifest(dir, Manifest{Version: 1, Files: map[string]string{"vae.safetensors": RoleVAE}}); err != nil {
+		t.Fatal(err)
+	}
+	m := ReadManifest(dir)
+	if m == nil || m.Repo != "Comfy-Org/MiniMax-H3" || len(m.Files) != 3 {
+		t.Fatalf("manifest = %+v", m)
+	}
+	for path, want := range map[string]string{
+		filepath.Join(dir, "minimax_h3_bf16.safetensors"):      RoleModel,
+		filepath.Join(dir, "vae.safetensors"):                  RoleVAE,
+		filepath.Join(dir, "text_encoders", "enc.safetensors"): RoleT5XXL, // found from a subfolder
+	} {
+		if got, ok := DeclaredRole(path); !ok || got != want {
+			t.Errorf("DeclaredRole(%s) = %q,%v want %q", path, got, ok, want)
+		}
+	}
+	if _, ok := DeclaredRole(filepath.Join(dir, "other.safetensors")); ok {
+		t.Error("an unrecorded file has no declared role")
+	}
+	if DeclaredKind(filepath.Join(dir, "vae.safetensors")) != "video" {
+		t.Error("the recorded modality should reach every file of the download")
+	}
+	// A repository that does both leaves the kind to the file name.
+	both := t.TempDir()
+	_ = WriteManifest(both, Manifest{Version: 1, DiffusionKind: "both", Files: map[string]string{"m.safetensors": RoleModel}})
+	if DeclaredKind(filepath.Join(both, "m.safetensors")) != "" {
+		t.Error("kind 'both' must not be reported as image or video")
+	}
+	// No temp files are left behind.
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.Name() != ManifestName && e.Name() != "text_encoders" {
+			t.Errorf("stray file %q", e.Name())
+		}
+	}
+}
+
+func TestManifestIgnoresGarbage(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{"junk": "not json", "wrongver": `{"version":2,"files":{"a":"model"}}`, "nofiles": `{"version":1}`} {
+		d := filepath.Join(dir, name)
+		_ = os.MkdirAll(d, 0o755)
+		_ = os.WriteFile(filepath.Join(d, ManifestName), []byte(body), 0o644)
+		if m := ReadManifest(d); m != nil {
+			t.Errorf("%s: unusable manifest accepted: %+v", name, m)
+		}
+	}
+}
+
+func TestDiffusionKindRecognizesWanAndDiTLayouts(t *testing.T) {
+	wan := []string{"patch_embedding.weight", "text_embedding.0.weight", "time_embedding.0.weight",
+		"time_projection.1.weight", "blocks.0.self_attn.q.weight", "blocks.0.cross_attn.k.weight", "head.head.weight"}
+	if got := DiffusionKind(wan); got != "video" {
+		t.Errorf("Wan layout = %q, want video", got)
+	}
+	dit := []string{"x_embedder.proj.weight", "t_embedder.mlp.0.weight", "blocks.0.adaLN_modulation.1.weight", "final_layer.linear.weight"}
+	if got := DiffusionKind(dit); got != "image" {
+		t.Errorf("DiT layout = %q, want image", got)
+	}
+	var prefixed []string
+	for i := 0; i < 10; i++ {
+		prefixed = append(prefixed, "model.diffusion_model.mystery."+string(rune('a'+i))+".weight")
+	}
+	if got := DiffusionKind(prefixed); got == "" {
+		t.Error("ComfyUI's model.diffusion_model. prefix is diffusion evidence")
+	}
+	// Language models and VAEs are not.
+	llm := []string{"model.embed_tokens.weight", "model.layers.0.self_attn.q_proj.weight", "lm_head.weight"}
+	if DiffusionKind(llm) != "" || !LooksLikeLLM(llm) {
+		t.Error("an LLM must not read as a generator")
+	}
+	if LooksLikeLLM(wan) {
+		t.Error("Wan tensors are not an LLM")
+	}
+}

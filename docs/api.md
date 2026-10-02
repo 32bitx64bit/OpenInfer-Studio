@@ -61,7 +61,7 @@ off by default when single-file weights exist.
 | Method & path | Purpose |
 |---|---|
 | GET `/downloads` | queue with per-file progress |
-| POST `/downloads` | enqueue `{kind,label,repo,group,files:[{path,size,url?,dest?}]}`. Files are saved flat under `models/<owner>--<repo>/<group>/`; files that would share a name (`vae/model.safetensors`, `unet/model.safetensors`) keep their repo folders, and `dest` pins a folder-relative path. Two files that would land on the same path are rejected |
+| POST `/downloads` | enqueue `{kind,label,repo,group,files:[{path,size,url?,dest?}]}`. Files are saved flat under `models/<owner>--<repo>/<group>/`; files that would share a name (`vae/model.safetensors`, `unet/model.safetensors`) keep their repo folders, and `dest` pins a folder-relative path. Two files that would land on the same path are rejected. For `plan:"generator"` each file's `role` (`model`, `vae`, `t5xxl`, …) and the repository's `diffusion` kind are recorded in `.openinfer-download.json` next to the files, so the library lists the model (and wires the VAE / text encoders) even for an architecture whose tensor names it does not know |
 | POST `/downloads/{id}/pause|resume|cancel|retry` | control |
 | POST `/downloads/{id}/reorder` | `{"position":n}` |
 | DELETE `/downloads/{id}` | remove record + partials |

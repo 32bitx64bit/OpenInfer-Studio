@@ -226,7 +226,78 @@ func DiffusionKind(tensorNames []string) string {
 	if unetHits >= 6 {
 		return "image"
 	}
+	if kind := ditKind(stripped); kind != "" {
+		return kind
+	}
+	// ComfyUI writes every diffusion model it saves under this prefix, and
+	// nothing else uses it: enough for a transformer no signature knows yet.
+	prefixed := 0
+	for _, n := range tensorNames {
+		if strings.HasPrefix(n, "model.diffusion_model.") {
+			prefixed++
+		}
+	}
+	if prefixed >= 8 {
+		return "image"
+	}
 	return ""
+}
+
+// ditKind recognizes diffusion transformers that name their tensors
+// blocks.N.* with patch / time / text embedders: Wan-style video models
+// (patch_embedding + time_embedding + cross_attn) and DiT-style image models
+// (x_embedder, t_embedder, adaLN modulation, final_layer).
+func ditKind(names []string) string {
+	var patch, timeEmb, cross, xEmb, tEmb, adaln, final int
+	for _, n := range names {
+		lower := strings.ToLower(n)
+		switch {
+		case strings.HasPrefix(lower, "patch_embedding."):
+			patch++
+		case strings.HasPrefix(lower, "time_embedding.") || strings.HasPrefix(lower, "time_projection."):
+			timeEmb++
+		case strings.HasPrefix(lower, "blocks.") && strings.Contains(lower, ".cross_attn."):
+			cross++
+		case strings.HasPrefix(lower, "x_embedder."):
+			xEmb++
+		case strings.HasPrefix(lower, "t_embedder."):
+			tEmb++
+		case strings.Contains(lower, "adaln_modulation"):
+			adaln++
+		case strings.HasPrefix(lower, "final_layer."):
+			final++
+		}
+	}
+	if patch > 0 && timeEmb > 0 && cross > 0 {
+		return "video"
+	}
+	signals := 0
+	for _, c := range []int{xEmb, tEmb, adaln, final} {
+		if c > 0 {
+			signals++
+		}
+	}
+	if signals >= 3 {
+		return "image"
+	}
+	return ""
+}
+
+// LooksLikeLLM reports whether tensor names are a language model's (decoder
+// layers, token embeddings, an lm_head). Diffusion transformers and their
+// VAEs have none of these; a diffusion pipeline's LLM text encoder does, and
+// is a component, never the model.
+func LooksLikeLLM(tensorNames []string) bool {
+	for _, n := range tensorNames {
+		lower := strings.ToLower(n)
+		if strings.HasPrefix(lower, "model.layers.") || strings.HasPrefix(lower, "lm_head.") ||
+			strings.Contains(lower, "embed_tokens.") || strings.HasPrefix(lower, "transformer.h.") ||
+			strings.HasPrefix(lower, "gpt_neox.layers.") || strings.HasPrefix(lower, "language_model.") ||
+			lower == "token_embd.weight" {
+			return true
+		}
+	}
+	return false
 }
 
 // IsFullCheckpoint reports whether a tensor-name slice looks like an

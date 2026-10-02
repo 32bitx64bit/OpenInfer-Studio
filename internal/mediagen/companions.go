@@ -109,8 +109,18 @@ func SourceRepoFor(modelsDir, primaryPath string) string {
 // and flat download layouts classify the same way. Delegates to
 // sdmodel.ComponentRole so the library scanner and the launcher agree.
 func classifyCompanion(path string) string {
+	// What the download recorded for this file beats guessing from its name:
+	// the model itself is never a companion, and a role the user ticked it as
+	// is its role whatever it is called.
+	role, recorded := sdmodel.DeclaredRole(path)
+	if recorded && role == sdmodel.RoleModel {
+		return ""
+	}
 	tensors, _ := sdmodel.TensorNames(path)
-	switch sdmodel.ComponentRole(path, tensors) {
+	if !recorded || role == sdmodel.RoleComponent {
+		role = sdmodel.ComponentRole(path, tensors)
+	}
+	switch role {
 	case sdmodel.RoleVAE:
 		return CompanionVAE
 	case sdmodel.RoleTAESD:

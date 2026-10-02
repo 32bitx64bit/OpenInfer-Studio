@@ -17,6 +17,7 @@ import (
 	"github.com/openinfer/openinfer-studio/internal/hardware"
 	"github.com/openinfer/openinfer-studio/internal/huggingface"
 	"github.com/openinfer/openinfer-studio/internal/runtimes"
+	"github.com/openinfer/openinfer-studio/internal/sdmodel"
 	"github.com/openinfer/openinfer-studio/internal/version"
 )
 
@@ -208,11 +209,17 @@ func (h *handlers) listDownloads(w http.ResponseWriter, r *http.Request) {
 }
 
 type enqueueRequest struct {
-	Kind  string        `json:"kind"` // model|runtime
-	Label string        `json:"label"`
-	Repo  string        `json:"repo"`
-	Group string        `json:"group"` // group ID for folder naming
-	Files []enqueueFile `json:"files"`
+	Kind  string `json:"kind"` // model|runtime
+	Label string `json:"label"`
+	Repo  string `json:"repo"`
+	Group string `json:"group"` // group ID for folder naming
+	// Plan is the download plan kind the files were picked from ("chat" or
+	// "generator"); Diffusion is the repository's detected modality. For a
+	// generator plan each file's Role is recorded next to the files so the
+	// library knows what they are.
+	Plan      string        `json:"plan,omitempty"`
+	Diffusion string        `json:"diffusion,omitempty"`
+	Files     []enqueueFile `json:"files"`
 }
 
 // enqueueFile is one file of a download request.
@@ -223,6 +230,42 @@ type enqueueFile struct {
 	// Dest is an optional folder-relative destination (vae/model.safetensors);
 	// without it the file is saved flat under its base name.
 	Dest string `json:"dest,omitempty"`
+	// Role is the plan component the file was ticked as (model, vae, t5xxl, …).
+	Role string `json:"role,omitempty"`
+}
+
+// manifestRole maps a plan component role to the role the library records,
+// or "" for one it does not record.
+func manifestRole(role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "model":
+		return sdmodel.RoleModel
+	case "vae":
+		return sdmodel.RoleVAE
+	case "taesd":
+		return sdmodel.RoleTAESD
+	case "t5xxl":
+		return sdmodel.RoleT5XXL
+	case "clip_l":
+		return sdmodel.RoleClipL
+	case "clip_g":
+		return sdmodel.RoleClipG
+	case "llm":
+		return sdmodel.RoleLLM
+	case "clip_vision":
+		return sdmodel.RoleClipVision
+	case "tokenizer":
+		return sdmodel.RoleTokenizer
+	case "controlnet", "control_net":
+		return sdmodel.RoleControlNet
+	case "esrgan":
+		return sdmodel.RoleESRGAN
+	case "lora":
+		return sdmodel.RoleLoRA
+	case "text_encoder":
+		return sdmodel.RoleComponent
+	}
+	return ""
 }
 
 // downloadDests returns where each requested file lands, relative to the
@@ -311,6 +354,26 @@ func (h *handlers) enqueueDownload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 400, "invalid download", err)
 		return
+	}
+	// Record what each generator file is next to the files. The library
+	// scanner cannot always tell from tensor names (a new architecture
+	// matches nothing it knows), and this is what the user ticked.
+	if req.Plan == "generator" {
+		roles := map[string]string{}
+		for i, f := range req.Files {
+			if r := manifestRole(f.Role); r != "" {
+				roles[dests[i]] = r
+			}
+		}
+		if len(roles) > 0 {
+			err := sdmodel.WriteManifest(destDir, sdmodel.Manifest{
+				Version: 1, Repo: req.Repo, DiffusionKind: req.Diffusion, Files: roles,
+			})
+			if err != nil {
+				writeErr(w, 500, "recording what the downloaded files are failed", err)
+				return
+			}
+		}
 	}
 	specs := make([]downloads.FileSpec, 0, len(req.Files))
 	for i, f := range req.Files {
