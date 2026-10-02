@@ -343,6 +343,9 @@ func writeGemma3nSnapshot(t *testing.T, dir string, mutate func(cfg map[string]a
 	if err := writeJSON(dir, "tokenizer_config.json", map[string]any{
 		"bos_token": "<bos>", "eos_token": "<eos>", "pad_token": "<pad>", "unk_token": "<unk>",
 		"add_bos_token": true, "chat_template": "{{ bos_token }}",
+		"added_tokens_decoder": map[string]any{
+			"7": map[string]any{"content": "<start_of_turn>", "special": true},
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -367,8 +370,16 @@ func TestConvertGemma3nMatchesLlamaCppLayout(t *testing.T) {
 	if stats.Architecture != "gemma3n" {
 		t.Fatalf("arch %q", stats.Architecture)
 	}
-	if len(stats.Warnings) == 0 || !strings.Contains(stats.Warnings[0], "language-only") {
+	joined := strings.Join(stats.Warnings, "\n")
+	if !strings.Contains(joined, "language-only") {
 		t.Fatalf("expected the language-only warning, got %v", stats.Warnings)
+	}
+	// This tiny fixture deliberately differs from the real 256 / 64 / 20
+	// values the current llama.cpp gemma3n loader assumes: warn, don't block.
+	for _, want := range []string{"hidden_size_per_layer_input=4", "laurel_rank=2", "2 layers keep their own KV"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing loader-assumption warning %q in %v", want, stats.Warnings)
+		}
 	}
 	g := readTestGGUF(t, dest)
 
@@ -517,8 +528,16 @@ func TestConvertGemma3nMatchesLlamaCppLayout(t *testing.T) {
 	if toks[4] != "▁a" || scores[4] != -1 || types[4] != tokenTypeNormal {
 		t.Errorf("piece 4 = %q %v %d", toks[4], scores[4], types[4])
 	}
-	if types[6] != tokenTypeByte || types[3] != tokenTypeUnknown || types[0] != tokenTypeControl || types[7] != tokenTypeUserDefined {
+	if types[6] != tokenTypeByte || types[3] != tokenTypeUnknown || types[0] != tokenTypeControl {
 		t.Errorf("token types %v", types)
+	}
+	// Like llama.cpp's converter: a user-defined piece is a plain token
+	// unless tokenizer_config.json marks it special (then control).
+	if types[7] != tokenTypeControl {
+		t.Errorf("<start_of_turn> (special in tokenizer_config) type %d, want CONTROL", types[7])
+	}
+	if types[8] != tokenTypeNormal {
+		t.Errorf("<end_of_turn> (user-defined piece, no override) type %d, want NORMAL", types[8])
 	}
 	if toks[10] != "[PAD10]" || types[10] != tokenTypeUnused || scores[10] != spmPadScore {
 		t.Errorf("padding slot = %q %d %v", toks[10], types[10], scores[10])
@@ -1118,5 +1137,289 @@ func TestEvaluateProbeAcceptsGemmaN(t *testing.T) {
 		if !res.Compatible || res.Adapter != want {
 			t.Errorf("%s: compatible=%v adapter=%q reason=%q", want, res.Compatible, res.Adapter, res.Reason)
 		}
+	}
+}
+
+// --- review fixes -----------------------------------------------------------
+
+func TestSnapshotFilterKeepsSentencePieceModel(t *testing.T) {
+	files := []NeededFile{
+		{Path: "config.json"}, {Path: "tokenizer.json"}, {Path: "tokenizer.model"},
+		{Path: "tokenizer_config.json"}, {Path: "model-00001-of-00004.safetensors"},
+		{Path: "README.md"}, {Path: "pytorch_model.bin"},
+	}
+	kept := map[string]bool{}
+	for _, f := range SelectSnapshotFiles(files) {
+		kept[f.Path] = true
+	}
+	for _, want := range []string{"tokenizer.model", "tokenizer.json", "config.json"} {
+		if !kept[want] {
+			t.Errorf("%s dropped from the download list", want)
+		}
+	}
+	if kept["README.md"] || kept["pytorch_model.bin"] {
+		t.Errorf("unrelated files kept: %v", kept)
+	}
+}
+
+// What the From-HF flow actually downloads must be enough to convert.
+func TestConvertGemma3nFromFilteredSnapshot(t *testing.T) {
+	full := t.TempDir()
+	writeGemma3nSnapshot(t, full, nil)
+	ents, err := os.ReadDir(full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var all []NeededFile
+	for _, e := range ents {
+		all = append(all, NeededFile{Path: e.Name()})
+	}
+	// Extra files a real repo has that the filter must drop.
+	all = append(all, NeededFile{Path: "README.md"}, NeededFile{Path: "pytorch_model.bin"})
+	snap := t.TempDir()
+	for _, f := range SelectSnapshotFiles(all) {
+		b, err := os.ReadFile(filepath.Join(full, f.Path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(snap, f.Path), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dest := filepath.Join(snap, "out.gguf")
+	if _, err := ConvertDir(snap, dest, ConvertOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if g := readTestGGUF(t, dest); g.KV["tokenizer.ggml.model"] != "llama" {
+		t.Errorf("tokenizer model %v, want llama", g.KV["tokenizer.ggml.model"])
+	}
+}
+
+func TestConvertGemma3nRequiresTokenizerModel(t *testing.T) {
+	dir := t.TempDir()
+	writeGemma3nSnapshot(t, dir, nil)
+	if err := os.Remove(filepath.Join(dir, "tokenizer.model")); err != nil {
+		t.Fatal(err)
+	}
+	// Even with a tokenizer.json present, falling back would write a BPE
+	// tokenizer with a pre-tokenizer name llama.cpp rejects.
+	if err := writeJSON(dir, "tokenizer.json", map[string]any{
+		"model": map[string]any{"type": "BPE", "vocab": map[string]int{"a": 0}, "merges": []any{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ConvertDir(dir, filepath.Join(dir, "out.gguf"), ConvertOptions{})
+	if err == nil || !strings.Contains(err.Error(), "tokenizer.model") {
+		t.Fatalf("err = %v, want a missing tokenizer.model rejection", err)
+	}
+}
+
+// Gemma 1-3 share the root cause (a "gpt2" tokenizer with a Gemma
+// pre-tokenizer name): with a tokenizer.model they now get the SPM tokenizer.
+func TestConvertGemma3UsesSentencePieceTokenizer(t *testing.T) {
+	dir := t.TempDir()
+	cfg := map[string]any{
+		"architectures": []any{"Gemma3ForCausalLM"}, "model_type": "gemma3_text",
+		"hidden_size": 8, "intermediate_size": 16, "num_hidden_layers": 1,
+		"num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 4,
+		"vocab_size": 10, "max_position_embeddings": 64, "rms_norm_eps": 1e-6,
+		"sliding_window": 8, "layer_types": []any{"full_attention"},
+	}
+	if err := writeJSON(dir, "config.json", cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "tokenizer.model"), tinySPMModel(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(dir, "tokenizer_config.json", map[string]any{"bos_token": "<bos>", "eos_token": "<eos>", "add_bos_token": true}); err != nil {
+		t.Fatal(err)
+	}
+	lp := "model."
+	ts := map[string]stTensor{
+		lp + "embed_tokens.weight": bf16T(1, 10, 8), lp + "norm.weight": bf16T(1, 8),
+		lp + "layers.0.input_layernorm.weight":            bf16T(1, 8),
+		lp + "layers.0.post_attention_layernorm.weight":   bf16T(1, 8),
+		lp + "layers.0.pre_feedforward_layernorm.weight":  bf16T(1, 8),
+		lp + "layers.0.post_feedforward_layernorm.weight": bf16T(1, 8),
+		lp + "layers.0.self_attn.q_proj.weight":           bf16T(1, 8, 8),
+		lp + "layers.0.self_attn.k_proj.weight":           bf16T(1, 4, 8),
+		lp + "layers.0.self_attn.v_proj.weight":           bf16T(1, 4, 8),
+		lp + "layers.0.self_attn.o_proj.weight":           bf16T(1, 8, 8),
+		lp + "layers.0.self_attn.q_norm.weight":           bf16T(1, 4),
+		lp + "layers.0.self_attn.k_norm.weight":           bf16T(1, 4),
+		lp + "layers.0.mlp.gate_proj.weight":              bf16T(1, 16, 8),
+		lp + "layers.0.mlp.up_proj.weight":                bf16T(1, 16, 8),
+		lp + "layers.0.mlp.down_proj.weight":              bf16T(1, 8, 16),
+	}
+	if err := writeSafetensors(filepath.Join(dir, "model.safetensors"), ts); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(dir, "out.gguf")
+	stats, err := ConvertDir(dir, dest, ConvertOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Architecture != "gemma3" {
+		t.Fatalf("arch %s", stats.Architecture)
+	}
+	g := readTestGGUF(t, dest)
+	if g.KV["tokenizer.ggml.model"] != "llama" || g.KV["tokenizer.ggml.pre"] != "default" {
+		t.Errorf("tokenizer model=%v pre=%v, want llama/default", g.KV["tokenizer.ggml.model"], g.KV["tokenizer.ggml.pre"])
+	}
+	if scores, _ := g.KV["tokenizer.ggml.scores"].([]float32); len(scores) != 10 {
+		t.Errorf("scores = %d, want 10", len(scores))
+	}
+	// Gemma 1-3 keep their "+1" norm shift (only 3n/4 dropped it).
+	nw := g.payload(t, "blk.0.attn_norm.weight", 4)
+	if v := math.Float32frombits(binary.LittleEndian.Uint32(nw)); v != 2 {
+		t.Errorf("gemma3 attn_norm[0] = %v, want 2 (1 + stored 1)", v)
+	}
+
+	// Without tokenizer.model the previous tokenizer.json path is kept.
+	if err := os.Remove(filepath.Join(dir, "tokenizer.model")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTinyBPETokenizer(dir, map[string]int{"a": 0, "b": 1, "<bos>": 2, "<eos>": 3},
+		[]any{map[string]any{"id": 2, "content": "<bos>", "special": true}, map[string]any{"id": 3, "content": "<eos>", "special": true}},
+		"<bos>", "<eos>", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConvertDir(dir, filepath.Join(dir, "out2.gguf"), ConvertOptions{}); err != nil {
+		t.Fatalf("tokenizer.json fallback for gemma3 broke: %v", err)
+	}
+}
+
+func TestInferArchGemmaNVariantsWithoutHints(t *testing.T) {
+	base := map[string]any{"hidden_size": float64(8), "num_attention_heads": float64(2), "num_hidden_layers": float64(2)}
+	mk := func(extra map[string]any) map[string]any {
+		out := map[string]any{}
+		for k, v := range base {
+			out[k] = v
+		}
+		for k, v := range extra {
+			out[k] = v
+		}
+		return out
+	}
+	names := []string{"model.layers.0.pre_feedforward_layernorm.weight", "model.layers.0.self_attn.q_norm.weight"}
+	for _, c := range []struct {
+		name string
+		cfg  map[string]any
+		want string
+	}{
+		{"dspark without a per-layer hint", mk(map[string]any{"model_type": "gemma4_dspark", "architectures": []any{"Gemma4DSparkModel"}}), "no loader"},
+		{"unified without a per-layer hint", mk(map[string]any{"model_type": "gemma4_unified", "architectures": []any{"Gemma4UnifiedForConditionalGeneration"}}), "no loader"},
+		{"moe flagged only by enable_moe_block", mk(map[string]any{"model_type": "gemma4", "architectures": []any{"Gemma4ForConditionalGeneration"}, "enable_moe_block": true}), "mixture-of-experts"},
+	} {
+		feat := detectLayout(c.cfg, names)
+		arch, err := inferArch(c.cfg, feat)
+		if err == nil {
+			err = requireConvertible(arch, feat)
+		}
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: arch %q err %v, want %q (must never fall through to gemma3)", c.name, arch, err, c.want)
+		}
+	}
+	// A dense Gemma 4 without per-layer input still resolves to gemma4.
+	dense := mk(map[string]any{"model_type": "gemma4", "architectures": []any{"Gemma4ForCausalLM"}})
+	if arch, err := inferArch(dense, detectLayout(dense, names)); err != nil || arch != "gemma4" {
+		t.Errorf("dense gemma4: arch %q err %v", arch, err)
+	}
+}
+
+func TestValidateGemmaN(t *testing.T) {
+	f3 := familyFor("gemma3n", layout{GemmaN: "gemma3n"})
+	f4 := familyFor("gemma4", layout{GemmaN: "gemma4"})
+	h := hyper{nLayer: 35, nEmbd: 2048}
+	real3n := map[string]any{
+		"hidden_size_per_layer_input": float64(256), "laurel_rank": float64(64), "altup_num_inputs": float64(4),
+		"altup_active_idx": float64(0), "num_kv_shared_layers": float64(15), "sliding_window": float64(512),
+		"intermediate_size": float64(16384),
+	}
+	if warn, err := validateGemmaN(f3, real3n, h); err != nil || len(warn) != 0 {
+		t.Errorf("real E4B-shaped gemma3n config: warnings %v err %v, want none", warn, err)
+	}
+	noWindow := map[string]any{}
+	for k, v := range real3n {
+		noWindow[k] = v
+	}
+	delete(noWindow, "sliding_window")
+	if _, err := validateGemmaN(f3, noWindow, h); err == nil || !strings.Contains(err.Error(), "sliding_window") {
+		t.Errorf("missing sliding_window: err %v", err)
+	}
+	badList := map[string]any{}
+	for k, v := range real3n {
+		badList[k] = v
+	}
+	badList["intermediate_size"] = []any{float64(16384), float64(16384)}
+	if _, err := validateGemmaN(f3, badList, h); err == nil || !strings.Contains(err.Error(), "2 widths for 35 layers") {
+		t.Errorf("short intermediate_size list: err %v", err)
+	}
+	g4 := map[string]any{
+		"sliding_window": float64(512), "global_head_dim": float64(512), "layer_types": []any{"full_attention"},
+		"rope_parameters": map[string]any{"full_attention": map[string]any{"rope_type": "proportional"}},
+	}
+	if warn, err := validateGemmaN(f4, g4, hyper{nLayer: 42, nEmbd: 2560}); err != nil || len(warn) != 0 {
+		t.Errorf("gemma4: warnings %v err %v", warn, err)
+	}
+	g4["rope_parameters"] = map[string]any{"full_attention": map[string]any{"rope_type": "dynamic"}}
+	if _, err := validateGemmaN(f4, g4, hyper{nLayer: 42, nEmbd: 2560}); err == nil || !strings.Contains(err.Error(), "rope type") {
+		t.Errorf("unknown rope type: err %v", err)
+	}
+}
+
+// llama.cpp aborts on a rope scaling type it does not know; Gemma 4's
+// "proportional" rope is carried by rope_freqs.weight instead.
+func TestGemmaRopeScalingOnlyLinearOrYarn(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  map[string]any
+		want string // "" = no scaling keys
+	}{
+		{"nested proportional", map[string]any{"rope_parameters": map[string]any{
+			"full_attention": map[string]any{"rope_type": "proportional", "partial_rotary_factor": 0.25}}}, ""},
+		{"flat proportional", map[string]any{"rope_parameters": map[string]any{
+			"rope_type": "proportional", "partial_rotary_factor": 0.25}}, ""},
+		{"default", map[string]any{"rope_parameters": map[string]any{
+			"full_attention": map[string]any{"rope_type": "default"}}}, ""},
+		{"linear", map[string]any{"rope_parameters": map[string]any{
+			"full_attention": map[string]any{"rope_type": "linear", "factor": 8.0}}}, "linear"},
+	}
+	for _, c := range cases {
+		w := &Writer{}
+		writeGemmaRopeScaling(w, "gemma4", c.cfg)
+		if c.want == "" {
+			if len(w.kv) != 0 {
+				t.Errorf("%s: wrote %v, want no scaling keys", c.name, w.kv)
+			}
+			continue
+		}
+		if len(w.kv) < 2 || w.kv[0].Key != "gemma4.rope.scaling.type" || w.kv[0].Value != c.want {
+			t.Errorf("%s: kv = %v", c.name, w.kv)
+		}
+	}
+}
+
+func TestReadPayloadPaddedAndNoCopy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "x.safetensors")
+	if err := writeSafetensors(path, map[string]stTensor{"t": {DType: "BF16", Shape: []int64{2, 2}, Data: []byte{1, 2, 3, 4, 5, 6, 7, 8}}}); err != nil {
+		t.Fatal(err)
+	}
+	refs, err := IndexDir(dir)
+	if err != nil || len(refs) != 1 {
+		t.Fatalf("index: %v %v", refs, err)
+	}
+	got, err := readPayloadPadded(refs[0], 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []byte{1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0}; !bytes.Equal(got, want) {
+		t.Errorf("padded = %v, want %v", got, want)
+	}
+	src := []byte{1, 2, 3, 4}
+	out, err := convertPayload(src, "BF16", GGMLBF16)
+	if err != nil || &out[0] != &src[0] {
+		t.Errorf("same-dtype convertPayload must hand the buffer through, not copy (err %v)", err)
 	}
 }

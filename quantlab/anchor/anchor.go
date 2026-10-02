@@ -76,19 +76,22 @@ type Policy struct {
 // DefaultPolicy returns the stock automatic-anchor policy.
 func DefaultPolicy() Policy {
 	return Policy{
-		EmbeddingPrior:    core.DTypeQ6_K,
-		EmbeddingFloor:    core.DTypeQ6_K,
-		AttentionPrior:    core.DTypeQ5_K_T,
-		ValuePrior:        core.DTypeQ6_K,
-		DownPrior:         core.DTypeQ6_K, // historical: same as ValuePrior when bpw is unset
-		EmbeddingWeight:   1.0,
-		AttentionWeight:   0.5,
-		ValueWeight:       1.0,
-		DownWeight:        1.0,
-		ExpertDownWeight:  1.0,
-		RouterFloor:       core.DTypeQ5_K_T,
-		OutputFloor:       core.DTypeQ6_K,
-		EmbeddingPatterns: []string{"*token_embd*", "*output*"},
+		EmbeddingPrior:   core.DTypeQ6_K,
+		EmbeddingFloor:   core.DTypeQ6_K,
+		AttentionPrior:   core.DTypeQ5_K_T,
+		ValuePrior:       core.DTypeQ6_K,
+		DownPrior:        core.DTypeQ6_K, // historical: same as ValuePrior when bpw is unset
+		EmbeddingWeight:  1.0,
+		AttentionWeight:  0.5,
+		ValueWeight:      1.0,
+		DownWeight:       1.0,
+		ExpertDownWeight: 1.0,
+		RouterFloor:      core.DTypeQ5_K_T,
+		OutputFloor:      core.DTypeQ6_K,
+		// Exact name: "*token_embd*" would also match gemma3n/gemma4's
+		// per_layer_token_embd.weight, a separate (and huge) lookup table
+		// that takes the embedding floor but not this soft Q6_K prior.
+		EmbeddingPatterns: []string{"token_embd.weight", "*output*"},
 		AttentionPatterns: nil, // GGUF-derived softmax-attention names only
 		ValuePatterns:     nil, // GGUF-derived attn_v names only
 		DownPatterns:      nil, // GGUF-derived ffn_down names only

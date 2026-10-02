@@ -236,7 +236,11 @@ func writeStandardKV(w *Writer, f Family, name string, h hyper, fileType uint32)
 
 func writeFamilyKV(w *Writer, f Family, name string, cfg map[string]any, h hyper, fileType uint32) {
 	writeStandardKV(w, f, name, h, fileType)
-	writeRopeScaling(w, f.GGUFArch, cfg)
+	if f.Gemma != "" {
+		writeGemmaRopeScaling(w, f.GGUFArch, cfg)
+	} else {
+		writeRopeScaling(w, f.GGUFArch, cfg)
+	}
 	if h.swa != 0 {
 		w.AddKV(f.GGUFArch+".attention.sliding_window", h.swa)
 	}

@@ -190,6 +190,9 @@ func KeepSnapshotPath(path string) bool {
 	}
 	switch base {
 	case "config.json", "tokenizer.json", "tokenizer_config.json",
+		// tokenizer.model is the SentencePiece model the Gemma tokenizers
+		// are built from (llama.cpp's "llama" tokenizer needs its scores).
+		"tokenizer.model",
 		"special_tokens_map.json", "generation_config.json",
 		"processor_config.json", "preprocessor_config.json",
 		"added_tokens.json", "chat_template.jinja", "chat_template.json",

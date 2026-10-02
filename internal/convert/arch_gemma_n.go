@@ -214,29 +214,59 @@ func gemma4HeadDims(cfg map[string]any) (headDimFull, kvHeadsFull int) {
 	return
 }
 
-// validateGemmaN rejects configs the llama.cpp loaders cannot represent.
-func validateGemmaN(f Family, cfg map[string]any, h hyper) error {
+// validateGemmaN rejects configs the llama.cpp loaders cannot represent and
+// returns warnings for values the current loaders hard-code rather than
+// read from the file (a newer llama.cpp may read them, so those only warn).
+func validateGemmaN(f Family, cfg map[string]any, h hyper) ([]string, error) {
+	var warn []string
+	if h.nLayer <= 0 || h.nEmbd <= 0 {
+		return nil, fmt.Errorf("%s: config has no layer count / hidden size", f.Gemma)
+	}
+	// Both loaders require attention.sliding_window.
+	if cfgInt(cfg, "sliding_window") <= 0 {
+		return nil, fmt.Errorf("%s: config has no sliding_window", f.Gemma)
+	}
+	if _, arr := gemmaFFLengths(cfg, h.nLayer); len(arr) > 0 && len(arr) != h.nLayer {
+		return nil, fmt.Errorf("%s: intermediate_size lists %d widths for %d layers", f.Gemma, len(arr), h.nLayer)
+	}
+	if typ := cfgString(gemmaRope(cfg, "full_attention"), "rope_type", "type"); typ != "" {
+		switch typ {
+		case "default", "proportional", "linear", "yarn":
+		default:
+			return nil, fmt.Errorf("%s: unsupported rope type %q", f.Gemma, typ)
+		}
+	}
 	switch f.Gemma {
 	case "gemma3n":
 		if n := cfgInt(cfg, "altup_num_inputs"); n != 0 && n != 4 {
-			return fmt.Errorf("gemma3n: altup_num_inputs=%d; llama.cpp supports exactly 4", n)
+			return nil, fmt.Errorf("gemma3n: altup_num_inputs=%d; llama.cpp supports exactly 4", n)
 		}
 		if cfgInt(cfg, "hidden_size_per_layer_input") <= 0 {
-			return fmt.Errorf("gemma3n: config has no hidden_size_per_layer_input")
+			return nil, fmt.Errorf("gemma3n: config has no hidden_size_per_layer_input")
+		}
+		// llama.cpp's gemma3n loader fixes these instead of reading them.
+		if v := cfgInt(cfg, "hidden_size_per_layer_input"); v != 256 {
+			warn = append(warn, fmt.Sprintf("gemma3n: hidden_size_per_layer_input=%d; the current llama.cpp loader assumes 256", v))
+		}
+		if v := cfgInt(cfg, "laurel_rank"); v != 0 && v != 64 {
+			warn = append(warn, fmt.Sprintf("gemma3n: laurel_rank=%d; the current llama.cpp loader assumes 64", v))
+		}
+		if v := cfgInt(cfg, "altup_active_idx"); v != 0 {
+			warn = append(warn, fmt.Sprintf("gemma3n: altup_active_idx=%d; the current llama.cpp loader assumes 0", v))
+		}
+		if kvLayers := h.nLayer - cfgInt(cfg, "num_kv_shared_layers"); kvLayers != 20 {
+			warn = append(warn, fmt.Sprintf("gemma3n: %d layers keep their own KV; the current llama.cpp loader assumes 20", kvLayers))
 		}
 	case "gemma4":
 		hd, _ := gemma4HeadDims(cfg)
 		if hd <= 0 {
-			return fmt.Errorf("gemma4: cannot determine the full-attention head dimension (global_head_dim / per_layer_config)")
+			return nil, fmt.Errorf("gemma4: cannot determine the full-attention head dimension (global_head_dim / per_layer_config)")
 		}
 		if len(stringSlice(cfg["layer_types"])) == 0 {
-			return fmt.Errorf("gemma4: config has no layer_types")
+			return nil, fmt.Errorf("gemma4: config has no layer_types")
 		}
 	}
-	if h.nLayer <= 0 || h.nEmbd <= 0 {
-		return fmt.Errorf("%s: config has no layer count / hidden size", f.Gemma)
-	}
-	return nil
+	return warn, nil
 }
 
 // gemmaActivationSparsity is the standard-normal inverse CDF (in float32,
@@ -366,4 +396,16 @@ func gemmaExtraWork(f Family, cfg map[string]any) ([]workItem, error) {
 		Kind:  kindData,
 		Data:  f32Bytes(vals),
 	}}, nil
+}
+
+// writeGemmaRopeScaling writes the rope scaling llama.cpp understands for a
+// Gemma 3n / 4 full-attention rope: linear and yarn only. "proportional"
+// (Gemma 4) is expressed through rope_freqs.weight, not a scaling key, and
+// llama.cpp aborts on scaling types it does not know.
+func writeGemmaRopeScaling(w *Writer, arch string, cfg map[string]any) {
+	rp := gemmaRope(cfg, "full_attention")
+	switch cfgString(rp, "rope_type", "type") {
+	case "linear", "yarn":
+		writeRopeScaling(w, arch, map[string]any{"rope_scaling": rp})
+	}
 }

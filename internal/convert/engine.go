@@ -45,16 +45,21 @@ type workItem struct {
 
 func convertFamily(f Family, dir string, tensors []TensorRef, cfg map[string]any, w *Writer) (*ConvertStats, error) {
 	h := parseHyper(cfg, f)
+	var warnings []string
 	if f.Gemma != "" {
-		if err := validateGemmaN(f, cfg, h); err != nil {
+		var err error
+		if warnings, err = validateGemmaN(f, cfg, h); err != nil {
 			return nil, err
 		}
 	}
 	var tok *ggmlTokenizer
 	var err error
-	if f.Gemma != "" {
+	switch {
+	case f.Gemma != "":
 		tok, err = loadGemmaTokenizer(dir, f.Gemma, h.vocab)
-	} else {
+	case strings.HasPrefix(f.GGUFArch, "gemma"):
+		tok, err = loadGemmaTokenizer(dir, f.GGUFArch, h.vocab)
+	default:
 		tok, err = loadTokenizer(dir)
 	}
 	if err != nil {
@@ -89,7 +94,7 @@ func convertFamily(f Family, dir string, tensors []TensorRef, cfg map[string]any
 	f.UnpermuteQK = shouldUnpermute(f.GGUFArch, pre)
 	w.addTokenizer(tok, pre)
 
-	stats := &ConvertStats{Architecture: f.GGUFArch, GGUFType: store}
+	stats := &ConvertStats{Architecture: f.GGUFArch, GGUFType: store, Warnings: warnings}
 	items, err := planFamilyWork(f, tensors, h, store, stats)
 	if err != nil {
 		return stats, err
@@ -123,6 +128,17 @@ func convertFamily(f Family, dir string, tensors []TensorRef, cfg map[string]any
 		stats.Tensors++
 	}
 	return stats, nil
+}
+
+const visionSkippedWarning = "vision tensors were skipped; this GGUF is language-only (pair an existing mmproj for images)"
+
+func hasWarning(ws []string, w string) bool {
+	for _, x := range ws {
+		if x == w {
+			return true
+		}
+	}
+	return false
 }
 
 func tokenizerFallback(arch string) string {
@@ -170,8 +186,8 @@ func planFamilyWork(f Family, tensors []TensorRef, h hyper, store int, stats *Co
 		m := f.MapName(t.Name)
 		if m.Vision {
 			stats.Skipped++
-			if len(stats.Warnings) == 0 {
-				stats.Warnings = append(stats.Warnings, "vision tensors were skipped; this GGUF is language-only (pair an existing mmproj for images)")
+			if !hasWarning(stats.Warnings, visionSkippedWarning) {
+				stats.Warnings = append(stats.Warnings, visionSkippedWarning)
 			}
 			continue
 		}
@@ -328,22 +344,29 @@ func familyPayload(item workItem, srcDType string, elem int, h hyper) ([]byte, e
 	if item.Src == nil {
 		return nil, fmt.Errorf("tensor %s has no source", item.GGUF)
 	}
-	raw, err := ReadPayload(*item.Src)
-	if err != nil {
-		return nil, err
-	}
 	hfShape := append([]int64(nil), item.Src.Shape...)
 	srcElem := elemSize(item.Src.DType)
 	if srcElem <= 0 {
 		srcElem = elem
 	}
 
-	if isVocabWeight(item.GGUF) && item.Src != nil && len(item.HFShape) > 0 {
-		padded, err := padLeadingDim(raw, item.Src.Shape, item.HFShape, srcElem)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", item.GGUF, err)
+	// Vocabulary tables are zero-padded to the vocab size. Read straight
+	// into the padded buffer: the per-layer table of an E-series Gemma is
+	// several GB, so it must not be copied more than once.
+	var raw []byte
+	var err error
+	if isVocabWeight(item.GGUF) && len(item.HFShape) > 0 && len(item.Src.Shape) > 0 &&
+		item.HFShape[0] > item.Src.Shape[0] {
+		row := int64(srcElem)
+		for _, d := range item.Src.Shape[1:] {
+			row *= d
 		}
-		raw = padded
+		raw, err = readPayloadPadded(*item.Src, (item.HFShape[0]-item.Src.Shape[0])*row)
+	} else {
+		raw, err = ReadPayload(*item.Src)
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	if item.Kind == kindConv1d {

@@ -169,7 +169,15 @@ func loadSPMTokenizer(dir string, vocabSize int) (*ggmlTokenizer, error) {
 		types[i] = tokenTypeUnused
 	}
 	for i, p := range pieces {
-		tokens[i], scores[i], types[i] = p.Piece, p.Score, p.Type
+		// Like llama.cpp's converter, only unknown / control / unused / byte
+		// pieces keep a special type; a user-defined piece is a plain token
+		// unless added_tokens.json or tokenizer_config.json says otherwise
+		// (user-defined tokens are split out of raw text before tokenizing).
+		t := p.Type
+		if t == tokenTypeUserDefined {
+			t = tokenTypeNormal
+		}
+		tokens[i], scores[i], types[i] = p.Piece, p.Score, t
 	}
 
 	if b, err := os.ReadFile(filepath.Join(dir, "added_tokens.json")); err == nil {
@@ -252,11 +260,18 @@ func gemma4Tokenizer(tok *ggmlTokenizer) *ggmlTokenizer {
 	return tok
 }
 
-// loadGemmaTokenizer picks the tokenizer for a Gemma family: Gemma 4 uses
-// the "gemma4" BPE model from tokenizer.json; the SentencePiece families use
-// tokenizer.model when present (what llama.cpp writes) and otherwise the
-// generic tokenizer.json path.
+// loadGemmaTokenizer picks the tokenizer for a Gemma family. Gemma 4 uses
+// the "gemma4" BPE model from tokenizer.json. Gemma 3n is SentencePiece
+// only: without tokenizer.model the generic path would write a BPE
+// tokenizer with a Gemma pre-tokenizer name llama.cpp rejects, so that is an
+// error. Gemma 1-3 use tokenizer.model when present (what llama.cpp's
+// converter does) and otherwise keep the generic tokenizer.json path.
 func loadGemmaTokenizer(dir, family string, vocabSize int) (*ggmlTokenizer, error) {
+	if family == "gemma3n" {
+		if _, err := os.Stat(filepath.Join(dir, "tokenizer.model")); err != nil {
+			return nil, fmt.Errorf("gemma3n needs tokenizer.model (the SentencePiece model) in the snapshot: %w", err)
+		}
+	}
 	if family == "gemma4" {
 		tok, err := loadTokenizer(dir)
 		if err != nil {

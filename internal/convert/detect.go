@@ -67,16 +67,16 @@ func detectLayout(cfg map[string]any, names []string) layout {
 		f.block = "this checkpoint uses MLA / latent attention; those safetensors are not convertible here"
 		return f
 	}
-	if cfgInt(cfg, "altup_num_inputs", "hidden_size_per_layer_input") > 0 ||
-		has("altup") || has("per_layer_input") {
-		// Gemma 3n (AltUp + per-layer embeddings + LAuReL) and Gemma 4
-		// (per-layer embeddings) have native mappings; any other
-		// architecture carrying these tensors still fails closed.
-		f.GemmaN = gemmaNFamily(cfg)
-		if f.GemmaN == "" {
-			f.block = "altup / per-layer embeddings are not convertible for this architecture (only Gemma 3n and Gemma 4 are mapped)"
-			return f
-		}
+	// Gemma 3n (AltUp + per-layer embeddings + LAuReL) and Gemma 4
+	// (per-layer embeddings) have native mappings. Any config that names one
+	// of them must resolve to that exact architecture (inferArch refuses
+	// variants it cannot), and any other architecture carrying AltUp or
+	// per-layer tensors still fails closed.
+	f.GemmaN = gemmaNFamily(cfg)
+	if f.GemmaN == "" && (cfgInt(cfg, "altup_num_inputs", "hidden_size_per_layer_input") > 0 ||
+		has("altup") || has("per_layer_input")) {
+		f.block = "altup / per-layer embeddings are not convertible for this architecture (only Gemma 3n and Gemma 4 are mapped)"
+		return f
 	}
 	if has("in_proj_qkvz") || has("in_proj_ba") && !has("in_proj_qkv") {
 		f.block = "packed linear-attention weights (Qwen3-Next style) are not convertible"
@@ -102,7 +102,7 @@ func detectLayout(cfg map[string]any, names []string) layout {
 		has("linear_attn.") || hasLayerType(cfg, "linear")
 	f.SplitLinear = has("linear_attn.in_proj_qkv") || has("linear_attn.in_proj_z")
 	f.MoE = cfgInt(cfg, "num_experts", "num_local_experts", "n_routed_experts") > 0 ||
-		has(".experts.") || has("block_sparse_moe")
+		has(".experts.") || has("block_sparse_moe") || cfgBool(cfg, "enable_moe_block")
 	f.GemmaFF = has("pre_feedforward_layernorm") || has("post_feedforward_layernorm")
 	f.QKNorm = has("self_attn.q_norm") || has("self_attn.k_norm") ||
 		cfgBool(cfg, "use_qk_norm", "qk_norm")

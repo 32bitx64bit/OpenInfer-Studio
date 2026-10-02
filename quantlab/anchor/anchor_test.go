@@ -667,3 +667,21 @@ func TestDeriveUntiedModelKeepsPerLayerFloorSeparate(t *testing.T) {
 		t.Errorf("per-layer floor = %s", f)
 	}
 }
+
+func TestSoftEmbeddingPriorSkipsPerLayerTable(t *testing.T) {
+	bank := gemma3nBank()
+	set, err := Derive(bank, nil, PolicyForBPW(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]core.TensorDesc{}
+	for _, td := range bank.Tensors {
+		byName[td.Name] = td
+	}
+	if p := set.PriorLoss(byName["token_embd.weight"], core.DTypeQ3_K); p <= 0 {
+		t.Errorf("token_embd soft prior = %v, want a Q6_K preference", p)
+	}
+	if p := set.PriorLoss(byName["per_layer_token_embd.weight"], core.DTypeQ3_K); p != 0 {
+		t.Errorf("per-layer table soft prior = %v, want none (floor only)", p)
+	}
+}

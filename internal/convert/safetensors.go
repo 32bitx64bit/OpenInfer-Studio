@@ -130,6 +130,25 @@ func ReadPayload(t TensorRef) ([]byte, error) {
 	return buf, nil
 }
 
+// readPayloadPadded is ReadPayload into a buffer extended with extra zero
+// bytes, so padding a table costs no second copy.
+func readPayloadPadded(t TensorRef, extra int64) ([]byte, error) {
+	f, err := os.Open(t.File)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, t.Size+extra)
+	n, err := f.ReadAt(buf[:t.Size], t.Offset)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	if int64(n) != t.Size {
+		return nil, fmt.Errorf("tensor %s: short read %d/%d", t.Name, n, t.Size)
+	}
+	return buf, nil
+}
+
 func elemSize(dtype string) int {
 	switch strings.ToUpper(dtype) {
 	case "F64":

@@ -41,9 +41,9 @@ func convertPayload(src []byte, srcDType string, dstType int) ([]byte, error) {
 		return nil, err
 	}
 	if srcT == dstType {
-		out := make([]byte, len(src))
-		copy(out, src)
-		return out, nil
+		// Callers hand over buffers they own and never touch afterwards;
+		// copying a multi-GB table here would double its peak memory.
+		return src, nil
 	}
 	if srcT == GGMLF32 && dstType == GGMLF16 {
 		return f32ToF16(src), nil
