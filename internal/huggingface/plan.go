@@ -49,6 +49,9 @@ type PlanOption struct {
 	TotalBytes  int64      `json:"total_bytes"`
 	EstMemBytes int64      `json:"est_memory_bytes,omitempty"`
 	Recommended bool       `json:"recommended,omitempty"`
+	// Packed is a quantization pack that needs per-layer scales or a
+	// rotation to decode (scaled FP8, INT8 convrot, NVFP4, AWQ, W6A8).
+	Packed bool `json:"packed,omitempty"`
 	// Warn is set when the option is unlikely to load in the engine that
 	// runs it; it is still selectable.
 	Warn string `json:"warn,omitempty"`

@@ -42,6 +42,7 @@ want, then confirm" instead of "download every variant":
      "bits": 4.58, "class": "quant|full|fp8|int8|4bit", "kind": "",
      "tags": ["3 parts"], "total_bytes": 0, "est_memory_bytes": 0,
      "recommended": true, "warn": "",   // warn: unlikely to load, still selectable
+     "packed": false,                   // ComfyUI-only quantization pack (scaled FP8, INT8 convrot, NVFP4, AWQ, W6A8)
      "files": [{"path": "…", "size": 0, "part": 0, "dest": ""}]}]}],
  "notes": ["…"]}
 ```
@@ -52,7 +53,7 @@ model) and `drafter`. Generator repositories yield `model`, `vae`, text encoders
 (`t5xxl`, `clip_l`, `clip_g`, `llm`), `clip_vision`, `tokenizer` and optional
 `controlnet` / `esrgan` / `lora` / `taesd`. Precision comes from the file name
 (`fp16`, `bf16`, `fp8`, `int8`, GGUF quant). Packs stable-diffusion.cpp is known
-to reject (scaled FP8, INT8, 4-bit) and multi-file sets carry a `warn`. A
+to reject (scaled FP8, INT8, 4-bit, W6A8/AWQ/GPTQ packs) and multi-file sets carry a `warn`; when every build of a part is a pack, `notes` says the model will probably not run in stable-diffusion.cpp. A
 repository's diffusers folders (`unet/`, `vae/`, …) become their own components,
 off by default when single-file weights exist.
 

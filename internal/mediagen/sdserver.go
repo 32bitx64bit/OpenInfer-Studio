@@ -443,6 +443,7 @@ func PrepareLaunch(rt *runtimes.Runtime, help, modelPath string, s LoadSettings)
 	// Pair local companions (…/vae/…, …/text_encoders/…) for transformer-only
 	// checkpoints. Explicit settings always win.
 	ApplyCompanions(&resolved, ModelRoot(modelPath), modelPath)
+	warnings = append(warnings, packedWarnings(modelPath, resolved)...)
 
 	resolvedHelp = help
 	if strings.TrimSpace(resolvedHelp) == "" {

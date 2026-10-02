@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -398,5 +399,46 @@ func TestDiffusionKindRecognizesWanAndDiTLayouts(t *testing.T) {
 	}
 	if LooksLikeLLM(wan) {
 		t.Error("Wan tensors are not an LLM")
+	}
+}
+
+func TestPackedNameAndReason(t *testing.T) {
+	names := map[string]string{
+		"minimax_h3_fl2va_pruned_w6a8.safetensors":      "W6A8",
+		"minimax_h3_video_vae_int8_convrot.safetensors": "convrot",
+		"qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors":  "NVFP4",
+		"flux-nf4.safetensors":                          "NF4",
+		"t5xxl_fp8_e4m3fn_scaled.safetensors":           "scaled FP8",
+		"svdq-int4-flux.safetensors":                    "INT4",
+	}
+	for n, want := range names {
+		if got := PackedName(n); !strings.Contains(got, want) {
+			t.Errorf("PackedName(%q) = %q, want it to mention %q", n, got, want)
+		}
+	}
+	for _, ok := range []string{"flux1-dev-fp8.safetensors", "t5xxl_fp16.safetensors", "wan2.1_t2v_14B_bf16.safetensors", "ae.safetensors", "flux1-dev-Q4_0.gguf"} {
+		if got := PackedName(ok); got != "" {
+			t.Errorf("PackedName(%q) = %q, want none", ok, got)
+		}
+	}
+
+	// A pack is recognised from its scale tensors whatever it is called.
+	dir := t.TempDir()
+	scaled := filepath.Join(dir, "innocent_name.safetensors")
+	writeSafetensors(t, scaled, []string{"blocks.0.attn.q.weight", "blocks.0.attn.q.weight_scale", "blocks.0.attn.q.comfy_quant"})
+	if why := PackedReason(scaled); why == "" {
+		t.Error("scale tensors identify a pack")
+	}
+	plain := filepath.Join(dir, "plain.safetensors")
+	writeSafetensors(t, plain, []string{"blocks.0.attn.q.weight", "blocks.0.attn.q.bias"})
+	if why := PackedReason(plain); why != "" {
+		t.Errorf("plain weights flagged: %s", why)
+	}
+	// GGUF quantizations are native: never a pack, whatever the name says.
+	if why := PackedReason(filepath.Join(dir, "model-int8-awq.gguf")); why != "" {
+		t.Errorf("GGUF flagged: %s", why)
+	}
+	if why := PackedReason(filepath.Join(dir, "missing.safetensors")); why != "" {
+		t.Errorf("an unreadable file is not called a pack: %s", why)
 	}
 }

@@ -578,6 +578,7 @@ func (m *Manager) waitReady(sv *server, exited <-chan struct{}, timeout time.Dur
 	m.mu.Lock()
 	port := sv.port
 	logFile := sv.logFile
+	modelID, modelPath, settings := sv.modelID, sv.modelPath, sv.resolved
 	m.mu.Unlock()
 	deadline := time.Now().Add(timeout)
 	url := fmt.Sprintf("http://127.0.0.1:%d/sdcpp/v1/capabilities", port)
@@ -593,11 +594,11 @@ func (m *Manager) waitReady(sv *server, exited <-chan struct{}, timeout time.Dur
 		select {
 		case <-exited:
 			tail, _ := os.ReadFile(logFile)
-			msg := lastLines(string(tail), 12)
-			if strings.TrimSpace(msg) == "" {
-				msg = "no output captured"
-			}
-			return fmt.Errorf("sd-server exited during startup:\n%s", msg)
+			msg := startupFailure(string(tail), logFile, modelPath, settings)
+			// The per-model sd-server log is not the application log: put the
+			// failure where the Logs page shows it too.
+			m.log.Error("sd-server exited during startup", "model_id", modelID, "log", logFile, "error", msg)
+			return errors.New(msg)
 		default:
 		}
 		if time.Now().After(deadline) {

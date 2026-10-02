@@ -200,6 +200,28 @@ func buildGeneratorPlan(files []FileEntry) Plan {
 		return plan
 	}
 
+	// A component whose every build is a ComfyUI-only pack cannot be picked
+	// around: say so before the user downloads tens of gigabytes that will
+	// not load.
+	var packedOnly []string
+	for _, c := range comps {
+		if c.Selected && len(c.Options) > 0 {
+			all := true
+			for _, o := range c.Options {
+				if !o.Packed {
+					all = false
+				}
+			}
+			if all {
+				packedOnly = append(packedOnly, c.Label)
+			}
+		}
+	}
+	if len(packedOnly) > 0 {
+		plan.Notes = append(plan.Notes, "Every build of the "+strings.Join(packedOnly, ", ")+
+			" in this repository is a ComfyUI-only quantization (scaled FP8, INT8, NVFP4, AWQ, W6A8, …). stable-diffusion.cpp usually aborts while loading these, so this will probably not run here. Look for a GGUF, BF16/FP16 or plain FP8 build of the model elsewhere.")
+	}
+
 	hasRole := func(roles ...string) bool {
 		for _, c := range comps {
 			for _, r := range roles {
@@ -402,6 +424,7 @@ func generatorComponent(fs []genFile) PlanComponent {
 			opt.Tags = append(opt.Tags, "GGUF")
 		}
 		opt.Warn = sdLoadWarning(head.prec, len(s.files))
+		opt.Packed = head.prec.Packed
 
 		// The same weights listed twice (a mirrored folder) are one option.
 		dup := opt.Variant + "|" + opt.Precision + "|" + strconv.FormatInt(opt.TotalBytes, 10) + "|" + path.Base(head.Path)
@@ -423,6 +446,8 @@ func generatorComponent(fs []genFile) PlanComponent {
 // outside GGUF are the ones its loader has been seen to reject.
 func sdLoadWarning(p Precision, parts int) string {
 	switch {
+	case p.Class == ClassPacked:
+		return "Weight/activation quantization (" + p.Label + "): integer weights that need per-layer scales, a ComfyUI-only format. stable-diffusion.cpp aborts while loading it. A GGUF, BF16/FP16 or plain FP8 build loads."
 	case p.Class == Class4Bit:
 		return "4-bit packs (NF4 / FP4 / SVDQuant) are not supported by stable-diffusion.cpp. A GGUF quantization is the 4-bit option that loads."
 	case p.Class == ClassInt8:

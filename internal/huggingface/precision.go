@@ -3,6 +3,7 @@ package huggingface
 import (
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -13,6 +14,9 @@ const (
 	ClassInt8  = "int8"  // 8-bit integer packs
 	ClassQuant = "quant" // GGUF block quantizations (Q4_K_M, IQ3_XS, Q8_0, …)
 	Class4Bit  = "4bit"  // nf4 / fp4 / int4 packs outside GGUF
+	// ClassPacked is weight/activation quantization (W6A8, AWQ, GPTQ): integer
+	// weights that need per-layer scales to decode.
+	ClassPacked = "packed"
 )
 
 // Precision describes how a weight file stores its numbers, read from the
@@ -98,14 +102,23 @@ var precisionTokens = map[string]bool{
 	"fp8": true, "float8": true, "e4m3": true, "e4m3fn": true, "e4m3fnuz": true, "e5m2": true,
 	"scaled": true, "int8": true, "i8": true, "w8a8": true, "convrot": true,
 	"nf4": true, "fp4": true, "nvfp4": true, "int4": true, "svdq": true,
+	"awq": true, "gptq": true,
 	// GGUF dynamic-quant prefixes that stay behind once the quant is removed.
 	"ud": true, "oid": true,
 }
 
 var (
-	nameTokenRe = regexp.MustCompile(`[A-Za-z0-9]+`)
-	shardRe     = regexp.MustCompile(`(?i)[-_.]?\d{5}-of-\d{5}`)
+	// weightActivationRe matches w6a8, w8a8, w4a16: weight/activation bit widths.
+	weightActivationRe = regexp.MustCompile(`^w(\d{1,2})a\d{1,2}$`)
+	nameTokenRe        = regexp.MustCompile(`[A-Za-z0-9]+`)
+	shardRe            = regexp.MustCompile(`(?i)[-_.]?\d{5}-of-\d{5}`)
 )
+
+// isPrecisionToken reports whether a lower-case name token states a storage
+// format (fp16, e4m3fn, Q-less names like w6a8, awq, …).
+func isPrecisionToken(t string) bool {
+	return precisionTokens[t] || weightActivationRe.MatchString(t)
+}
 
 // nameTokens lower-cases a file stem and splits it into alphanumeric tokens.
 func nameTokens(stem string) []string {
@@ -140,6 +153,14 @@ func PrecisionOf(path string) Precision {
 		return false
 	}
 	scaled := has("scaled")
+	// w6a8 / w8a4 / w4a16: weight and activation bit widths. Hardware-specific
+	// integer packs; the weight width is the bits per weight.
+	for tok := range toks {
+		if m := weightActivationRe.FindStringSubmatch(tok); m != nil && tok != "w8a8" {
+			bits, _ := strconv.Atoi(m[1])
+			return Precision{ID: tok, Label: strings.ToUpper(tok), Bits: float64(bits), Class: ClassPacked, Packed: true}
+		}
+	}
 	switch {
 	case has("nf4"):
 		return Precision{ID: "nf4", Label: "NF4", Bits: 4, Class: Class4Bit, Packed: true}
@@ -147,6 +168,10 @@ func PrecisionOf(path string) Precision {
 		return Precision{ID: "fp4", Label: "FP4", Bits: 4, Class: Class4Bit, Packed: true}
 	case has("int4", "svdq"):
 		return Precision{ID: "int4", Label: "INT4", Bits: 4, Class: Class4Bit, Packed: true}
+	case has("awq"):
+		return Precision{ID: "awq", Label: "AWQ", Bits: 4, Class: ClassPacked, Packed: true}
+	case has("gptq"):
+		return Precision{ID: "gptq", Label: "GPTQ", Bits: 4, Class: ClassPacked, Packed: true}
 	case has("int8", "i8", "w8a8"):
 		// There is no plain int8 weight layout in safetensors: these files
 		// carry scales (and sometimes a rotation) that loaders must apply.
@@ -198,7 +223,7 @@ func stemSansPrecision(path string) string {
 			stem = quantRe.ReplaceAllString(stem, "")
 		}
 	}
-	return dropTokens(stem, func(lower string) bool { return precisionTokens[lower] })
+	return dropTokens(stem, isPrecisionToken)
 }
 
 // dropTokens removes the alphanumeric tokens drop() accepts (given the token

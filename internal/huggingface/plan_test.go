@@ -826,3 +826,42 @@ func TestPrecisionIgnoresWordsThatOnlyLookLikeFormats(t *testing.T) {
 		t.Errorf("stem = %q", got)
 	}
 }
+
+// The reported repository: every build is a ComfyUI-only pack stable-diffusion.cpp
+// aborts on (W6A8 model, INT8 convrot VAE, NVFP4+AWQ Qwen3-VL text encoder).
+func TestGeneratorPlanWarnsWhenEveryBuildIsAPack(t *testing.T) {
+	p := buildGeneratorPlan(entries(
+		"minimax_h3_fl2va_pruned_w6a8.safetensors", 40,
+		"minimax_h3_video_vae_int8_convrot.safetensors", 2,
+		"qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", 18,
+	))
+	for _, id := range []string{"model", "vae", "llm"} {
+		c := findComp(t, p, id)
+		if len(c.Options) != 1 || c.Options[0].Warn == "" || !c.Options[0].Packed {
+			t.Errorf("%s must be flagged as a pack: %+v", id, c.Options)
+		}
+	}
+	if m := findComp(t, p, "model"); m.Options[0].Label != "W6A8" || m.Options[0].Class != ClassPacked {
+		t.Errorf("model option = %+v", m.Options[0])
+	}
+	if len(p.Notes) == 0 || !strings.Contains(p.Notes[0], "Every build of the") ||
+		!strings.Contains(p.Notes[0], "Diffusion model") || !strings.Contains(p.Notes[0], "VAE") ||
+		!strings.Contains(p.Notes[0], "LLM text encoder") {
+		t.Errorf("a repo with no loadable build of a part must say so before the download: %v", p.Notes)
+	}
+}
+
+func TestGeneratorPlanNoPackNoteWhenASoundBuildExists(t *testing.T) {
+	p := buildGeneratorPlan(entries(
+		"minimax_h3_w6a8.safetensors", 20, "minimax_h3_bf16.safetensors", 40,
+		"vae_bf16.safetensors", 1, "vae_int8_convrot.safetensors", 1,
+	))
+	for _, n := range p.Notes {
+		if strings.Contains(n, "Every build") {
+			t.Errorf("a loadable build exists for every part: %q", n)
+		}
+	}
+	if got := defaultOpt(t, findComp(t, p, "model")); got.Precision != "bf16" {
+		t.Errorf("default model = %s: the pack must lose to the sound build", got.Precision)
+	}
+}
