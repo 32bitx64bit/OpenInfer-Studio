@@ -133,3 +133,22 @@ func exactLossFromValues(t *testing.T, tensor core.TensorDesc, w, imp []float32)
 	}
 	return table[tensor.Name]
 }
+
+func TestExpandImportanceMapsExpertBlocks(t *testing.T) {
+	// 2 experts, ne0=2, 3 rows per expert: rows 0-2 take expert 0, 3-5
+	// expert 1 (never r%experts).
+	values := []float32{1, 2, 10, 20}
+	got, ok := ExpandImportance(values, 2, 12)
+	if !ok {
+		t.Fatal("expected fit")
+	}
+	want := []float32{1, 2, 1, 2, 1, 2, 10, 20, 10, 20, 10, 20}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("elem %d = %v, want %v (got %v)", i, got[i], want[i], got)
+		}
+	}
+	if _, ok := ExpandImportance(values, 3, 12); ok {
+		t.Fatal("misfit vector must report ok=false")
+	}
+}

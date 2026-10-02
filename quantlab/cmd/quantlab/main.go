@@ -31,7 +31,9 @@ usage:
                    [-scale-fold] [-no-scale-fold] [-hadamard] [-no-hadamard]
                    [-csk] [-no-csk] [-fti] [-no-fti] [-probe-kld] [-no-probe-kld]
                    [-sensitivity] [-no-sensitivity]
-                   [-legacy-exact-table] [-no-depth-probes]
+                   [-legacy-exact-table] [-no-depth-probes] [-no-depth-split]
+                   [-no-two-rung] [-no-priced-pins] [-no-embed-row-floor]
+                   [-no-tail-probe] [-no-refine]
   quantlab resume  -state-dir <dir> -run <id> [-stage-limit <n>] [-dry-run]
   quantlab status  -state-dir <dir> -run <id>
 `
@@ -95,6 +97,12 @@ func cmdPlan(args []string, stdout io.Writer) error {
 	noSensitivity := fs.Bool("no-sensitivity", false, "disable sensitivity probes (solver falls back to heuristic role priors)")
 	legacyExact := fs.Bool("legacy-exact-table", false, "force the Go exact-loss table instead of measuring with llama-quantize (A/B testing)")
 	noDepthProbes := fs.Bool("no-depth-probes", false, "disable depth-bucket sensitivity probes")
+	noDepthSplit := fs.Bool("no-depth-split", false, "probe each depth bucket once instead of separately for attention/SSM and FFN")
+	noTwoRung := fs.Bool("no-two-rung", false, "keep the single-rung sensitivity model (no second probe rung near the target)")
+	noPricedPins := fs.Bool("no-priced-pins", false, "pin small unprobed roles to top fidelity instead of pricing them from their family")
+	noEmbedRowFloor := fs.Bool("no-embed-row-floor", false, "keep the fixed token-embedding floor instead of the per-row vocabulary check")
+	noTailProbe := fs.Bool("no-tail-probe", false, "score sensitivity probes on mean KLD only (no p99 tail term)")
+	noRefine := fs.Bool("no-refine", false, "skip in-context refinement rounds in the search stage")
 	runID := fs.String("run", "", "run id (default: run-<unixtime>)")
 	dryRun := fs.Bool("dry-run", false, "validate and plan without writing artifacts")
 	if err := fs.Parse(args); err != nil {
@@ -152,6 +160,12 @@ func cmdPlan(args []string, stdout io.Writer) error {
 		NoSensitivity:     *noSensitivity,
 		LegacyExactTable:  *legacyExact,
 		NoDepthProbes:     *noDepthProbes,
+		NoDepthSplit:      *noDepthSplit,
+		NoTwoRung:         *noTwoRung,
+		NoPricedPins:      *noPricedPins,
+		NoEmbedRowFloor:   *noEmbedRowFloor,
+		NoTailProbe:       *noTailProbe,
+		NoRefine:          *noRefine,
 	})
 	return err
 }

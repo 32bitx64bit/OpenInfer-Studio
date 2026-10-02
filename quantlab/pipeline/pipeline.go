@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"quantlab/anchor"
 	"quantlab/core"
 	"quantlab/orchestrate"
 	"quantlab/profile"
@@ -80,6 +79,24 @@ type ExtraConfig struct {
 	LegacyExactTable bool `json:"legacyExactTable,omitempty"`
 	// NoDepthProbes disables depth-bucket sensitivity probes.
 	NoDepthProbes bool `json:"noDepthProbes,omitempty"`
+	// NoDepthSplit probes each depth bucket once for every family instead
+	// of separately for token mixers and FFNs.
+	NoDepthSplit bool `json:"noDepthSplit,omitempty"`
+	// NoTwoRung keeps the single-rung sensitivity model (KLD linear in
+	// wSSE from the Q3_K probe) instead of fitting a per-role exponent from
+	// a second probe rung near the target.
+	NoTwoRung bool `json:"noTwoRung,omitempty"`
+	// NoPricedPins pins small unprobed roles to their highest-fidelity rung
+	// instead of pricing them from their family's measured KLD/wSSE.
+	NoPricedPins bool `json:"noPricedPins,omitempty"`
+	// NoEmbedRowFloor keeps the fixed token-embedding floor instead of the
+	// data-free per-row error check over the whole vocabulary.
+	NoEmbedRowFloor bool `json:"noEmbedRowFloor,omitempty"`
+	// NoTailProbe scores probes on mean KLD only instead of mean plus a
+	// p99 tail term.
+	NoTailProbe bool `json:"noTailProbe,omitempty"`
+	// NoRefine skips the in-context refinement rounds in the search stage.
+	NoRefine bool `json:"noRefine,omitempty"`
 	// FoldedSourcePath / FoldedImatrixPath record the fold redirect once
 	// applied (persisted sidecar; resume-safe).
 	FoldedSourcePath  string `json:"foldedSourcePath,omitempty"`
@@ -279,10 +296,12 @@ func (e *Engine) cleanupScratch() {
 		}
 	}
 	os.RemoveAll(e.searchDir())
+	os.RemoveAll(e.refineDir())
 	os.Remove(filepath.Join(e.workDir(), "search-checkpoint.json"))
 	os.Remove(filepath.Join(e.workDir(), "search-final.json"))
 	for _, path := range []string{
 		filepath.Join(e.workDir(), "candidate.gguf"),
+		e.refinedCandidatePath(),
 		filepath.Join(e.workDir(), "final.gguf"),
 		e.Extra.FoldedSourcePath,
 		e.Extra.FoldedImatrixPath,
@@ -385,12 +404,13 @@ func (e *Engine) solveBudget() uint64 {
 }
 
 func (e *Engine) stageSearch(ctx context.Context) error {
-	_ = ctx
 	if e.DryRun {
 		e.printf("plan: search skipped\n")
 		return e.complete(core.StageSearch, "")
 	}
-	e.printf("  search: skipped\n")
+	if err := e.refine(ctx); err != nil {
+		return err
+	}
 	if err := e.ingestSearchLossCache(); err != nil {
 		return err
 	}
@@ -505,7 +525,7 @@ func (e *Engine) stageAssemble(ctx context.Context) error {
 // assembled bank. The derivation is deterministic, so later stages re-derive
 // rather than depend on a persisted set; the artifact is the audit record.
 func (e *Engine) stageAnchor(ctx context.Context) error {
-	set, err := anchor.Derive(e.Run.Bank, nil, anchor.PolicyForBPW(e.Run.Config.TargetBPW))
+	set, err := e.deriveAnchors(e.Run.Bank)
 	if err != nil {
 		return err
 	}
@@ -563,7 +583,7 @@ func (e *Engine) candidateDTypes() []core.DType {
 func (e *Engine) stageSolve(ctx context.Context) error {
 	cfg := e.Run.Config
 	bank := e.Run.Bank
-	set, err := anchor.Derive(bank, nil, anchor.PolicyForBPW(cfg.TargetBPW))
+	set, err := e.deriveAnchors(bank)
 	if err != nil {
 		return err
 	}
@@ -594,6 +614,7 @@ func (e *Engine) stageSolve(ctx context.Context) error {
 		Cache:       cache,
 		Imatrix:     imatrix,
 		Calibration: e.loadCalibration(bank),
+		PinUnprobed: e.Extra.NoPricedPins,
 	}
 	if e.exactEstimatorEnabled() {
 		if !e.DryRun {
@@ -739,20 +760,27 @@ func (e *Engine) stageSolve(ctx context.Context) error {
 		return e.complete(core.StageSolve, "")
 	}
 	artifact := filepath.Join(e.workDir(), "profile.json")
-	if err := e.writeJSON(artifact, struct {
-		Profile     *core.Profile           `json:"profile"`
-		Manifest    *core.SelectionManifest `json:"manifest"`
-		Diagnostics profile.Diagnostics     `json:"diagnostics"`
-		Sensitivity *profile.Sensitivity    `json:"sensitivity,omitempty"`
-	}{
+	if err := e.writeJSON(artifact, solveArtifact{
 		Profile:     res.Profile,
 		Manifest:    res.Manifest,
 		Diagnostics: res.Diag,
 		Sensitivity: req.Sensitivity,
+		Candidates:  req.Candidates,
 	}); err != nil {
 		return err
 	}
 	return e.complete(core.StageSolve, artifact)
+}
+
+// solveArtifact is the solve stage's audit record (profile.json). Refinement
+// reads the solved profile, the calibrated sensitivity model and the exact
+// candidate lattice the solver used back from it.
+type solveArtifact struct {
+	Profile     *core.Profile           `json:"profile"`
+	Manifest    *core.SelectionManifest `json:"manifest"`
+	Diagnostics profile.Diagnostics     `json:"diagnostics"`
+	Sensitivity *profile.Sensitivity    `json:"sensitivity,omitempty"`
+	Candidates  []core.DType            `json:"candidates,omitempty"`
 }
 
 // loadLossCache loads the optional measured-loss cache from the work dir,

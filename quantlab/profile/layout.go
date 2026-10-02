@@ -79,3 +79,22 @@ func ChannelMean(values []float32, ne0, rows uint64) []float64 {
 	}
 	return out
 }
+
+// ExpandImportance expands a retained imatrix vector into per-element
+// weights for a row-major tensor of n elements whose contiguous dimension is
+// ne0, honoring fused expert stacks (row r takes expert r/(rows/experts),
+// never r%experts). ok=false when values do not fit the tensor; callers then
+// keep uniform weights.
+func ExpandImportance(values []float32, ne0, n uint64) ([]float32, bool) {
+	if ne0 == 0 || n == 0 || n%ne0 != 0 {
+		return nil, false
+	}
+	rows := n / ne0
+	l, ok := LayoutFor(values, ne0, rows)
+	if !ok {
+		return nil, false
+	}
+	out := make([]float32, n)
+	l.Fill(out, values, 0, rows)
+	return out, true
+}

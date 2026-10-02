@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"quantlab/core"
 )
@@ -88,22 +89,77 @@ type RoleSensitivity struct {
 	SumWSSE  float64  `json:"sumWSSE,omitempty"`
 	Elements uint64   `json:"elements"`
 	Tensors  []string `json:"tensors,omitempty"`
+	// ProbeDType2 / KLD2 / SumWSSE2 record an optional second probe rung
+	// near the compression target (background-corrected KLD, exact-table
+	// wSSE). Exponent is the fitted b of KLD ∝ wSSE^b through both probes;
+	// zero means the single-rung linear model (b = 1).
+	ProbeDType2 core.DType `json:"probeDType2,omitempty"`
+	KLD2        float64    `json:"kld2,omitempty"`
+	SumWSSE2    float64    `json:"sumWSSE2,omitempty"`
+	Exponent    float64    `json:"exponent,omitempty"`
+}
+
+// Rung exponent guard. b = 1 is the small-perturbation regime (KLD
+// quadratic in output error, wSSE quadratic in weight error); measured
+// fits outside [0.5, 2] are treated as probe noise and clamped.
+const (
+	MinRungExponent = 0.5
+	MaxRungExponent = 2.0
+	// minRungSpread is the smallest wSSE ratio between the two probe rungs
+	// that supports an exponent fit; closer rungs amplify probe noise.
+	minRungSpread = 1.5
+)
+
+// FitRungExponent fits b in KLD ∝ wSSE^b through two role-level probe
+// points (k = background-corrected KLD, w = summed exact-table wSSE at the
+// probe rung). ok=false when either point is unusable or the rungs are too
+// close in wSSE for a stable fit; callers keep the linear model.
+func FitRungExponent(k1, w1, k2, w2 float64) (float64, bool) {
+	for _, v := range []float64{k1, w1, k2, w2} {
+		if !(v > 0) || math.IsInf(v, 0) || math.IsNaN(v) {
+			return 0, false
+		}
+	}
+	lw := math.Log(w2 / w1)
+	if math.Abs(lw) < math.Log(minRungSpread) {
+		return 0, false
+	}
+	b := math.Log(k2/k1) / lw
+	if math.IsNaN(b) || math.IsInf(b, 0) {
+		return 0, false
+	}
+	if b < MinRungExponent {
+		b = MinRungExponent
+	}
+	if b > MaxRungExponent {
+		b = MaxRungExponent
+	}
+	return b, true
 }
 
 // DepthBucket records the measured vs predicted KLD ratio for one
-// contiguous layer range.
+// contiguous layer range of one tensor family.
 type DepthBucket struct {
+	// Family is the depth family the bucket was probed for ("mix" or
+	// "ffn"); empty for a combined probe covering every family.
+	Family       string  `json:"family,omitempty"`
 	First        int     `json:"first"`
 	Last         int     `json:"last"`
 	MeasuredKLD  float64 `json:"measuredKLD"`
 	PredictedKLD float64 `json:"predictedKLD"`
-	Factor       float64 `json:"factor"`
+	// Factor is the bucket's knot value ρ after the interpolation fit.
+	Factor float64 `json:"factor"`
+	// Clamped reports that Factor hit the [DepthFactorMin, DepthFactorMax]
+	// guard, i.e. the measurement asked for more than the model allows.
+	Clamped bool `json:"clamped,omitempty"`
 }
 
 // DepthModel redistributes each role's probe-measured KLD across layers
-// using a few depth-bucket probes. The model is separable: a per-bucket
-// factor ρ scales every tensor in the bucket, then each role's total is
-// renormalized so it still equals its measured KLD at the probe rung.
+// using a few depth-bucket probes. Per family, the bucket knots ρ are
+// interpolated log-linearly between bucket centers (so adjacent layers on
+// either side of a bucket edge never jump) and fitted so the interpolated
+// profile still reproduces each bucket's measured KLD; each role's total is
+// then renormalized so it still equals its measured KLD at the probe rung.
 type DepthModel struct {
 	Buckets []DepthBucket `json:"buckets,omitempty"`
 	// Shares maps tensor name → per-weight share_t (KLD × ρ / Z).
@@ -126,6 +182,81 @@ type Sensitivity struct {
 	// Depth, when present, redistributes each role's KLD across layers
 	// using measured depth-bucket probes.
 	Depth *DepthModel `json:"depth,omitempty"`
+
+	// members maps tensor name → role key for roles whose key is not the
+	// tensor's own RoleKey (GroupByRole's merged "other" group). Built
+	// lazily from Roles[*].Tensors.
+	members map[string]string
+}
+
+// RoleOf returns the probed role a tensor belongs to: its RoleKey when
+// probed, else the merged role that lists it among its tensors.
+func (s *Sensitivity) RoleOf(name string) (string, bool) {
+	if s == nil {
+		return "", false
+	}
+	if key := RoleKey(name); s.Roles[key].Elements > 0 {
+		return key, true
+	}
+	if s.members == nil {
+		s.members = roleMembers(s.Roles)
+	}
+	key, ok := s.members[name]
+	return key, ok
+}
+
+// roleMembers indexes tensors listed under a role key other than their own
+// RoleKey (merged probe groups).
+func roleMembers(roles map[string]RoleSensitivity) map[string]string {
+	out := map[string]string{}
+	for key, r := range roles {
+		for _, name := range r.Tensors {
+			if RoleKey(name) != key {
+				out[name] = key
+			}
+		}
+	}
+	return out
+}
+
+// PinnedRate is the conservative KLD-per-wSSE rate that prices an unprobed
+// tensor: the largest KLD/SumWSSE at the probe rung among probed roles of
+// the tensor's depth family (every probed role for tensors outside the
+// layer stack). Taking the family's most sensitive rate keeps a guess from
+// harvesting a tensor no probe looked at, while still letting a tensor
+// whose own error is small drop below top fidelity. ok=false when no role
+// carries a usable rate.
+func (s *Sensitivity) PinnedRate(name string) (float64, bool) {
+	if s == nil {
+		return 0, false
+	}
+	fam := ""
+	if LayerIndex(name) >= 0 {
+		fam = DepthFamily(name)
+	}
+	best := 0.0
+	for _, r := range s.Roles {
+		if !(r.SumWSSE > 0) || !(r.KLD > 0) {
+			continue
+		}
+		if fam != "" && len(r.Tensors) > 0 && DepthFamily(r.Tensors[0]) != fam {
+			continue
+		}
+		if k := r.KLD / r.SumWSSE; k > best && !math.IsInf(k, 0) {
+			best = k
+		}
+	}
+	if best == 0 && fam != "" {
+		// No probed role in the family: fall back to every role.
+		for _, r := range s.Roles {
+			if r.SumWSSE > 0 && r.KLD > 0 {
+				if k := r.KLD / r.SumWSSE; k > best && !math.IsInf(k, 0) {
+					best = k
+				}
+			}
+		}
+	}
+	return best, best > 0
 }
 
 // Validate checks the model is usable by the solver.
@@ -149,6 +280,9 @@ func (s *Sensitivity) Validate() error {
 		if !r.ProbeDType.IsQuant() {
 			return fmt.Errorf("profile: sensitivity role %q: probe dtype %q is not a quant type", k, r.ProbeDType)
 		}
+		if r.Exponent != 0 && (r.Exponent < MinRungExponent || r.Exponent > MaxRungExponent || math.IsNaN(r.Exponent)) {
+			return fmt.Errorf("profile: sensitivity role %q: exponent %v outside [%v,%v]", k, r.Exponent, MinRungExponent, MaxRungExponent)
+		}
 	}
 	if s.Depth != nil {
 		for name, v := range s.Depth.Shares {
@@ -165,7 +299,7 @@ func (s *Sensitivity) Calibrated(name string) bool {
 	if s == nil {
 		return false
 	}
-	_, ok := s.Roles[RoleKey(name)]
+	_, ok := s.RoleOf(name)
 	return ok
 }
 
@@ -192,7 +326,11 @@ func (s *Sensitivity) IsPinned(name string) bool {
 // counts, and each tensor's loss at any other rung scales with its own
 // exact-table error relative to the probe rung:
 //
-//	loss(t, d) = KLD_role * elements_t / elements_role * wSSE_t(d) / wSSE_t(probe)
+//	loss(t, d) = KLD_role * elements_t / elements_role * (wSSE_t(d) / wSSE_t(probe))^b
+//
+// b is the role's fitted rung exponent (1 without a second probe rung): it
+// bends the rung curve so it passes through the second measurement near the
+// compression target instead of extrapolating linearly from the probe.
 //
 // The per-tensor wSSE ratio carries the rung shape (how fast error grows as
 // bits drop for THIS tensor, including IQ codebook effects), while the
@@ -209,8 +347,12 @@ func (s *Sensitivity) Loss(t core.TensorDesc, d core.DType, row map[core.DType]f
 	if s == nil || len(row) == 0 {
 		return 0, false
 	}
-	r, ok := s.Roles[RoleKey(t.Name)]
-	if !ok || r.Elements == 0 {
+	key, ok := s.RoleOf(t.Name)
+	if !ok {
+		return 0, false
+	}
+	r := s.Roles[key]
+	if r.Elements == 0 {
 		return 0, false
 	}
 	w, ok := row[d.BaseTensorType()]
@@ -227,7 +369,11 @@ func (s *Sensitivity) Loss(t core.TensorDesc, d core.DType, row map[core.DType]f
 			share = v
 		}
 	}
-	return share * w / ref, true
+	ratio := w / ref
+	if r.Exponent > 0 && r.Exponent != 1 {
+		ratio = math.Pow(ratio, r.Exponent)
+	}
+	return share * ratio, true
 }
 
 // referenceLoss is row[probe] when present and positive, else the row entry
@@ -291,11 +437,74 @@ next:
 	return "", false
 }
 
+// SecondProbeDTypes is the second-rung preference order for a compression
+// target (bits per weight): a rung on the far side of the operating point
+// from the Q3_K probe, so the fitted exponent describes the curve where the
+// solver actually allocates. Each list ends in 32-block rungs for shapes
+// that cannot take 256-element super-blocks. Nil for an unset target.
+func SecondProbeDTypes(targetBPW float64) []core.DType {
+	switch {
+	case targetBPW <= 0:
+		return nil
+	case targetBPW < 3.0:
+		return []core.DType{core.DTypeIQ2_XS, core.DTypeQ2_K}
+	case targetBPW < 4.5:
+		return []core.DType{core.DTypeQ4_K_T, core.DTypeQ5_0}
+	case targetBPW < 6.0:
+		return []core.DType{core.DTypeQ5_K_T, core.DTypeQ5_1}
+	default:
+		return []core.DType{core.DTypeQ6_K, core.DTypeQ8_0}
+	}
+}
+
 // DefaultProbeDTypes is the probe-rung preference order: Q3_K sits at the
 // aggressive end of typical mixed-precision budgets, so its per-role KLD is
 // well above measurement noise yet still in the regime where wSSE tracks
 // KLD; Q4_0 covers 32-block-only shapes.
 var DefaultProbeDTypes = []core.DType{core.DTypeQ3_K, core.DTypeQ4_0}
+
+// Depth families. Token mixers (softmax/linear attention, SSM) and channel
+// mixers (dense FFN, MoE experts) are probed separately: their sensitivity
+// profiles through depth differ, so one shared factor per bucket misprices
+// one family to fit the other.
+const (
+	DepthFamilyMix = "mix"
+	DepthFamilyFFN = "ffn"
+)
+
+// DepthFamilies lists the families in probe order.
+var DepthFamilies = []string{DepthFamilyMix, DepthFamilyFFN}
+
+// DepthFamily classifies a layered tensor into its depth family.
+func DepthFamily(name string) string {
+	stem := localStem(name)
+	n := strings.ToLower(name)
+	if isFFNDown(stem) || isFFNUp(stem) || isFFNGate(stem) || isMoEExpert(name) ||
+		strings.Contains(n, "ffn") || strings.Contains(n, "mlp") {
+		return DepthFamilyFFN
+	}
+	return DepthFamilyMix
+}
+
+// DepthKey names one depth probe: "depth-<first>-<last>" for a combined
+// probe (family ""), "depth-<family>-<first>-<last>" otherwise.
+func DepthKey(family string, b [2]int) string {
+	if family == "" {
+		return fmt.Sprintf("depth-%d-%d", b[0], b[1])
+	}
+	return fmt.Sprintf("depth-%s-%d-%d", family, b[0], b[1])
+}
+
+// Depth factor guard. Single-layer edge buckets legitimately measure several
+// times the depth-flat prediction; the guard only stops probe noise from
+// zeroing or exploding a bucket.
+const (
+	DepthFactorMin = 0.125
+	DepthFactorMax = 8.0
+	// depthFitRounds bounds the knot refit that makes the interpolated
+	// profile reproduce each bucket's measured total.
+	depthFitRounds = 8
+)
 
 // DepthBuckets computes the layer-bucket edges for depth probes: {0},
 // four contiguous groups of layers 1..n-2, and {n-1}. Returns nil when
@@ -321,80 +530,204 @@ func DepthBuckets(n int) [][2]int {
 	return buckets
 }
 
+// depthKnot is one fitted bucket of a family profile.
+type depthKnot struct {
+	bucket   int     // index into buckets
+	center   float64 // (first+last)/2
+	measured float64
+	logRho   float64
+}
+
+// interpolate evaluates a family profile at layer l: log-linear between
+// knot centers, constant beyond the outermost knots.
+func interpolateKnots(knots []depthKnot, l int) float64 {
+	if len(knots) == 0 {
+		return 1
+	}
+	x := float64(l)
+	if x <= knots[0].center {
+		return math.Exp(knots[0].logRho)
+	}
+	last := knots[len(knots)-1]
+	if x >= last.center {
+		return math.Exp(last.logRho)
+	}
+	for i := 0; i+1 < len(knots); i++ {
+		a, b := knots[i], knots[i+1]
+		if x >= a.center && x <= b.center {
+			t := (x - a.center) / (b.center - a.center)
+			return math.Exp(a.logRho + t*(b.logRho-a.logRho))
+		}
+	}
+	return math.Exp(last.logRho)
+}
+
+func clampDepthFactor(f float64) (float64, bool) {
+	switch {
+	case !(f > 0) || math.IsNaN(f):
+		return DepthFactorMin, true
+	case f < DepthFactorMin:
+		return DepthFactorMin, true
+	case f > DepthFactorMax:
+		return DepthFactorMax, true
+	}
+	return f, false
+}
+
 // ComputeDepthModel builds the depth model from per-bucket measured KLD
 // results and the depth-flat prediction. buckets are the layer edges;
-// measured maps "depth-<first>-<last>" → background-corrected KLD.
-// groups and sensitivities provide the depth-flat prediction per tensor.
+// measured maps DepthKey(family, bucket) → background-corrected KLD. A
+// family without its own probe for a bucket falls back to the combined
+// probe DepthKey("", bucket) when present. The depth-flat prediction per
+// tensor is KLD_role × elements_t / elements_role.
 func ComputeDepthModel(bank *core.TensorBank, buckets [][2]int,
 	sens map[string]RoleSensitivity, measured map[string]float64,
 	background float64) *DepthModel {
+	_ = background // measured values arrive background-corrected
 	if len(buckets) == 0 || len(measured) == 0 {
 		return nil
 	}
 	type tinfo struct {
-		name  string
-		elems uint64
-		role  string
+		name   string
+		elems  uint64
+		role   string
+		family string
+		layer  int
+		pred   float64
 	}
 	var tensors []tinfo
+	merged := roleMembers(sens)
 	for _, t := range bank.Tensors {
 		if !t.Quantizable() {
 			continue
 		}
 		role := RoleKey(t.Name)
-		if _, ok := sens[role]; !ok {
-			continue
-		}
-		tensors = append(tensors, tinfo{t.Name, t.Elements, role})
-	}
-	// ρ_b = clamp(M_b / P_b, 0.25, 4.0).
-	dm := &DepthModel{Shares: map[string]float64{}}
-	for _, b := range buckets {
-		key := fmt.Sprintf("depth-%d-%d", b[0], b[1])
-		mb, ok := measured[key]
+		r, ok := sens[role]
 		if !ok {
+			if role, ok = merged[t.Name]; ok {
+				r = sens[role]
+			}
+		}
+		if !ok || r.Elements == 0 {
 			continue
 		}
-		var pb float64
-		for _, ti := range tensors {
-			l := LayerIndex(ti.name)
-			if l < b[0] || l > b[1] {
+		tensors = append(tensors, tinfo{
+			name: t.Name, elems: t.Elements, role: role,
+			family: DepthFamily(t.Name), layer: LayerIndex(t.Name),
+			pred: r.KLD * float64(t.Elements) / float64(r.Elements),
+		})
+	}
+	inBucket := func(l int, b [2]int) bool { return l >= b[0] && l <= b[1] }
+
+	dm := &DepthModel{Shares: map[string]float64{}}
+	profiles := map[string][]depthKnot{}
+	for _, fam := range DepthFamilies {
+		// Members of this family per bucket, and the probe that measured
+		// them: a family probe, else the combined probe.
+		var knots []depthKnot
+		for bi, b := range buckets {
+			mb, ok := measured[DepthKey(fam, b)]
+			combined := false
+			if !ok {
+				mb, ok = measured[DepthKey("", b)]
+				combined = ok
+			}
+			if !ok || !(mb > 0) {
 				continue
 			}
-			r := sens[ti.role]
-			pb += r.KLD * float64(ti.elems) / float64(r.Elements)
+			var pb float64
+			for _, ti := range tensors {
+				if inBucket(ti.layer, b) && (combined || ti.family == fam) {
+					pb += ti.pred
+				}
+			}
+			if !(pb > 0) {
+				continue
+			}
+			// A combined probe measures every family at once: attribute
+			// it to this family in proportion to the family's predicted
+			// share of the bucket.
+			if combined {
+				var fp float64
+				for _, ti := range tensors {
+					if inBucket(ti.layer, b) && ti.family == fam {
+						fp += ti.pred
+					}
+				}
+				if !(fp > 0) {
+					continue
+				}
+				mb *= fp / pb
+				pb = fp
+			}
+			f, _ := clampDepthFactor(mb / pb)
+			knots = append(knots, depthKnot{
+				bucket: bi, center: float64(b[0]+b[1]) / 2,
+				measured: mb, logRho: math.Log(f),
+			})
 		}
-		if !(pb > 0) {
+		if len(knots) == 0 {
 			continue
 		}
-		f := mb / pb
-		if f < 0.25 {
-			f = 0.25
+		// Refit: under interpolation a bucket's predicted total is the sum
+		// of pred_t × ρ(l_t), not pred × knot; rescale each knot until the
+		// profile reproduces the measurement (or hits the guard).
+		for round := 0; round < depthFitRounds; round++ {
+			for k := range knots {
+				b := buckets[knots[k].bucket]
+				var p float64
+				for _, ti := range tensors {
+					if ti.family == fam && inBucket(ti.layer, b) {
+						p += ti.pred * interpolateKnots(knots, ti.layer)
+					}
+				}
+				if !(p > 0) {
+					continue
+				}
+				f, _ := clampDepthFactor(math.Exp(knots[k].logRho) * knots[k].measured / p)
+				knots[k].logRho = math.Log(f)
+			}
 		}
-		if f > 4.0 {
-			f = 4.0
+		profiles[fam] = knots
+		for _, k := range knots {
+			b := buckets[k.bucket]
+			var p float64
+			for _, ti := range tensors {
+				if ti.family == fam && inBucket(ti.layer, b) {
+					p += ti.pred
+				}
+			}
+			// Snap knots the guard bound (exp∘log round-off) onto the bound.
+			f, clamped := math.Exp(k.logRho), false
+			switch {
+			case f <= DepthFactorMin*(1+1e-9):
+				f, clamped = DepthFactorMin, true
+			case f >= DepthFactorMax*(1-1e-9):
+				f, clamped = DepthFactorMax, true
+			}
+			dm.Buckets = append(dm.Buckets, DepthBucket{
+				Family: fam, First: b[0], Last: b[1],
+				MeasuredKLD: k.measured, PredictedKLD: p, Factor: f, Clamped: clamped,
+			})
 		}
-		dm.Buckets = append(dm.Buckets, DepthBucket{
-			First: b[0], Last: b[1],
-			MeasuredKLD: mb, PredictedKLD: pb, Factor: f,
-		})
 	}
 	if len(dm.Buckets) == 0 {
 		return nil
 	}
-	// share_t = KLD_r · E_t · ρ_{b(t)} / Z_r.
-	bucketFactor := func(layer int) float64 {
-		for _, b := range dm.Buckets {
-			if layer >= b.First && layer <= b.Last {
-				return b.Factor
-			}
+	// share_t = KLD_r · E_t · ρ_{family(t)}(l_t) / Z_r.
+	rho := func(ti tinfo) float64 {
+		if ti.layer < 0 {
+			return 1
 		}
-		return 1
+		knots, ok := profiles[ti.family]
+		if !ok {
+			return 1
+		}
+		return interpolateKnots(knots, ti.layer)
 	}
 	zr := map[string]float64{}
 	for _, ti := range tensors {
-		rho := bucketFactor(LayerIndex(ti.name))
-		zr[ti.role] += float64(ti.elems) * rho
+		zr[ti.role] += float64(ti.elems) * rho(ti)
 	}
 	for _, ti := range tensors {
 		r := sens[ti.role]
@@ -402,8 +735,45 @@ func ComputeDepthModel(bank *core.TensorBank, buckets [][2]int,
 		if !(z > 0) {
 			z = 1
 		}
-		rho := bucketFactor(LayerIndex(ti.name))
-		dm.Shares[ti.name] = r.KLD * float64(ti.elems) * rho / z
+		dm.Shares[ti.name] = r.KLD * float64(ti.elems) * rho(ti) / z
 	}
 	return dm
+}
+
+// Scaled returns a copy of the model whose per-role KLD (both probe rungs)
+// and depth shares are multiplied by lambda[role]; roles absent from lambda
+// take def. Refinement uses it to fold in-context corrections (measured vs
+// predicted marginal KLD inside the real mix) into the solver's objective.
+func (s *Sensitivity) Scaled(lambda map[string]float64, def float64) *Sensitivity {
+	if s == nil {
+		return nil
+	}
+	scale := func(role string) float64 {
+		if v, ok := lambda[role]; ok && v > 0 && !math.IsInf(v, 0) {
+			return v
+		}
+		return def
+	}
+	out := &Sensitivity{Background: s.Background, Roles: make(map[string]RoleSensitivity, len(s.Roles))}
+	out.Pinned = append(out.Pinned, s.Pinned...)
+	for k, r := range s.Roles {
+		f := scale(k)
+		r.KLD *= f
+		r.KLD2 *= f
+		r.Tensors = append([]string(nil), r.Tensors...)
+		out.Roles[k] = r
+	}
+	if s.Depth != nil {
+		d := &DepthModel{Buckets: append([]DepthBucket(nil), s.Depth.Buckets...), Shares: make(map[string]float64, len(s.Depth.Shares))}
+		for name, v := range s.Depth.Shares {
+			role, ok := s.RoleOf(name)
+			if !ok {
+				d.Shares[name] = v
+				continue
+			}
+			d.Shares[name] = v * scale(role)
+		}
+		out.Depth = d
+	}
+	return out
 }

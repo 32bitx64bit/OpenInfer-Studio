@@ -94,7 +94,7 @@ func TestStageRangeAndOverallETA(t *testing.T) {
 	searchStart, searchEnd := stageRange(j, "search")
 	finalStart, finalEnd := stageRange(j, "finalize")
 	if anchorStart != 0.10 || anchorEnd != 0.15 || solveStart != 0.15 || solveEnd != 0.35 ||
-		searchStart != 0.92 || searchEnd != 0.93 || finalStart != 0.93 || finalEnd != 1 {
+		searchStart != 0.85 || searchEnd != 0.93 || finalStart != 0.93 || finalEnd != 1 {
 		t.Fatalf("quantlab stage ranges = anchor %v..%v solve %v..%v search %v..%v finalize %v..%v",
 			anchorStart, anchorEnd, solveStart, solveEnd, searchStart, searchEnd, finalStart, finalEnd)
 	}
@@ -110,7 +110,7 @@ func TestStageTextQuantlabLabels(t *testing.T) {
 		{KindAdaptiveQuantize, "solve", "Solving bit allocation"},
 		{KindAdaptiveQuantize, "quantize", "Quantizing anchors"},
 		{KindAdaptiveQuantize, "validate", "Validating against source (KLD)"},
-		{KindAdaptiveQuantize, "search", "Preparing output"},
+		{KindAdaptiveQuantize, "search", "Refining bit allocation"},
 		{KindAdaptiveQuantize, "finalize", "Publishing model"},
 		{KindQuantize, "quantize", "Quantizing weights"},
 		{"", "", "Running"},

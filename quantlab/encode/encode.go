@@ -81,11 +81,12 @@ func WriteAnchor(srcPath, dstPath string, opt Options) error {
 		}
 		imp := importance(opt.Imatrix, ti.Name, len(vals), ne0)
 		if opt.GPTQ {
-			sk := opt.Sketches[ne0]
-			if sk == nil {
-				sk = profile.MakeSketches(ne0, 32, imp[:min(ne0, len(imp))], 1)
-			}
-			gptqCompensate(vals, ne0, sk, imp, d)
+			// Only measured activation sketches carry the cross-channel
+			// correlation GPTQ redistributes error along. Synthetic
+			// Gaussians drawn from the diagonal imatrix have pure-noise
+			// off-diagonals, so without real sketches compensation stays
+			// diagonal-only (gptqCompensate's nil-sketch path).
+			gptqCompensate(vals, ne0, opt.Sketches[ne0], imp, d)
 		}
 		packed, _, err := qtype.PackOpts(d, vals, imp, qtype.PackOptions{
 			Viterbi: opt.Viterbi,
@@ -134,14 +135,18 @@ func importance(im map[string]profile.ImatrixStats, name string, n, ne0 int) []f
 		}
 		st, ok = im[alt]
 	}
-	if !ok || len(st.Values) == 0 {
+	if !ok || len(st.Values) == 0 || ne0 <= 0 {
 		return out
 	}
-	for i := 0; i < n; i++ {
-		out[i] = st.Values[i%len(st.Values)]
-		if out[i] <= 0 {
-			out[i] = 1e-6
+	exp, ok := profile.ExpandImportance(st.Values, uint64(ne0), uint64(n))
+	if !ok {
+		return out
+	}
+	for i, v := range exp {
+		if v <= 0 {
+			v = 1e-6
 		}
+		out[i] = v
 	}
 	return out
 }

@@ -202,9 +202,11 @@ func stageRange(j *Job, stage string) (float64, float64) {
 		case "quantize":
 			return scale(0.35, 0.65)
 		case "validate":
-			return scale(0.65, 0.92)
+			return scale(0.65, 0.85)
 		case "search":
-			return scale(0.92, 0.93)
+			// In-context refinement: a few holdout KLD evaluations and,
+			// when a re-solve is accepted, one more assembly + scoring.
+			return scale(0.85, 0.93)
 		case "finalize":
 			return scale(0.93, 1.0)
 		case "quantize_projector":
@@ -271,7 +273,7 @@ func StageText(kind, stage string) string {
 	case "evaluate", "validate":
 		return "Validating against source (KLD)"
 	case "search":
-		return "Preparing output"
+		return "Refining bit allocation"
 	case "emit", "finalize":
 		return "Publishing model"
 	case "quantize":

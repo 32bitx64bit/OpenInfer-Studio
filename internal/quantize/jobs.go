@@ -436,7 +436,8 @@ func (m *Manager) Start(req Request) (*Job, error) {
 	if (req.Kind == KindIMatrix || req.GenerateIMatrix || req.Kind == KindCombineIMatrix) && !tools.IMatrix.Present {
 		return nil, fmt.Errorf("runtime %s has no llama-imatrix next to llama-server", rt.ID)
 	}
-	if src != nil && !HighPrecision(src.Quantization) && (req.Kind == KindQuantize || req.Kind == KindAdaptiveQuantize) {
+	nativeDynamic := req.Kind == KindAdaptiveQuantize && src != nil && DynamicKeepsNative(src.Quantization)
+	if src != nil && !HighPrecision(src.Quantization) && !nativeDynamic && (req.Kind == KindQuantize || req.Kind == KindAdaptiveQuantize) {
 		if !req.AllowRequantize || !req.AcknowledgeRequantize {
 			return nil, fmt.Errorf("source is already quantized (%s); set allow_requantize and acknowledge_requantize to continue", src.Quantization)
 		}

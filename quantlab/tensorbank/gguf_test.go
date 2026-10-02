@@ -463,7 +463,7 @@ func TestGGMLTypeMappingRoundTrip(t *testing.T) {
 		18: core.DTypeIQ3_XXS, 19: core.DTypeIQ1_S, 20: core.DTypeIQ4_NL, 21: core.DTypeIQ3_S,
 		22: core.DTypeIQ2_S, 23: core.DTypeIQ4_XS, 24: core.DTypeI8, 25: core.DTypeI16,
 		26: core.DTypeI32, 27: core.DTypeI64, 28: core.DTypeF64, 29: core.DTypeIQ1_M,
-		30: core.DTypeBF16,
+		30: core.DTypeBF16, 39: core.DTypeMXFP4,
 	}
 	if len(ggmlToDType) != len(want) || len(dtypeToGGML) != len(want) {
 		t.Fatalf("GGML mapping count = forward %d reverse %d, want %d", len(dtypeToGGML), len(ggmlToDType), len(want))

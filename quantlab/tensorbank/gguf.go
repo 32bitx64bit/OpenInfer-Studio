@@ -143,6 +143,7 @@ var dtypeToGGML = map[core.DType]uint32{
 	core.DTypeF64:     28,
 	core.DTypeIQ1_M:   29,
 	core.DTypeBF16:    30,
+	core.DTypeMXFP4:   39,
 }
 
 var ggmlToDType = map[uint32]core.DType{
@@ -175,6 +176,7 @@ var ggmlToDType = map[uint32]core.DType{
 	28: core.DTypeF64,
 	29: core.DTypeIQ1_M,
 	30: core.DTypeBF16,
+	39: core.DTypeMXFP4,
 }
 
 // GGMLTypeID maps a raw core dtype to its GGML type ID. Recipe labels are

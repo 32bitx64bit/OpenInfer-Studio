@@ -78,6 +78,13 @@ const (
 	DTypeIQ1_M DType = "IQ1_M"
 )
 
+// DTypeMXFP4 is ggml's OCP microscaling FP4 (32-element blocks, one E8M0
+// scale byte + 16 bytes of E2M1 nibbles). It is the native training format
+// of MXFP4 models (gpt-oss experts): such tensors are kept as stored, which
+// is lossless against the source, and never offered as a requantization
+// target (not in QuantDTypes).
+const DTypeMXFP4 DType = "MXFP4"
+
 // Deprecated aliases retained for packages written against the initial
 // scaffold. New code uses the explicit underscore-suffixed constants.
 const (
@@ -105,7 +112,7 @@ func (d DType) Valid() bool {
 		DTypeQ4_0, DTypeQ4_1, DTypeQ5_0, DTypeQ5_1, DTypeQ8_0, DTypeQ8_1,
 		DTypeQ2_K, DTypeQ3_K, DTypeQ4_K_T, DTypeQ5_K_T, DTypeQ6_K, DTypeQ8_K,
 		DTypeIQ2_XXS, DTypeIQ2_XS, DTypeIQ3_XXS, DTypeIQ1_S, DTypeIQ4_NL,
-		DTypeIQ3_S, DTypeIQ2_S, DTypeIQ4_XS, DTypeIQ1_M:
+		DTypeIQ3_S, DTypeIQ2_S, DTypeIQ4_XS, DTypeIQ1_M, DTypeMXFP4:
 		return true
 	}
 	return d.IsRecipeLabel()
@@ -124,7 +131,7 @@ func (d DType) IsQuant() bool {
 	case DTypeQ4_0, DTypeQ4_1, DTypeQ5_0, DTypeQ5_1, DTypeQ8_0, DTypeQ8_1,
 		DTypeQ2_K, DTypeQ3_K, DTypeQ4_K_T, DTypeQ5_K_T, DTypeQ6_K, DTypeQ8_K,
 		DTypeIQ2_XXS, DTypeIQ2_XS, DTypeIQ3_XXS, DTypeIQ1_S, DTypeIQ4_NL,
-		DTypeIQ3_S, DTypeIQ2_S, DTypeIQ4_XS, DTypeIQ1_M:
+		DTypeIQ3_S, DTypeIQ2_S, DTypeIQ4_XS, DTypeIQ1_M, DTypeMXFP4:
 		return true
 	}
 	return d.IsRecipeLabel()
@@ -238,6 +245,7 @@ var geometryTable = map[DType]BlockGeometry{
 	DTypeIQ2_S:   {256, 82},
 	DTypeIQ1_S:   {256, 50},
 	DTypeIQ1_M:   {256, 56},
+	DTypeMXFP4:   {32, 17},
 }
 
 // Geometry returns the block geometry of d, resolving recipe labels to their

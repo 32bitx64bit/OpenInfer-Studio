@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"quantlab/anchor"
 	"quantlab/core"
+	"quantlab/orchestrate"
 	"quantlab/profile"
 	"quantlab/qtype"
 	"quantlab/state"
@@ -128,9 +130,19 @@ func TestSolveCalibratesSensitivityWithProbes(t *testing.T) {
 	if st.Probes["attn_q"].KLD <= st.Probes["ffn_down"].KLD {
 		t.Fatalf("attn_q probe %v should exceed ffn_down probe %v", st.Probes["attn_q"].KLD, st.Probes["ffn_down"].KLD)
 	}
-	// Background + 2 probes = 3 KLD evaluations, plus one baseline capture.
-	if got := len(f.runner.evaluated); got != 3 {
-		t.Fatalf("KLD evaluations = %d (%v), want 3", got, f.runner.evaluated)
+	// Two-rung fit: each role also has a second probe at a distinct rung.
+	if len(st.Probes2) != 2 {
+		t.Fatalf("second-rung probes = %+v", st.Probes2)
+	}
+	for role, p := range st.Probes2 {
+		if p.ProbeDType == st.Probes[role].ProbeDType {
+			t.Errorf("role %s second rung %s repeats the first", role, p.ProbeDType)
+		}
+	}
+	// Background + 2 roles × 2 rungs = 5 KLD evaluations, plus one
+	// baseline capture.
+	if got := len(f.runner.evaluated); got != 5 {
+		t.Fatalf("KLD evaluations = %d (%v), want 5", got, f.runner.evaluated)
 	}
 	for _, p := range f.runner.evaluated {
 		if _, err := os.Stat(p); err == nil {
@@ -273,5 +285,70 @@ func TestProbesUseSearchCorpus(t *testing.T) {
 	}
 	if !foundSearch {
 		t.Errorf("no evaluation used the search corpus %s; corpora=%v", searchPath, f.runner.corpora)
+	}
+}
+
+func TestPlanDepthProbesSplitsFamilies(t *testing.T) {
+	probe := map[string]core.DType{
+		"blk.0.attn_q.weight": core.DTypeQ3_K,
+		"blk.0.ffn_up.weight": core.DTypeQ3_K,
+		"blk.5.attn_q.weight": core.DTypeQ3_K,
+		"blk.9.ffn_up.weight": core.DTypeQ4_0,
+	}
+	buckets := profile.DepthBuckets(10)
+	split := planDepthProbes(buckets, probe, true)
+	combined := planDepthProbes(buckets, probe, false)
+	keys := func(ps []depthProbe) map[string]int {
+		m := map[string]int{}
+		for _, p := range ps {
+			m[p.key] = len(p.dtypes)
+		}
+		return m
+	}
+	ks, kc := keys(split), keys(combined)
+	want := map[string]int{"depth-mix-0-0": 1, "depth-ffn-0-0": 1, "depth-mix-5-6": 1, "depth-ffn-9-9": 1}
+	if len(ks) != len(want) {
+		t.Fatalf("split probes = %v, want %v", ks, want)
+	}
+	for k, n := range want {
+		if ks[k] != n {
+			t.Errorf("split probe %s = %d tensors, want %d (all %v)", k, ks[k], n, ks)
+		}
+	}
+	if kc["depth-0-0"] != 2 || len(kc) != 3 {
+		t.Errorf("combined probes = %v", kc)
+	}
+}
+
+func TestNoTwoRungKeepsSingleProbe(t *testing.T) {
+	f := newFixture(t, 230000)
+	finiteF16Payloads(t, f.src)
+	f.runner.kldForModel = probeKLD(t)
+	r := f.planEffort("sens1", "profiled", nil)
+	e := f.engine(r)
+	e.Extra.NoTwoRung = true
+	e.StageLimit = 3
+	if err := e.Resume(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(f.runner.evaluated); got != 3 {
+		t.Fatalf("KLD evaluations = %d (%v), want 3 without the second rung", got, f.runner.evaluated)
+	}
+}
+
+func TestProbeValueAddsTail(t *testing.T) {
+	e := &Engine{}
+	m := orchestrate.EvalMetrics{MeanKLD: 0.02, HasMeanKLD: true, P99KLD: 0.3, HasP99: true}
+	if got := e.probeValue(m); math.Abs(got-(0.02+probeTailWeight*0.3)) > 1e-15 {
+		t.Errorf("probeValue = %v", got)
+	}
+	e.Extra.NoTailProbe = true
+	if got := e.probeValue(m); got != 0.02 {
+		t.Errorf("probeValue without tail = %v, want mean", got)
+	}
+	e.Extra.NoTailProbe = false
+	m.HasP99 = false
+	if got := e.probeValue(m); got != 0.02 {
+		t.Errorf("probeValue without a reported p99 = %v, want mean", got)
 	}
 }

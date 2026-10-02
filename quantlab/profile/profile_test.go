@@ -712,7 +712,7 @@ func TestIQ4XSNotOfferedOnPartialSuperblock(t *testing.T) {
 	if err := sens.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	opts, err = enumerateCalibrated(td, cands, &anchor.Set{}, est, sens, row)
+	opts, err = enumerateCalibrated(td, cands, &anchor.Set{}, est, sens, row, true)
 	if err != nil {
 		t.Fatal(err)
 	}

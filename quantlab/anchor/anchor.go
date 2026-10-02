@@ -300,9 +300,11 @@ func Derive(bank *core.TensorBank, explicit []core.Anchor, pol Policy) (*Set, er
 		}
 	}
 	embedFloor := pol.EmbeddingFloor
-	embedReason := "token embeddings"
+	embedReason := ReasonTokenEmbeddings
 	if !hasOutput && pol.OutputFloor != "" {
-		if embedFloor == "" || Rank(pol.OutputFloor) < Rank(embedFloor) {
+		// <=: an equal output floor still makes this the output head's
+		// anchor, so RelaxEmbeddingFloor can never touch a tied table.
+		if embedFloor == "" || Rank(pol.OutputFloor) <= Rank(embedFloor) {
 			embedFloor = pol.OutputFloor
 			embedReason = "tied token embeddings (output head)"
 		}
@@ -311,6 +313,8 @@ func Derive(bank *core.TensorBank, explicit []core.Anchor, pol Policy) (*Set, er
 	for _, t := range bank.Tensors {
 		role := classify(t.Name, linear)
 		switch {
+		case t.DType == core.DTypeMXFP4:
+			preserved = append(preserved, t.Name)
 		case keepFloat(role):
 			preserved = append(preserved, t.Name)
 		case role == roleAttention, role == roleLinearAttn && t.Quantizable():
@@ -410,6 +414,36 @@ func Rank(d core.DType) int {
 	return len(fidelityOrder)
 }
 
+// ReasonTokenEmbeddings marks the policy hard floor on an untied token
+// embedding table (tied tables carry the output-head reason instead).
+const ReasonTokenEmbeddings = "token embeddings"
+
+// RelaxEmbeddingFloor lowers the policy token-embedding floor on tensor
+// name to d when d is cheaper (ranks after) the current floor. Only the
+// untied-embedding policy anchor is touched: output-head, tied-embedding,
+// router and explicit floors never move. It reports whether a floor
+// changed.
+func (s *Set) RelaxEmbeddingFloor(name string, d core.DType, reason string) bool {
+	if s == nil || !d.IsQuant() {
+		return false
+	}
+	changed := false
+	for i := range s.Hard {
+		a := &s.Hard[i]
+		if a.Name != name || a.Kind != core.AnchorExplicit || a.Reason != ReasonTokenEmbeddings {
+			continue
+		}
+		if Rank(d) > Rank(a.MinDType) {
+			a.MinDType = d
+			if reason != "" {
+				a.Reason = ReasonTokenEmbeddings + " (" + reason + ")"
+			}
+			changed = true
+		}
+	}
+	return changed
+}
+
 // Floor returns the highest minimum dtype any hard anchor requires for the
 // tensor, and whether any hard anchor matched.
 func (s *Set) Floor(tensorName string) (core.DType, bool) {
@@ -433,6 +467,11 @@ func (s *Set) Floor(tensorName string) (core.DType, bool) {
 // stay in their current float storage; no anchor or prior applies.
 func (s *Set) Preserved(t core.TensorDesc) bool {
 	if !t.Quantizable() {
+		return true
+	}
+	// MXFP4 is the native (training) storage of MXFP4 models: keeping it is
+	// lossless against the source, requantizing it never is.
+	if t.DType == core.DTypeMXFP4 {
 		return true
 	}
 	for _, name := range s.PreservedNames {

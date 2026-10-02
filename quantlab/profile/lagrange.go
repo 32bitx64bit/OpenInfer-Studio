@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 
 	"quantlab/anchor"
 	"quantlab/core"
@@ -41,7 +42,7 @@ func solveCalibrated(req Request, set *anchor.Set, est *FallbackEstimator, cands
 	var minTotal, maxTotal uint64
 	var constrained []string
 	for i, t := range req.Bank.Tensors {
-		opts, err := enumerateCalibrated(t, cands, set, est, sens, req.ExactLoss[t.Name])
+		opts, err := enumerateCalibrated(t, cands, set, est, sens, req.ExactLoss[t.Name], !req.PinUnprobed)
 		if err != nil {
 			return nil, err
 		}
@@ -69,10 +70,11 @@ func solveCalibrated(req Request, set *anchor.Set, est *FallbackEstimator, cands
 
 // enumerateCalibrated is EnumerateOptions for the calibrated objective:
 // same legality rules (geometry, block alignment, imatrix requirement,
-// structural preservation), losses from Sensitivity.Loss, floors only for
-// unprobed roles, and unprobed quantizable tensors pinned to one option.
+// structural preservation), losses from Sensitivity.Loss, and unprobed
+// quantizable tensors priced from their family's measured rate (pricePins)
+// or pinned to one option.
 func enumerateCalibrated(t core.TensorDesc, cands []core.DType, set *anchor.Set,
-	est *FallbackEstimator, sens *Sensitivity, row map[core.DType]float64) ([]ScoredOption, error) {
+	est *FallbackEstimator, sens *Sensitivity, row map[core.DType]float64, pricePins bool) ([]ScoredOption, error) {
 	if err := t.Validate(); err != nil {
 		return nil, err
 	}
@@ -126,11 +128,31 @@ func enumerateCalibrated(t core.TensorDesc, cands []core.DType, set *anchor.Set,
 		// weights) is lossless at every rung: take the cheapest. Anything
 		// else (non-finite or missing entries) is pinned like an unprobed
 		// tensor below.
-		if ref := referenceLoss(t, sens.Roles[RoleKey(t.Name)].ProbeDType, row); ref == 0 && finiteRow(row) {
+		key, _ := sens.RoleOf(t.Name)
+		if ref := referenceLoss(t, sens.Roles[key].ProbeDType, row); ref == 0 && finiteRow(row) {
 			for _, o := range legal {
 				opts = append(opts, ScoredOption{TensorOption: o, Evidence: EvidenceMeasured, Confidence: 1})
 			}
 			return ParetoPrune(opts), nil
+		}
+	}
+	// Unprobed but priceable: losses from the family's most sensitive
+	// measured KLD-per-wSSE rate. Routers stay pinned: they are tiny, and a
+	// misrouted token costs far more than its wSSE says.
+	if pricePins && !sens.Calibrated(t.Name) && !isRouter(t.Name) && finiteRow(row) {
+		if rate, ok := sens.PinnedRate(t.Name); ok {
+			opts := make([]ScoredOption, 0, len(legal))
+			for _, o := range legal {
+				w, ok := row[o.Target.BaseTensorType()]
+				if !ok || w < 0 {
+					continue
+				}
+				o.PriorLoss = rate * w
+				opts = append(opts, ScoredOption{TensorOption: o, Loss: rate * w, Evidence: EvidenceHeuristic, Confidence: 1})
+			}
+			if len(opts) > 0 {
+				return ParetoPrune(opts), nil
+			}
 		}
 	}
 	// Unprobed (or unusable row): keep the highest-fidelity legal rung.
@@ -271,4 +293,10 @@ func lagrangianAllocate(states []solverState, bank *core.TensorBank, budget uint
 		states[best].cur++
 		used += bestInc
 	}
+}
+
+// isRouter reports MoE router / expert-gate input tensors.
+func isRouter(name string) bool {
+	n := strings.ToLower(name)
+	return strings.Contains(n, "gate_inp") || strings.Contains(n, "router")
 }

@@ -213,6 +213,8 @@ type EvalMetrics struct {
 	HasMeanKLD bool    `json:"hasMeanKLD"`
 	P95KLD     float64 `json:"p95KLD,omitempty"`
 	HasP95     bool    `json:"hasP95"`
+	P99KLD     float64 `json:"p99KLD,omitempty"`
+	HasP99     bool    `json:"hasP99"`
 	MaxKLD     float64 `json:"maxKLD,omitempty"`
 	HasMax     bool    `json:"hasMax"`
 	HasKLD     bool    `json:"hasKLD"`
@@ -236,6 +238,7 @@ var (
 	pplLegacyRe  = regexp.MustCompile(`(?i)(?:perplexity|ppl)\s*[=:]\s*([0-9]+(?:\.[0-9]+)?)`)
 	kldMeanRe    = regexp.MustCompile(`(?i)\bmean\s+KLD\s*[:=]\s*([0-9.eE+-]+)`)
 	kldP95Re     = regexp.MustCompile(`(?i)(?:\bp95\s+KLD|\b95(?:\.0+)?%\s+KLD)\s*[:=]\s*([0-9.eE+-]+)`)
+	kldP99Re     = regexp.MustCompile(`(?i)(?:\bp99\s+KLD|\b99(?:\.0+)?%\s+KLD)\s*[:=]\s*([0-9.eE+-]+)`)
 	kldMaxRe     = regexp.MustCompile(`(?i)\bmax(?:imum)?\s+KLD\s*[:=]\s*([0-9.eE+-]+)`)
 	rmsDeltaPRe  = regexp.MustCompile(`(?i)rms\s*(?:delta|Δ)\s*p\s*[:=]\s*([0-9.eE+-]+)`)
 	// Corpus-wide "Same top p: 97.54%" / "Same top: 97.54%" (optional ±).
@@ -286,6 +289,11 @@ func ParseEvalMetrics(output string) (EvalMetrics, error) {
 	if s := kldP95Re.FindStringSubmatch(output); s != nil {
 		if v, ok := parseFloat(s[1]); ok {
 			m.P95KLD, m.HasP95, m.HasKLD = v, true, true
+		}
+	}
+	if s := kldP99Re.FindStringSubmatch(output); s != nil {
+		if v, ok := parseFloat(s[1]); ok {
+			m.P99KLD, m.HasP99, m.HasKLD = v, true, true
 		}
 	}
 	if s := kldMaxRe.FindStringSubmatch(output); s != nil {

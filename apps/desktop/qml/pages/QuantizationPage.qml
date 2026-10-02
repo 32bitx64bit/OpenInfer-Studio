@@ -175,7 +175,7 @@ Item {
             "anchor": "Planning anchors",
             "solve": "Solving bit allocation",
             "validate": "Validating against source (KLD)",
-            "search": "Preparing output",
+            "search": "Refining bit allocation",
             "finalize": "Publishing model",
             "quantize_projector": "Quantizing projector",
             "quantize_draft": "Quantizing draft model",

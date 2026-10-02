@@ -17,10 +17,22 @@ import (
 // candidate against those logits, recording measurements with full
 // provenance. Already-recorded measurements are never repeated on resume.
 func (e *Engine) stageEvaluate(ctx context.Context) error {
+	artifact, err := e.evaluateProfile(ctx)
+	if err != nil {
+		return err
+	}
+	return e.complete(core.StageEvaluate, artifact)
+}
+
+// evaluateProfile measures BestProfileID's candidate artifact on the
+// evaluation corpus (and per-domain holdouts) unless already recorded, and
+// returns the measurements artifact path ("" in dry-run). Refinement calls
+// it again after accepting a new profile.
+func (e *Engine) evaluateProfile(ctx context.Context) (string, error) {
 	cfg := e.Run.Config
 	caps, err := e.caps(ctx, orchestrate.ToolPerplexity)
 	if err != nil {
-		return err
+		return "", err
 	}
 	evalCfg := orchestrate.EvalConfig{
 		CorpusPath: cfg.EvalCorpus,
@@ -34,16 +46,16 @@ func (e *Engine) stageEvaluate(ctx context.Context) error {
 	if e.DryRun {
 		baseIv, err := orchestrate.PlanBaselineEval(evalCfg, cfg.SourcePath, logits, caps, cfg.Tools.LlamaPerplexity)
 		if err != nil {
-			return err
+			return "", err
 		}
 		e.printf("plan: %s %s\n", baseIv.Path, argvString(baseIv.Argv))
 		cand := filepath.Join(e.workDir(), "candidate.gguf")
 		candIv, err := orchestrate.PlanCandidateEval(evalCfg, cand, logits, caps, cfg.Tools.LlamaPerplexity)
 		if err != nil {
-			return err
+			return "", err
 		}
 		e.printf("plan: %s %s\n", candIv.Path, argvString(candIv.Argv))
-		return e.complete(core.StageEvaluate, "")
+		return "", nil
 	}
 
 	_, hasBaseline := e.measurementForEval("baseline", core.MetricPerplexity, evalCfg, caps)
@@ -51,10 +63,10 @@ func (e *Engine) stageEvaluate(ctx context.Context) error {
 		!e.hasAnyMeasurementForEval(core.MetricKLD, evalCfg, caps) {
 		m, prov, err := e.captureBaselineLogits(ctx, evalCfg, caps, logits, "baseline eval")
 		if err != nil {
-			return err
+			return "", err
 		}
 		if !m.HasPPL {
-			return fmt.Errorf("baseline eval: no perplexity in tool output")
+			return "", fmt.Errorf("baseline eval: no perplexity in tool output")
 		}
 		meas := core.Measurement{
 			ProfileID: "baseline",
@@ -64,30 +76,30 @@ func (e *Engine) stageEvaluate(ctx context.Context) error {
 			Prov:      prov,
 		}
 		if err := e.recordMeasurement(meas); err != nil {
-			return err
+			return "", err
 		}
 		e.printf("  baseline: ppl %.4f\n", m.Perplexity)
 	}
 
 	profID := e.Run.BestProfileID
 	if profID == "" {
-		return fmt.Errorf("pipeline: no candidate profile recorded")
+		return "", fmt.Errorf("pipeline: no candidate profile recorded")
 	}
 	if _, ok := e.measurementForEval(profID, core.MetricKLD, evalCfg, caps); !ok {
 		cand := e.Run.Artifacts[core.StageQuantize]
 		if cand == "" {
-			return fmt.Errorf("pipeline: no candidate artifact from quantize stage")
+			return "", fmt.Errorf("pipeline: no candidate artifact from quantize stage")
 		}
 		m, err := e.evalModel(ctx, evalCfg, caps, cand, logits)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if !m.HasMeanKLD {
-			return fmt.Errorf("pipeline: candidate %s produced no KLD", profID)
+			return "", fmt.Errorf("pipeline: candidate %s produced no KLD", profID)
 		}
 		prov, err := e.newEvalProvenance(evalCfg, caps)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if err := e.recordMeasurement(core.Measurement{
 			ProfileID: profID,
@@ -97,7 +109,7 @@ func (e *Engine) stageEvaluate(ctx context.Context) error {
 			Delta:     m.MeanKLD,
 			Prov:      prov,
 		}); err != nil {
-			return err
+			return "", err
 		}
 		// p95 KLD is a first-class gated metric: absolute divergence of
 		// the candidate vs the source baseline (Baseline = 0).
@@ -110,7 +122,7 @@ func (e *Engine) stageEvaluate(ctx context.Context) error {
 				Delta:     m.P95KLD,
 				Prov:      prov,
 			}); err != nil {
-				return err
+				return "", err
 			}
 		}
 		for _, aux := range []struct {
@@ -128,7 +140,7 @@ func (e *Engine) stageEvaluate(ctx context.Context) error {
 					ProfileID: profID, Metric: aux.metric, Value: aux.value,
 					Baseline: 0, Delta: aux.value, Prov: prov,
 				}); err != nil {
-					return err
+					return "", err
 				}
 			}
 		}
@@ -146,7 +158,7 @@ func (e *Engine) stageEvaluate(ctx context.Context) error {
 				Delta:     m.Perplexity - basePPL,
 				Prov:      prov,
 			}); err != nil {
-				return err
+				return "", err
 			}
 		}
 		e.recordAux(profID, m)
@@ -159,7 +171,7 @@ func (e *Engine) stageEvaluate(ctx context.Context) error {
 	if !e.DryRun {
 		domains, err := e.evalableDomainEvalPaths()
 		if err != nil {
-			return err
+			return "", err
 		}
 		e.logSkippedDomainHoldouts(domains)
 		names := make([]string, 0, len(domains))
@@ -183,15 +195,15 @@ func (e *Engine) stageEvaluate(ctx context.Context) error {
 						e.printf("  domain %s: skip holdout (%v)\n", dom, err)
 						continue
 					}
-					return err
+					return "", err
 				}
 				if !metrics.HasPPL {
-					return fmt.Errorf("baseline eval (%s): no perplexity in tool output", dom)
+					return "", fmt.Errorf("baseline eval (%s): no perplexity in tool output", dom)
 				}
 			}
 			cand := e.Run.Artifacts[core.StageQuantize]
 			if cand == "" {
-				return fmt.Errorf("pipeline: no candidate artifact from quantize stage")
+				return "", fmt.Errorf("pipeline: no candidate artifact from quantize stage")
 			}
 			m, err := e.evalModel(ctx, evalCfgDom, caps, cand, logits)
 			if err != nil {
@@ -199,14 +211,14 @@ func (e *Engine) stageEvaluate(ctx context.Context) error {
 					e.printf("  domain %s: skip holdout (%v)\n", dom, err)
 					continue
 				}
-				return err
+				return "", err
 			}
 			if !m.HasMeanKLD {
-				return fmt.Errorf("pipeline: domain %s eval produced no KLD", dom)
+				return "", fmt.Errorf("pipeline: domain %s eval produced no KLD", dom)
 			}
 			prov, err := e.newEvalProvenance(evalCfgDom, caps)
 			if err != nil {
-				return err
+				return "", err
 			}
 			if err := e.recordMeasurement(core.Measurement{
 				ProfileID: profID,
@@ -216,10 +228,10 @@ func (e *Engine) stageEvaluate(ctx context.Context) error {
 				Delta:     m.MeanKLD,
 				Prov:      prov,
 			}); err != nil {
-				return err
+				return "", err
 			}
 			if err := e.Store.Save(e.Run); err != nil {
-				return fmt.Errorf("pipeline: checkpoint domain %s evaluation: %w", dom, err)
+				return "", fmt.Errorf("pipeline: checkpoint domain %s evaluation: %w", dom, err)
 			}
 			e.printf("  domain %s: mean KLD %.6f\n", dom, m.MeanKLD)
 		}
@@ -227,9 +239,9 @@ func (e *Engine) stageEvaluate(ctx context.Context) error {
 
 	artifact := filepath.Join(e.workDir(), "measurements.json")
 	if err := e.writeJSON(artifact, e.Run.Measurements); err != nil {
-		return err
+		return "", err
 	}
-	return e.complete(core.StageEvaluate, artifact)
+	return artifact, nil
 }
 
 type logitsCheckpoint struct {

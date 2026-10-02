@@ -64,6 +64,12 @@ type PlanOptions struct {
 	NoSensitivity         bool
 	LegacyExactTable      bool
 	NoDepthProbes         bool
+	NoDepthSplit          bool
+	NoTwoRung             bool
+	NoPricedPins          bool
+	NoEmbedRowFloor       bool
+	NoTailProbe           bool
+	NoRefine              bool
 }
 
 // Plan validates everything, builds calibration corpora when needed, derives
@@ -189,7 +195,11 @@ func Plan(opts PlanOptions) (*state.Run, error) {
 			ctxSize = profile.EvalCtx
 		}
 	}
-	calibCorpus, searchCorpus, evalCorpus, err := prepareCorpora(opts.CalibrationDir, false)
+	// Refinement tunes on a holdout distinct from the evaluation corpus, so
+	// corpora built from raw .txt sources reserve one when it will run. An
+	// existing manifest-based calibration dir is always used verbatim.
+	needSearch := profile.Refine && !opts.NoRefine
+	calibCorpus, searchCorpus, evalCorpus, err := prepareCorpora(opts.CalibrationDir, needSearch)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +261,9 @@ func Plan(opts PlanOptions) (*state.Run, error) {
 		opts.Hadamard || opts.NoHadamard || opts.CSK || opts.NoCSK ||
 		opts.FTI || opts.NoFTI || opts.ProbeKLD || opts.NoProbeKLD ||
 		opts.Sensitivity || opts.NoSensitivity ||
-		opts.LegacyExactTable || opts.NoDepthProbes {
+		opts.LegacyExactTable || opts.NoDepthProbes || opts.NoDepthSplit ||
+		opts.NoTwoRung || opts.NoPricedPins || opts.NoEmbedRowFloor ||
+		opts.NoTailProbe || opts.NoRefine {
 		e := &Engine{Store: store, Run: r, Extra: ExtraConfig{
 			Chunks:                chunks,
 			ExactEstimatorOff:     opts.ExactEstimatorOff,
@@ -270,6 +282,12 @@ func Plan(opts PlanOptions) (*state.Run, error) {
 			NoSensitivity:         opts.NoSensitivity,
 			LegacyExactTable:      opts.LegacyExactTable,
 			NoDepthProbes:         opts.NoDepthProbes,
+			NoDepthSplit:          opts.NoDepthSplit,
+			NoTwoRung:             opts.NoTwoRung,
+			NoPricedPins:          opts.NoPricedPins,
+			NoEmbedRowFloor:       opts.NoEmbedRowFloor,
+			NoTailProbe:           opts.NoTailProbe,
+			NoRefine:              opts.NoRefine,
 		}}
 		if err := e.saveExtra(); err != nil {
 			return nil, fmt.Errorf("pipeline: write extra config: %w", err)
@@ -349,7 +367,16 @@ func prepareCorpora(dir string, needSearch bool) (calib, search, eval string, er
 		cfg.SearchPercent = 10
 	}
 	if _, _, err := calibrate.Build(context.Background(), dir, cfg); err != nil {
-		return "", "", "", fmt.Errorf("pipeline: building calibration corpora: %w", err)
+		if !needSearch {
+			return "", "", "", fmt.Errorf("pipeline: building calibration corpora: %w", err)
+		}
+		// Too few records for a tuning holdout: keep the historical
+		// calibration/evaluation split (refinement then skips).
+		cfg.SearchPercent = 0
+		os.Remove(filepath.Join(dir, "search.txt"))
+		if _, _, err := calibrate.Build(context.Background(), dir, cfg); err != nil {
+			return "", "", "", fmt.Errorf("pipeline: building calibration corpora: %w", err)
+		}
 	}
 	search = filepath.Join(dir, "search.txt")
 	if st, err := os.Stat(search); err != nil || st.IsDir() || st.Size() == 0 {

@@ -1915,3 +1915,16 @@ func TestCopyOrLinkFileFallback(t *testing.T) {
 		t.Fatalf("dest content = %q", data)
 	}
 }
+
+func TestDynamicKeepsNativeMXFP4(t *testing.T) {
+	for _, q := range []string{"MXFP4", "mxfp4_moe", "UD-MXFP4_MOE"} {
+		if !DynamicKeepsNative(q) {
+			t.Errorf("DynamicKeepsNative(%q) = false", q)
+		}
+	}
+	for _, q := range []string{"Q4_K_M", "Q8_0", "IQ2_XS", ""} {
+		if DynamicKeepsNative(q) {
+			t.Errorf("DynamicKeepsNative(%q) = true", q)
+		}
+	}
+}

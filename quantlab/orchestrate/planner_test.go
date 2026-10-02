@@ -895,3 +895,21 @@ func TestPlanQuantizeDequantize(t *testing.T) {
 		t.Fatal("dequantize without AllowRequantize accepted")
 	}
 }
+
+func TestParseEvalMetricsP99(t *testing.T) {
+	out := "Mean    KLD                    :  0.0251 +/- 0.0002\n" +
+		"Maximum KLD                    :  1.2206\n" +
+		"99.9%   KLD                    :  0.7990\n" +
+		"99.0%   KLD                    :  0.2220\n" +
+		"95.0%   KLD                    :  0.1210\n"
+	m, err := ParseEvalMetrics(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.HasP99 || m.P99KLD != 0.2220 {
+		t.Errorf("p99 = %v (has %v), want 0.2220 (never the 99.9%% line)", m.P99KLD, m.HasP99)
+	}
+	if !m.HasP95 || m.P95KLD != 0.1210 {
+		t.Errorf("p95 = %v", m.P95KLD)
+	}
+}

@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"fmt"
 	"math"
 	"testing"
 
@@ -213,7 +214,7 @@ func bruteForceCalibrated(t *testing.T, bank *core.TensorBank, cands []core.DTyp
 	est.BindBank(bank)
 	var fronts [][]ScoredOption
 	for _, td := range bank.Tensors {
-		opts, err := enumerateCalibrated(td, cands, &anchor.Set{}, est, sens, exact[td.Name])
+		opts, err := enumerateCalibrated(td, cands, &anchor.Set{}, est, sens, exact[td.Name], true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -418,10 +419,286 @@ func TestComputeDepthModelShares(t *testing.T) {
 	if s7 < sMid {
 		t.Errorf("layer-7 share %v < mid %v", s7, sMid)
 	}
-	// ρ clamping: measured/predicted = 3.0 for first bucket → clamped to 4.0.
 	for _, b := range dm.Buckets {
-		if b.Factor < 0.25 || b.Factor > 4.0 {
-			t.Errorf("bucket %d-%d factor %v outside [0.25,4]", b.First, b.Last, b.Factor)
+		if b.Factor < DepthFactorMin || b.Factor > DepthFactorMax {
+			t.Errorf("bucket %d-%d factor %v outside [%v,%v]", b.First, b.Last, b.Factor, DepthFactorMin, DepthFactorMax)
 		}
+	}
+}
+
+// depthBank is a 10-layer bank with one attention and one FFN tensor per
+// layer, equal sizes.
+func depthBank() *core.TensorBank {
+	bank := &core.TensorBank{ModelID: "m"}
+	for l := 0; l < 10; l++ {
+		for _, stem := range []string{"attn_q", "ffn_up"} {
+			bank.Tensors = append(bank.Tensors, core.TensorDesc{
+				Name: fmt.Sprintf("blk.%d.%s.weight", l, stem), DType: core.DTypeF16,
+				Shape: []uint64{256, 16}, Elements: 4096,
+			})
+		}
+	}
+	return bank
+}
+
+func TestDepthFamily(t *testing.T) {
+	cases := map[string]string{
+		"blk.3.attn_q.weight":        DepthFamilyMix,
+		"blk.3.attn_output.weight":   DepthFamilyMix,
+		"blk.3.ssm_out.weight":       DepthFamilyMix,
+		"blk.3.ffn_down.weight":      DepthFamilyFFN,
+		"blk.3.ffn_gate_exps.weight": DepthFamilyFFN,
+		"blk.3.ffn_up_shexp.weight":  DepthFamilyFFN,
+		"model.layers.3.mlp.up_proj": DepthFamilyFFN,
+	}
+	for name, want := range cases {
+		if got := DepthFamily(name); got != want {
+			t.Errorf("DepthFamily(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestComputeDepthModelInterpolatesAndReproducesBuckets(t *testing.T) {
+	bank := depthBank()
+	sens := map[string]RoleSensitivity{
+		"attn_q": {Role: "attn_q", KLD: 1.0, Elements: 40960, ProbeDType: core.DTypeQ3_K},
+		"ffn_up": {Role: "ffn_up", KLD: 1.0, Elements: 40960, ProbeDType: core.DTypeQ3_K},
+	}
+	buckets := DepthBuckets(10) // {0} {1-2} {3-4} {5-6} {7-8} {9}
+	// Attention is front-loaded, FFN back-loaded: one shared factor per
+	// bucket cannot express both.
+	measured := map[string]float64{}
+	attn := []float64{0.4, 0.4, 0.2, 0.1, 0.1, 0.05}
+	ffn := []float64{0.05, 0.1, 0.1, 0.2, 0.4, 0.4}
+	for i, b := range buckets {
+		measured[DepthKey(DepthFamilyMix, b)] = attn[i]
+		measured[DepthKey(DepthFamilyFFN, b)] = ffn[i]
+	}
+	dm := ComputeDepthModel(bank, buckets, sens, measured, 0)
+	if dm == nil {
+		t.Fatal("nil depth model")
+	}
+	share := func(l int, stem string) float64 { return dm.Shares[fmt.Sprintf("blk.%d.%s.weight", l, stem)] }
+	if !(share(0, "attn_q") > share(9, "attn_q")) || !(share(9, "ffn_up") > share(0, "ffn_up")) {
+		t.Errorf("families not separated: attn0=%v attn9=%v ffn0=%v ffn9=%v",
+			share(0, "attn_q"), share(9, "attn_q"), share(0, "ffn_up"), share(9, "ffn_up"))
+	}
+	// Smooth: within bucket {3-4} the two layers differ (interpolated, not
+	// a step), and the profile is monotone where the knots are.
+	if share(3, "attn_q") == share(4, "attn_q") {
+		t.Error("layers 3 and 4 share a factor; expected interpolation")
+	}
+	// The bucket-total fit may dip a knot to keep a neighbour's average
+	// honest, but the overall trend follows the measurements.
+	if !(share(9, "ffn_up") > share(6, "ffn_up") && share(6, "ffn_up") > share(2, "ffn_up")) {
+		t.Errorf("ffn trend lost: l2=%v l6=%v l9=%v", share(2, "ffn_up"), share(6, "ffn_up"), share(9, "ffn_up"))
+	}
+	// The fit reproduces each bucket's measured/predicted ratio in total:
+	// Σ_{t∈b} pred_t·ρ(l_t) ≈ measured_b, i.e. bucket shares are
+	// proportional to measurements once each role is renormalized.
+	var sumMeasured float64
+	for _, v := range attn {
+		sumMeasured += v
+	}
+	for i, b := range buckets {
+		var got float64
+		for l := b[0]; l <= b[1]; l++ {
+			got += share(l, "attn_q")
+		}
+		want := attn[i] / sumMeasured * 1.0
+		if math.Abs(got-want) > 0.02*want+1e-6 {
+			t.Errorf("attn bucket %v share %.4f, want ≈ %.4f", b, got, want)
+		}
+	}
+	for _, rb := range dm.Buckets {
+		if rb.Family == "" {
+			t.Errorf("family-split buckets must carry their family: %+v", rb)
+		}
+	}
+}
+
+func TestComputeDepthModelCombinedFallback(t *testing.T) {
+	bank := depthBank()
+	sens := map[string]RoleSensitivity{
+		"attn_q": {Role: "attn_q", KLD: 1.0, Elements: 40960, ProbeDType: core.DTypeQ3_K},
+		"ffn_up": {Role: "ffn_up", KLD: 1.0, Elements: 40960, ProbeDType: core.DTypeQ3_K},
+	}
+	buckets := DepthBuckets(10)
+	measured := map[string]float64{}
+	for i, b := range buckets {
+		measured[DepthKey("", b)] = []float64{0.8, 0.3, 0.2, 0.2, 0.3, 0.8}[i]
+	}
+	dm := ComputeDepthModel(bank, buckets, sens, measured, 0)
+	if dm == nil {
+		t.Fatal("nil depth model")
+	}
+	// Combined probes give both families the same profile.
+	for l := 0; l < 10; l++ {
+		a := dm.Shares[fmt.Sprintf("blk.%d.attn_q.weight", l)]
+		f := dm.Shares[fmt.Sprintf("blk.%d.ffn_up.weight", l)]
+		if math.Abs(a-f) > 1e-12 {
+			t.Errorf("layer %d: attn %v != ffn %v under a combined probe", l, a, f)
+		}
+	}
+}
+
+func TestComputeDepthModelFlagsClamp(t *testing.T) {
+	bank := depthBank()
+	sens := map[string]RoleSensitivity{
+		"attn_q": {Role: "attn_q", KLD: 0.01, Elements: 40960, ProbeDType: core.DTypeQ3_K},
+	}
+	b := DepthBuckets(10)[0]
+	dm := ComputeDepthModel(bank, DepthBuckets(10), sens, map[string]float64{DepthKey(DepthFamilyMix, b): 50}, 0)
+	if dm == nil || len(dm.Buckets) != 1 || !dm.Buckets[0].Clamped || dm.Buckets[0].Factor != DepthFactorMax {
+		t.Fatalf("expected one clamped bucket at %v, got %+v", DepthFactorMax, dm)
+	}
+}
+
+func TestFitRungExponent(t *testing.T) {
+	// KLD quadruples while wSSE doubles: b = 2.
+	if b, ok := FitRungExponent(0.1, 1, 0.4, 2); !ok || math.Abs(b-2) > 1e-12 {
+		t.Errorf("b = %v %v, want 2", b, ok)
+	}
+	// Linear regime.
+	if b, ok := FitRungExponent(0.1, 1, 0.3, 3); !ok || math.Abs(b-1) > 1e-12 {
+		t.Errorf("b = %v %v, want 1", b, ok)
+	}
+	// Clamped to the guard.
+	if b, ok := FitRungExponent(0.1, 1, 10, 2); !ok || b != MaxRungExponent {
+		t.Errorf("b = %v %v, want clamp %v", b, ok, MaxRungExponent)
+	}
+	// Rungs too close in wSSE, or unusable points.
+	if _, ok := FitRungExponent(0.1, 1, 0.12, 1.2); ok {
+		t.Error("expected no fit for close rungs")
+	}
+	if _, ok := FitRungExponent(0, 1, 0.4, 2); ok {
+		t.Error("expected no fit for a zero KLD")
+	}
+}
+
+func TestSensitivityLossAppliesExponent(t *testing.T) {
+	tensor := core.TensorDesc{Name: "blk.0.attn_q.weight", DType: core.DTypeF16, Shape: []uint64{256, 16}, Elements: 4096}
+	row := map[core.DType]float64{core.DTypeQ3_K: 4, core.DTypeQ4_K_T: 1, core.DTypeQ2_K: 16}
+	mk := func(b float64) *Sensitivity {
+		return &Sensitivity{Roles: map[string]RoleSensitivity{
+			"attn_q": {Role: "attn_q", ProbeDType: core.DTypeQ3_K, KLD: 0.2, Elements: 4096, Exponent: b},
+		}}
+	}
+	lin, _ := mk(0).Loss(tensor, core.DTypeQ4_K_T, row)
+	sq, _ := mk(2).Loss(tensor, core.DTypeQ4_K_T, row)
+	atProbe, _ := mk(2).Loss(tensor, core.DTypeQ3_K, row)
+	if math.Abs(lin-0.05) > 1e-12 || math.Abs(sq-0.0125) > 1e-12 {
+		t.Errorf("Q4_K loss linear %v (want 0.05), b=2 %v (want 0.0125)", lin, sq)
+	}
+	if math.Abs(atProbe-0.2) > 1e-12 {
+		t.Errorf("probe-rung loss %v must equal the measured 0.2 for any b", atProbe)
+	}
+	if err := mk(3).Validate(); err == nil {
+		t.Error("exponent outside the guard must fail validation")
+	}
+}
+
+func TestSecondProbeDTypes(t *testing.T) {
+	if SecondProbeDTypes(0) != nil {
+		t.Error("unset target must not plan a second rung")
+	}
+	for bpw, want := range map[float64]core.DType{2.2: core.DTypeIQ2_XS, 3.5: core.DTypeQ4_K_T, 5.0: core.DTypeQ5_K_T, 7.0: core.DTypeQ6_K} {
+		if got := SecondProbeDTypes(bpw); len(got) == 0 || got[0] != want {
+			t.Errorf("SecondProbeDTypes(%v) = %v, want first %s", bpw, got, want)
+		}
+	}
+}
+
+func TestSolveCalibratedPricesSmallUnprobedRoles(t *testing.T) {
+	bank, cands, exact, sens := calibratedFixture(1.0, 0.5)
+	for role, r := range sens.Roles {
+		var sum float64
+		for _, td := range bank.Tensors {
+			if RoleKey(td.Name) == role {
+				sum += exact[td.Name][core.DTypeQ3_K]
+				r.Tensors = append(r.Tensors, td.Name)
+			}
+		}
+		r.SumWSSE = sum
+		sens.Roles[role] = r
+	}
+	small := core.TensorDesc{Name: "blk.0.attn_k_b.weight", DType: core.DTypeF16, Shape: []uint64{256, 8}, Length: 4096, Elements: 2048}
+	router := core.TensorDesc{Name: "blk.0.ffn_gate_inp.weight", DType: core.DTypeF16, Shape: []uint64{256, 8}, Length: 4096, Elements: 2048}
+	bank.Tensors = append(bank.Tensors, small, router)
+	// The small tensor's own error is negligible at every rung.
+	exact[small.Name] = synthRow(small, cands, 1e-6)
+	exact[router.Name] = synthRow(router, cands, 1e-6)
+	sens.Pinned = []string{"attn_k_b", "ffn_gate_inp"}
+	est := NewFallbackEstimator(nil)
+	est.BindBank(bank)
+	priced, err := enumerateCalibrated(small, cands, &anchor.Set{}, est, sens, exact[small.Name], true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(priced) < 2 {
+		t.Fatalf("priced frontier = %+v, want several rungs", priced)
+	}
+	rate, ok := sens.PinnedRate(small.Name)
+	if !ok {
+		t.Fatal("no pinned rate")
+	}
+	// The mix family's most sensitive rate is attention's.
+	if want := sens.Roles["attn_q"].KLD / sens.Roles["attn_q"].SumWSSE; math.Abs(rate-want) > 1e-12*want {
+		t.Errorf("rate = %v, want attn_q's %v", rate, want)
+	}
+	for _, o := range priced {
+		if want := rate * exact[small.Name][o.Target]; math.Abs(o.Loss-want) > 1e-15+1e-12*want {
+			t.Errorf("%s loss %v, want %v", o.Target, o.Loss, want)
+		}
+	}
+	pinned, err := enumerateCalibrated(small, cands, &anchor.Set{}, est, sens, exact[small.Name], false)
+	if err != nil || len(pinned) != 1 || pinned[0].Target != core.DTypeQ8_0 {
+		t.Errorf("PinUnprobed frontier = %+v %v, want Q8_0 only", pinned, err)
+	}
+	rt, err := enumerateCalibrated(router, cands, &anchor.Set{}, est, sens, exact[router.Name], true)
+	if err != nil || len(rt) != 1 || rt[0].Target != core.DTypeQ8_0 {
+		t.Errorf("router frontier = %+v %v, want pinned Q8_0", rt, err)
+	}
+	// A budget-constrained solve then trades the priced tensor like any
+	// other: with only Q2_K-level bytes for it, it is not forced to Q8_0.
+	var budget uint64
+	for _, td := range bank.Tensors {
+		switch {
+		case td.Name == router.Name:
+			b, _ := core.DTypeQ8_0.ExactBytes(td.Elements)
+			budget += b
+		case td.Quantizable():
+			b, _ := core.DTypeQ2_K.ExactBytes(td.Elements)
+			budget += b
+		default:
+			budget += td.Length
+		}
+	}
+	res, err := Solve(Request{Bank: bank, Candidates: cands, BudgetBytes: budget, ExactLoss: exact, Sensitivity: sens})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := targetOf(t, res, small.Name); got == core.DTypeQ8_0 {
+		t.Errorf("priced small role kept Q8_0 under a Q2_K-level budget")
+	}
+	if _, err := Solve(Request{Bank: bank, Candidates: cands, BudgetBytes: budget, ExactLoss: exact, Sensitivity: sens, PinUnprobed: true}); err == nil {
+		t.Error("PinUnprobed: expected infeasible at a budget that only fits the small role below Q8_0")
+	}
+}
+
+func TestSensitivityResolvesMergedRole(t *testing.T) {
+	sens := &Sensitivity{Roles: map[string]RoleSensitivity{
+		"other": {Role: "other", ProbeDType: core.DTypeQ3_K, KLD: 0.1, Elements: 8192,
+			Tensors: []string{"blk.0.ssm_x.weight", "blk.1.ssm_x.weight"}},
+	}}
+	if key, ok := sens.RoleOf("blk.1.ssm_x.weight"); !ok || key != "other" {
+		t.Errorf("RoleOf merged member = %q %v, want other", key, ok)
+	}
+	if !sens.Calibrated("blk.0.ssm_x.weight") {
+		t.Error("merged-role member must count as calibrated")
+	}
+	td := core.TensorDesc{Name: "blk.0.ssm_x.weight", DType: core.DTypeF16, Shape: []uint64{256, 16}, Elements: 4096}
+	if l, ok := sens.Loss(td, core.DTypeQ3_K, map[core.DType]float64{core.DTypeQ3_K: 2}); !ok || math.Abs(l-0.05) > 1e-12 {
+		t.Errorf("merged-role loss = %v %v, want 0.05", l, ok)
 	}
 }

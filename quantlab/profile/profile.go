@@ -56,6 +56,10 @@ type Request struct {
 	// Diversity inverts the greedy gain ranking so the budget is spent on
 	// the upgrades the main seeds deprioritized (anti-greedy seed).
 	Diversity bool
+	// PinUnprobed, on the calibrated path, keeps unprobed quantizable
+	// tensors at their highest-fidelity legal rung instead of pricing them
+	// with Sensitivity.PinnedRate.
+	PinUnprobed bool
 	// Sensitivity, when non-nil, switches the solver to the probe-calibrated
 	// objective: per-tensor losses in KLD units derived from measured
 	// per-role sensitivities and the ExactLoss table (Sensitivity.Loss),

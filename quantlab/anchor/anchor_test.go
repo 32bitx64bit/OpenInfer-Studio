@@ -526,3 +526,36 @@ func TestTiedEmbeddingGetsOutputFloor(t *testing.T) {
 		t.Errorf("output floor at 2.2 bpw = %v,%v want Q4_K", f, ok)
 	}
 }
+
+func TestRelaxEmbeddingFloorOnlyMovesUntiedEmbedding(t *testing.T) {
+	bank := &core.TensorBank{ModelID: "m", Tensors: []core.TensorDesc{
+		{Name: "token_embd.weight", DType: core.DTypeF16, Shape: []uint64{256, 64}, Elements: 16384},
+		{Name: "output.weight", DType: core.DTypeF16, Shape: []uint64{256, 64}, Elements: 16384},
+	}}
+	set, err := Derive(bank, nil, PolicyForBPW(5.0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !set.RelaxEmbeddingFloor("token_embd.weight", core.DTypeQ5_K_T, "per-row check") {
+		t.Fatal("untied embedding floor did not relax")
+	}
+	if f, _ := set.Floor("token_embd.weight"); f != core.DTypeQ5_K_T {
+		t.Errorf("embedding floor = %s, want Q5_K", f)
+	}
+	if set.RelaxEmbeddingFloor("output.weight", core.DTypeQ4_K_T, "") {
+		t.Error("output head floor must never relax")
+	}
+	// Raising is not relaxing.
+	if set.RelaxEmbeddingFloor("token_embd.weight", core.DTypeQ8_0, "") {
+		t.Error("a more expensive dtype must not replace the floor")
+	}
+	// Tied table: the floor is the output head's and stays put.
+	tied := &core.TensorBank{ModelID: "m", Tensors: bank.Tensors[:1]}
+	ts, err := Derive(tied, nil, PolicyForBPW(5.0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ts.RelaxEmbeddingFloor("token_embd.weight", core.DTypeQ5_K_T, "") {
+		t.Error("tied embedding (output head) floor must not relax")
+	}
+}

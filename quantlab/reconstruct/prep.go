@@ -159,7 +159,7 @@ func applyMagR(ctx context.Context, src *tensorbank.Source, outPath string, imat
 		}
 	}
 	n, err := rewriteNamedFloats(ctx, src, outPath, names, func(name string, ti tensorbank.TensorInfo, v []float32) []float32 {
-		return magrShrink(v, importanceVec(imatrix, name, len(v)))
+		return magrShrink(v, importanceVec(imatrix, name, len(v), int(ti.Shape[0])))
 	})
 	if err != nil {
 		return prepResult{}, err
@@ -278,23 +278,30 @@ func pinMask(v, imp []float32, bs int) []bool {
 	return pin
 }
 
-func importanceVec(im map[string]profile.ImatrixStats, name string, n int) []float32 {
+// importanceVec expands the tensor's imatrix vector into per-element
+// weights. ne0 is the contiguous (input) dimension; fused expert stacks map
+// row r to expert r/(rows/experts) via profile.ExpandImportance.
+func importanceVec(im map[string]profile.ImatrixStats, name string, n, ne0 int) []float32 {
 	out := make([]float32, n)
 	for i := range out {
 		out[i] = 1
 	}
-	if im == nil {
+	if im == nil || ne0 <= 0 {
 		return out
 	}
 	st, ok := im[name]
 	if !ok || len(st.Values) == 0 {
 		return out
 	}
-	for i := 0; i < n; i++ {
-		out[i] = st.Values[i%len(st.Values)]
-		if out[i] <= 0 {
-			out[i] = 1e-6
+	exp, ok := profile.ExpandImportance(st.Values, uint64(ne0), uint64(n))
+	if !ok {
+		return out
+	}
+	for i, v := range exp {
+		if v <= 0 {
+			v = 1e-6
 		}
+		out[i] = v
 	}
 	return out
 }
@@ -311,7 +318,7 @@ func applyLWC(ctx context.Context, src *tensorbank.Source, outPath string, imatr
 		}
 	}
 	n, err := rewriteNamedFloats(ctx, src, outPath, names, func(name string, ti tensorbank.TensorInfo, v []float32) []float32 {
-		return lwcClip(v, importanceVec(imatrix, name, len(v)))
+		return lwcClip(v, importanceVec(imatrix, name, len(v), int(ti.Shape[0])))
 	})
 	if err != nil {
 		return prepResult{}, err

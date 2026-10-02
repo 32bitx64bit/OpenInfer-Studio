@@ -66,6 +66,18 @@ type EffortProfile struct {
 	DepthProbes bool
 	// ProbeChunks is the KLD chunk count for each sensitivity probe eval.
 	ProbeChunks int
+	// EmbedRowFloor relaxes the untied token-embedding floor with a
+	// data-free per-row error check over the whole vocabulary.
+	// Profiled/deep on; fast off. Extra.NoEmbedRowFloor opts out.
+	EmbedRowFloor bool
+	// Refine runs in-context refinement rounds in the search stage:
+	// role-level rung moves measured inside the real mix correct the
+	// sensitivity model, and a re-solve is kept only when holdout KLD
+	// improves. Profiled/deep on; fast off. Extra.NoRefine opts out.
+	Refine bool
+	// RefineRoles bounds the roles moved per refinement round (largest by
+	// bytes first).
+	RefineRoles int
 }
 
 // qualityGateKnots are (bpw, mean-KLD, p95-KLD), descending in bits-per-weight.
@@ -162,6 +174,9 @@ func EffortFor(e Effort) (EffortProfile, error) {
 			SensitivityProbes: true,
 			DepthProbes:       true,
 			ProbeChunks:       2,
+			EmbedRowFloor:     true,
+			Refine:            true,
+			RefineRoles:       4,
 		}, nil
 	case EffortDeep:
 		return EffortProfile{
@@ -177,6 +192,9 @@ func EffortFor(e Effort) (EffortProfile, error) {
 			SensitivityProbes: true,
 			DepthProbes:       true,
 			ProbeChunks:       4,
+			EmbedRowFloor:     true,
+			Refine:            true,
+			RefineRoles:       6,
 		}, nil
 	}
 	return EffortProfile{}, fmt.Errorf("pipeline: unknown effort %q (want fast, profiled, or deep)", e)

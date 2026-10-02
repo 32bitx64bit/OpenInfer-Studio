@@ -315,6 +315,8 @@ type fakeRunner struct {
 	kldForModel func(path string) (float64, bool)
 	// evaluated records every model path handed to a KLD evaluation.
 	evaluated []string
+	// quantTypes records the target type of every llama-quantize run.
+	quantTypes []core.DType
 	// corpora records every corpus path (-f) used by llama-perplexity.
 	corpora []string
 }
@@ -345,6 +347,7 @@ func (f *fakeRunner) Run(ctx context.Context, iv orchestrate.Invocation) (orches
 		in, out, dtype, dry, pure := parseQuantizeArgv(iv.Argv)
 		f.quantRuns++
 		f.lastQuantType = dtype
+		f.quantTypes = append(f.quantTypes, dtype)
 		f.lastQuantInTensors = countGGUFTensors(f.t, in)
 		if !dry {
 			fakeQuantizeGGUF(f.t, in, out, dtype, pure)

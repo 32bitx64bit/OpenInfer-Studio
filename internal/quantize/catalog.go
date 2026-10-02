@@ -158,6 +158,19 @@ func HighPrecision(quant string) bool {
 	return false
 }
 
+// DynamicKeepsNative reports sources whose quantized tensors Dynamic keeps
+// bit-for-bit instead of requantizing: MXFP4 is the native training format
+// of MXFP4 models (gpt-oss experts), so keeping it is lossless and the
+// requantize confirmation does not apply. Their float tensors are still
+// optimized normally.
+func DynamicKeepsNative(quant string) bool {
+	switch stripDynamicPrefix(quant) {
+	case "MXFP4", "MXFP4_MOE":
+		return true
+	}
+	return false
+}
+
 func stripDynamicPrefix(quant string) string {
 	u := strings.ToUpper(strings.TrimSpace(quant))
 	u = strings.TrimPrefix(u, "UD-")
