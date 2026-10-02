@@ -1,6 +1,7 @@
 package mediagen
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"os"
@@ -248,5 +249,55 @@ func TestParseShapeMismatches(t *testing.T) {
 	}
 	if got := g[1].Items[0]; got.Name != "model.diffusion_model.blocks.0.attn.qkv_proj.weight" || got.Got != "[5376, 21504, 1, 1]" || got.Want != "[1, 21504, 1, 1]" {
 		t.Errorf("item = %+v", got)
+	}
+}
+
+// writeComfyGGUF writes a header-only GGUF carrying comfy.gguf.orig_shape.*
+// keys, the way ComfyUI-GGUF's converter records tensors it reshaped.
+func writeComfyGGUF(t *testing.T, path string, reshaped []string) {
+	t.Helper()
+	var b bytes.Buffer
+	w32 := func(v uint32) { _ = binary.Write(&b, binary.LittleEndian, v) }
+	w64 := func(v uint64) { _ = binary.Write(&b, binary.LittleEndian, v) }
+	wstr := func(s string) { w64(uint64(len(s))); b.WriteString(s) }
+	_ = binary.Write(&b, binary.LittleEndian, uint32(0x46554747))
+	w32(3)
+	w64(0)
+	w64(uint64(1 + len(reshaped)))
+	wstr("general.architecture")
+	w32(8)
+	wstr("qwen3vl")
+	for _, name := range reshaped {
+		wstr("comfy.gguf.orig_shape." + name)
+		w32(9) // array
+		w32(4) // of uint32
+		w64(2)
+		w32(1152)
+		w32(1152)
+	}
+	if err := os.WriteFile(path, b.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStartupFailureRecognizesComfyGGUFReshaping(t *testing.T) {
+	dir := t.TempDir()
+	enc := filepath.Join(dir, "qwen3vl_32b_minimax_h3-Q4_K_M.gguf")
+	writeComfyGGUF(t, enc, []string{"visual.blocks.0.attn.proj.weight", "visual.blocks.0.attn.qkv.weight"})
+	if n := comfyReshaped(enc); n != 2 {
+		t.Fatalf("comfyReshaped = %d", n)
+	}
+	msg := startupFailure(prunedGGUFLog, "/l.log", "/m/model.gguf", LoadSettings{LLM: enc})
+	if !strings.Contains(msg, "made with ComfyUI-GGUF's tooling: 2 tensors are stored reshaped") ||
+		!strings.Contains(msg, "comfy.gguf.orig_shape.*") {
+		t.Errorf("message lacks the ComfyUI-GGUF finding:\n%s", msg)
+	}
+	// A GGUF without those keys, a safetensors file and a missing file say nothing.
+	plain := filepath.Join(dir, "plain.gguf")
+	writeComfyGGUF(t, plain, nil)
+	for _, p := range []string{plain, filepath.Join(dir, "x.safetensors"), filepath.Join(dir, "missing.gguf"), ""} {
+		if comfyReshaped(p) != 0 {
+			t.Errorf("comfyReshaped(%q) != 0", p)
+		}
 	}
 }

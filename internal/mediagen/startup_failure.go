@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/openinfer/openinfer-studio/internal/gguf"
 	"github.com/openinfer/openinfer-studio/internal/sdmodel"
 )
 
@@ -355,6 +356,9 @@ func explainShapes(b *strings.Builder, groups []shapeGroup, modelPath string, s 
 		for _, it := range show {
 			fmt.Fprintf(b, "    %s: file has %s, runtime expects %s\n", it.Name, it.Got, it.Want)
 		}
+		if n := comfyReshaped(path); n > 0 {
+			fmt.Fprintf(b, "    this GGUF was made with ComfyUI-GGUF's tooling: %d tensors are stored reshaped for quantization, with their original shapes kept in metadata (comfy.gguf.orig_shape.*); this runtime compares the stored, reshaped shapes\n", n)
+		}
 		vision := true
 		for _, it := range g.Items {
 			if !strings.Contains(it.Name, ".visual.") {
@@ -367,4 +371,24 @@ func explainShapes(b *strings.Builder, groups []shapeGroup, modelPath string, s 
 		}
 	}
 	b.WriteString("The files were made for a different stable-diffusion.cpp revision or layout than the runtime in use. Check the model card for the build it needs; a newer runtime from the Runtimes page may know the layout.\n")
+}
+
+// comfyReshaped counts the tensors a GGUF made with ComfyUI-GGUF's converter
+// stores reshaped (k-quants need rows of 256, so other widths are flattened),
+// each with its original shape in a comfy.gguf.orig_shape.* metadata key.
+func comfyReshaped(path string) int {
+	if path == "" || !strings.HasSuffix(strings.ToLower(path), ".gguf") {
+		return 0
+	}
+	md, err := gguf.ParseFile(path)
+	if err != nil || md == nil {
+		return 0
+	}
+	n := 0
+	for k := range md.Raw {
+		if strings.HasPrefix(k, "comfy.gguf.orig_shape.") {
+			n++
+		}
+	}
+	return n
 }
