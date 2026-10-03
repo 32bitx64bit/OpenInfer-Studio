@@ -63,14 +63,19 @@ type StageRunner interface {
 	MediaDir() string
 }
 
+type progressStageRunner interface {
+	RunStageWithProgress(context.Context, string, mediagen.GenerateParams, *mediagen.LoadOverrides, func(mediagen.Progress)) (*mediagen.Job, error)
+}
+
 // NodeState is one node's progress within a run.
 type NodeState struct {
-	State    string   `json:"state"`
-	Message  string   `json:"message,omitempty"`
-	Outputs  []string `json:"outputs,omitempty"`   // media-root-relative
-	FileURLs []string `json:"file_urls,omitempty"` // local file:// URLs for previews
-	JobID    string   `json:"job_id,omitempty"`
-	Millis   int64    `json:"ms,omitempty"`
+	Progress *mediagen.Progress `json:"progress,omitempty"`
+	State    string             `json:"state"`
+	Message  string             `json:"message,omitempty"`
+	Outputs  []string           `json:"outputs,omitempty"`   // media-root-relative
+	FileURLs []string           `json:"file_urls,omitempty"` // local file:// URLs for previews
+	JobID    string             `json:"job_id,omitempty"`
+	Millis   int64              `json:"ms,omitempty"`
 }
 
 // RunView is a copy of a run's state, safe to serialise.
@@ -280,6 +285,9 @@ func (e *Executor) setNode(r *run, nodeID string, ns NodeState) {
 	if ns.Millis > 0 {
 		payload["ms"] = ns.Millis
 	}
+	if ns.Progress != nil {
+		payload["progress"] = ns.Progress
+	}
 	e.publish("workflow.node_state", payload)
 }
 
@@ -416,7 +424,25 @@ func (e *Executor) runGenerate(r *run, st Stage, servers map[string]ServerNeed) 
 		p.InitImagePath = path
 	}
 	ov := need.Overrides
-	job, err := e.runner.RunStage(r.ctx, need.ModelID, p, &ov)
+	var job *mediagen.Job
+	var err error
+	if runner, ok := e.runner.(progressStageRunner); ok {
+		job, err = runner.RunStageWithProgress(r.ctx, need.ModelID, p, &ov, func(progress mediagen.Progress) {
+			e.mu.Lock()
+			ns := r.view.Nodes[st.NodeID]
+			if ns.State != NodeRunning || r.view.State != RunRunning || r.ctx.Err() != nil {
+				e.mu.Unlock()
+				return
+			}
+			ns.Progress, ns.Message, ns.JobID = &progress, progress.Message, progress.JobID
+			r.view.Nodes[st.NodeID] = ns
+			e.mu.Unlock()
+			e.publish("workflow.node_state", map[string]any{"run_id": r.view.ID, "node_id": st.NodeID,
+				"state": NodeRunning, "job_id": progress.JobID, "message": progress.Message, "progress": progress})
+		})
+	} else {
+		job, err = e.runner.RunStage(r.ctx, need.ModelID, p, &ov)
+	}
 	if err != nil {
 		return nil, "", "", err
 	}
