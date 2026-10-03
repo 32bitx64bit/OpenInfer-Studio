@@ -262,6 +262,19 @@ func TestChatPlanOptionIDsUniqueAndPathsKept(t *testing.T) {
 
 // ---- generators -------------------------------------------------------------
 
+func TestGeneratorPlanPrefersLTXConvVAE(t *testing.T) {
+	conv := "vae/ltx-2.5-video-vae-conv-bf16.safetensors"
+	p := buildGeneratorPlan(entries(
+		"ltx-2.5-Q4_K_M.gguf", 100,
+		"vae/ltx-2.5-video-vae-bf16.safetensors", 10,
+		conv, 20,
+	))
+	c := findComp(t, p, "vae")
+	if got := defaultOpt(t, c); len(got.Files) != 1 || got.Files[0].Path != conv {
+		t.Fatalf("unsupported diffusion decoder recommended: %+v", got)
+	}
+}
+
 func TestGeneratorPlanGGUFTransformerOnly(t *testing.T) {
 	p := buildGeneratorPlan(entries(
 		"flux1-dev-Q2_K.gguf", 4, "flux1-dev-Q4_0.gguf", 7, "flux1-dev-Q5_K_S.gguf", 8,

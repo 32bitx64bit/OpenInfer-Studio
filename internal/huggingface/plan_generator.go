@@ -441,7 +441,21 @@ func generatorComponent(fs []genFile) PlanComponent {
 	}
 	sortOptions(c.Options)
 	uniqueOptionIDs(c.Options)
-	setDefault(&c, pickByBits(c.Options, genTargetBits(first.role)))
+	preferred := c.Options
+	if c.Role == sdmodel.RoleVAE {
+		var conv []PlanOption
+		for _, opt := range c.Options {
+			if len(opt.Files) == 1 && sdmodel.IsLTXConvVAEName(opt.Files[0].Path) {
+				conv = append(conv, opt)
+			}
+		}
+		if len(conv) > 0 {
+			preferred = conv
+		}
+	}
+	if idx := pickByBits(preferred, genTargetBits(first.role)); idx >= 0 {
+		setDefault(&c, optionIndex(c.Options, preferred[idx].ID))
+	}
 	return c
 }
 
