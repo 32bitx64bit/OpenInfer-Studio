@@ -338,10 +338,17 @@ func IsFullCheckpoint(tensorNames []string) bool {
 func Preference(path string) int {
 	base := strings.ToLower(filepath.Base(path))
 	ext := strings.ToLower(filepath.Ext(path))
+	words := nameWords(base)
+	// Upstream LTX publishes both a diffusion decoder and a conv VAE.
+	// Only the latter is supported by sd.cpp. Prefer its published variant
+	// in remote listings where tensor headers are not yet available. Local
+	// launch validation still checks the actual tensors, not this name hint.
+	if IsLTXConvVAEName(path) {
+		return 110
+	}
 	if ext == ".gguf" {
 		return 100
 	}
-	words := nameWords(base)
 	if words["scaled"] || words["convrot"] || words["int8"] || words["w8a8"] ||
 		words["nf4"] || words["fp4"] || words["nvfp4"] || words["int4"] || words["svdq"] {
 		return 5
