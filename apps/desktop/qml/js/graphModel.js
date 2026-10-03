@@ -141,6 +141,11 @@ function addNode(graph, spec, x, y, params) {
 function removeNode(graph, id) {
     graph.nodes = graph.nodes.filter(function(n) { return n.id !== id })
     graph.edges = graph.edges.filter(function(e) { return e.from[0] !== id && e.to[0] !== id })
+    graph.groups = list(graph.groups).map(function(g) {
+        var copy = clone(g)
+        copy.nodes = list(g.nodes).filter(function(n) { return n !== id })
+        return copy
+    })
 }
 
 function duplicateNode(graph, node, spec) {
@@ -255,6 +260,173 @@ function fileUrlToLocalPath(fileUrl) {
     try { s = decodeURIComponent(s) } catch (e) {}
     if (/^\/[A-Za-z]:\//.test(s)) s = s.substring(1)
     return s
+}
+
+function localPathToFileUrl(path) {
+    var s = String(path || "").replace(/\\/g, "/")
+    if (!s || s.indexOf("file://") === 0) return s
+    if (/^[A-Za-z]:\//.test(s)) s = "/" + s
+    if (s.indexOf("//") === 0) return "file:" + encodeURI(s).replace(/#/g, "%23").replace(/\?/g, "%3F")
+    return "file://" + s.split("/").map(function(p) { return encodeURIComponent(p) }).join("/")
+}
+
+// Editor history contains document snapshots, never executor state. Adjacent
+// typing in the same field shares one undo step until a pause or another edit.
+function newHistory() { return { past: [], future: [] } }
+function recordEdit(history, before, after, label, key, now) {
+    if (JSON.stringify(before) === JSON.stringify(after)) return false
+    var last = history.past[history.past.length - 1]
+    if (key && last && last.key === key && !history.future.length && now - last.time < 750) {
+        last.after = clone(after)
+        last.time = now
+    } else {
+        history.past.push({ before: clone(before), after: clone(after), label: label,
+                            key: key || "", time: now })
+        if (history.past.length > 100) history.past.shift()
+    }
+    history.future = []
+    return true
+}
+function undo(history) {
+    var edit = history.past.pop()
+    if (!edit) return null
+    history.future.push(edit)
+    return clone(edit.before)
+}
+function redo(history) {
+    var edit = history.future.pop()
+    if (!edit) return null
+    history.past.push(edit)
+    return clone(edit.after)
+}
+
+function idSet(ids) {
+    var out = Object.create(null)
+    for (var i = 0; i < ids.length; i++) out[ids[i]] = true
+    return out
+}
+function connectedSection(graph, ids) {
+    var seen = idSet(ids), todo = ids.slice()
+    while (todo.length) {
+        var id = todo.pop()
+        for (var i = 0; i < graph.edges.length; i++) {
+            var e = graph.edges[i], other = e.from[0] === id ? e.to[0] : e.to[0] === id ? e.from[0] : null
+            if (other && !seen[other]) { seen[other] = true; todo.push(other) }
+        }
+    }
+    return graph.nodes.filter(function(n) { return seen[n.id] }).map(function(n) { return n.id })
+}
+function copySection(graph, ids) {
+    var selected = idSet(ids)
+    return clone({ version: 1,
+        nodes: graph.nodes.filter(function(n) { return selected[n.id] }),
+        edges: graph.edges.filter(function(e) { return selected[e.from[0]] && selected[e.to[0]] }),
+        groups: list(graph.groups).filter(function(g) {
+            return list(g.nodes).length && g.nodes.every(function(id) { return selected[id] })
+        }) })
+}
+// Accept only an editor fragment; external workflow JSON goes through the
+// backend import API. Reject malformed/oversize clipboard input before edits.
+function parseSection(text, specs) {
+    if (text.length > 4 * 1024 * 1024) throw new Error("Clipboard section is too large")
+    var s = JSON.parse(text)
+    if (!s || s.version !== 1 || !Array.isArray(s.nodes) || !Array.isArray(s.edges)
+            || !s.nodes.length || s.nodes.length > 1000 || s.edges.length > 4000)
+        throw new Error("Copy some workflow nodes first")
+    var seen = Object.create(null)
+    s.nodes.forEach(function(n) {
+        if (!n || typeof n.id !== "string" || seen[n.id] || !specs[n.type]
+                || !Array.isArray(n.pos) || n.pos.length !== 2
+                || !n.pos.every(function(v) { return typeof v === "number" && isFinite(v) })
+                || (n.params && (typeof n.params !== "object" || Array.isArray(n.params))))
+            throw new Error("Clipboard contains an unsupported node")
+        seen[n.id] = true
+    })
+    s.edges.forEach(function(e) {
+        if (!e || !Array.isArray(e.from) || !Array.isArray(e.to) || e.from.length !== 2 || e.to.length !== 2
+                || !seen[e.from[0]] || !seen[e.to[0]]) throw new Error("Clipboard contains a broken wire")
+    })
+    if (s.groups !== undefined && !Array.isArray(s.groups)) throw new Error("Invalid clipboard frames")
+    list(s.groups).forEach(function(g) {
+        if (!g || typeof g.title !== "string" || !Array.isArray(g.nodes)
+                || !g.nodes.every(function(id) { return seen[id] })) throw new Error("Invalid clipboard frame")
+    })
+    return s
+}
+function pasteSection(graph, section, x, y) {
+    var x0 = Infinity, y0 = Infinity, map = Object.create(null), ids = []
+    section.nodes.forEach(function(n) { x0 = Math.min(x0, n.pos[0]); y0 = Math.min(y0, n.pos[1]) })
+    section.nodes.forEach(function(n) {
+        var copy = clone(n)
+        copy.id = nextId(graph)
+        copy.pos = [Math.round(n.pos[0] - x0 + x), Math.round(n.pos[1] - y0 + y)]
+        map[n.id] = copy.id
+        ids.push(copy.id)
+        graph.nodes.push(copy)
+    })
+    section.edges.forEach(function(e) { graph.edges.push({ from: [map[e.from[0]], e.from[1]], to: [map[e.to[0]], e.to[1]] }) })
+    graph.groups = list(graph.groups)
+    list(section.groups).forEach(function(g) {
+        var copy = clone(g)
+        copy.nodes = g.nodes.map(function(id) { return map[id] })
+        graph.groups.push(copy)
+    })
+    return ids
+}
+
+function nodeRect(node, specs, sizes) {
+    var size = sizes && sizes[node.id]
+    return { x: node.pos[0], y: node.pos[1], w: nodeWidth(node.type),
+             h: size ? size.h : (node.collapsed && specs[node.type] ? HEADER + 16 + ROW * Math.max(list(specs[node.type].inputs).length, list(specs[node.type].outputs).length)
+                 : specs[node.type] ? estimateHeight(specs[node.type]) : 200) }
+}
+function selectionInRect(graph, specs, rect, sizes) {
+    return graph.nodes.filter(function(n) {
+        var b = nodeRect(n, specs, sizes)
+        return b.x < rect.x + rect.w && b.x + b.w > rect.x && b.y < rect.y + rect.h && b.y + b.h > rect.y
+    }).map(function(n) { return n.id })
+}
+function sectionBounds(graph, specs, ids, sizes) {
+    var set = idSet(ids), nodes = graph.nodes.filter(function(n) { return set[n.id] })
+    if (!nodes.length) return null
+    var x = Infinity, y = Infinity, right = -Infinity, bottom = -Infinity
+    nodes.forEach(function(n) {
+        var b = nodeRect(n, specs, sizes)
+        x = Math.min(x, b.x); y = Math.min(y, b.y)
+        right = Math.max(right, b.x + b.w); bottom = Math.max(bottom, b.y + b.h)
+    })
+    return { x: x, y: y, w: right - x, h: bottom - y }
+}
+function alignNodes(graph, specs, ids, mode, sizes) {
+    var set = idSet(ids), b = sectionBounds(graph, specs, ids, sizes)
+    if (!b) return
+    graph.nodes.forEach(function(n) {
+        if (!set[n.id]) return
+        var r = nodeRect(n, specs, sizes)
+        if (mode === "left") n.pos[0] = b.x
+        if (mode === "top") n.pos[1] = b.y
+        if (mode === "right") n.pos[0] = b.x + b.w - r.w
+        if (mode === "bottom") n.pos[1] = b.y + b.h - r.h
+    })
+}
+// Position, labels, notes and viewport do not change a run's computation.
+// Node IDs alone cannot establish that a run belongs on the editor canvas.
+function stableValue(value) {
+    if (Array.isArray(value)) return value.map(stableValue)
+    if (value && typeof value === "object") {
+        var out = {}
+        Object.keys(value).sort().forEach(function(k) { out[k] = stableValue(value[k]) })
+        return out
+    }
+    return value
+}
+function executionKey(graph) {
+    if (!graph) return ""
+    var nodes = list(graph.nodes).map(function(n) { return { id: n.id, type: n.type, params: n.params || {} } })
+    nodes.sort(function(a, b) { return a.id.localeCompare(b.id) })
+    var edges = list(graph.edges).map(function(e) { return { from: e.from, to: e.to } })
+    edges.sort(function(a, b) { return JSON.stringify(a).localeCompare(JSON.stringify(b)) })
+    return JSON.stringify(stableValue({ version: graph.version, nodes: nodes, edges: edges }))
 }
 
 // Rough size of a node for fitting the view before it has been laid out.

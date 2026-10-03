@@ -110,6 +110,7 @@ type ParamSpec struct {
 // NodeSpec is the declarative description of a node type. QML draws sockets,
 // widgets, palette and inspector from it, so a new node type needs no QML.
 type NodeSpec struct {
+	APIFeature  string      `json:"api_feature,omitempty"`
 	Type        string      `json:"type"`
 	Category    string      `json:"category"`
 	Title       string      `json:"title"`
@@ -139,11 +140,12 @@ type Graph struct {
 // Node is one placed node. Params holds only values the user set; the
 // registry supplies defaults for the rest.
 type Node struct {
-	ID     string         `json:"id"`
-	Type   string         `json:"type"`
-	Title  string         `json:"title,omitempty"`
-	Pos    [2]float64     `json:"pos"`
-	Params map[string]any `json:"params,omitempty"`
+	Collapsed bool           `json:"collapsed,omitempty"`
+	ID        string         `json:"id"`
+	Type      string         `json:"type"`
+	Title     string         `json:"title,omitempty"`
+	Pos       [2]float64     `json:"pos"`
+	Params    map[string]any `json:"params,omitempty"`
 }
 
 // Endpoint addresses one socket: [nodeID, portName].
@@ -163,6 +165,8 @@ type Edge struct {
 
 // Group is a labelled frame around nodes. UI only; never part of a cache key.
 type Group struct {
+	Color string   `json:"color,omitempty"`
+	Note  string   `json:"note,omitempty"`
 	Title string   `json:"title"`
 	Nodes []string `json:"nodes"`
 }

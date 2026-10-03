@@ -225,6 +225,12 @@ func removedInHelp(help, flag string) bool {
 // classifies them from the tensor layout and takes companions via --vae /
 // --llm / --clip_*.
 func BuildServerArgs(s LoadSettings, modelPath string, componentOnly bool, caps []string, help, host string, port int) ([]string, error) {
+	if host != "127.0.0.1" || port < 0 || port > 65535 {
+		return nil, fmt.Errorf("sd-server must bind to IPv4 loopback with a valid managed port")
+	}
+	if !SupportsSDFlag(caps, help, "--listen-ip") || !SupportsSDFlag(caps, help, "--listen-port") {
+		return nil, fmt.Errorf("runtime must advertise --listen-ip and --listen-port for managed loopback binding")
+	}
 	if strings.TrimSpace(modelPath) == "" {
 		return nil, fmt.Errorf("model path is required")
 	}
@@ -251,6 +257,7 @@ func BuildServerArgs(s LoadSettings, modelPath string, componentOnly bool, caps 
 		{"clip_vision", s.ClipVision, false},
 		{"tokenizer", s.Tokenizer, false},
 		{"lora_model_dir", s.LoraModelDir, true},
+		{"hires_upscalers_dir", s.HiresUpscalersDir, true},
 	} {
 		if c.path == "" {
 			continue
@@ -306,6 +313,11 @@ func BuildServerArgs(s LoadSettings, modelPath string, componentOnly bool, caps 
 	if s.ESRGAN != "" {
 		add("--upscale-model", s.ESRGAN)
 	}
+	upscalerDir := s.HiresUpscalersDir
+	if upscalerDir == "" && s.ESRGAN != "" {
+		upscalerDir = filepath.Dir(s.ESRGAN)
+	}
+	add("--hires-upscalers-dir", upscalerDir)
 	if s.ControlNet != "" {
 		add("--control-net", s.ControlNet)
 	}
@@ -363,6 +375,7 @@ var sdForbiddenRawFlags = map[string]bool{
 	"--model":       true, "-m": true,
 	"--diffusion-model": true,
 	"--serve-html-path": true,
+	"--api-key":         true, "--api-key-file": true,
 }
 
 // parseSDRawArgs tokenizes LoadSettings.RawArgs without a shell (mirrors the
@@ -382,7 +395,13 @@ func parseSDRawArgs(raw string, caps []string, help string) (args []string, warn
 		}
 	}
 	prevFlagAccepted := false
+	skipManagedValue := false
 	for _, tok := range tokens {
+		if skipManagedValue && !strings.HasPrefix(tok, "-") {
+			skipManagedValue = false
+			continue
+		}
+		skipManagedValue = false
 		// Budgets such as --max-vram -2 are values, not short flags.
 		if prevFlagAccepted && strings.HasPrefix(tok, "-") {
 			if _, err := strconv.ParseFloat(tok, 64); err == nil {
@@ -392,9 +411,11 @@ func parseSDRawArgs(raw string, caps []string, help string) (args []string, warn
 			}
 		}
 		if strings.HasPrefix(tok, "-") {
-			if sdForbiddenRawFlags[tok] {
-				warnings = append(warnings, fmt.Sprintf("raw flag %s may not override the managed network/model flags; skipped", tok))
+			managedFlag := strings.SplitN(tok, "=", 2)[0]
+			if sdForbiddenRawFlags[managedFlag] {
+				warnings = append(warnings, fmt.Sprintf("raw flag %s may not override the managed network/model flags; skipped", managedFlag))
 				prevFlagAccepted = false
+				skipManagedValue = !strings.Contains(tok, "=")
 				continue
 			}
 			if !strings.HasPrefix(tok, "--") {
@@ -451,6 +472,9 @@ func PrepareLaunch(rt *runtimes.Runtime, help, modelPath string, s LoadSettings)
 	// Pair local companions (…/vae/…, …/text_encoders/…) for transformer-only
 	// checkpoints. Explicit settings always win.
 	ApplyCompanions(&resolved, ModelRoot(modelPath), modelPath)
+	if resolved.HiresUpscalersDir == "" && resolved.ESRGAN != "" {
+		resolved.HiresUpscalersDir = filepath.Dir(resolved.ESRGAN)
+	}
 	warnings = append(warnings, packedWarnings(modelPath, resolved)...)
 	warnings = append(warnings, reshapedWarnings(modelPath, resolved)...)
 
@@ -508,7 +532,7 @@ func SDRequestBody(p GenerateParams) map[string]any {
 	if p.Steps > 0 {
 		body["sample_params"] = map[string]any{"sample_steps": p.Steps}
 	}
-	if p.CFGScale != 0 {
+	if p.CFGScale != 0 || p.Guidance != 0 || p.CFGScaleExplicit || p.GuidanceExplicit {
 		sp, _ := body["sample_params"].(map[string]any)
 		if sp == nil {
 			sp = map[string]any{}
@@ -519,11 +543,15 @@ func SDRequestBody(p GenerateParams) map[string]any {
 			guid = map[string]any{}
 			sp["guidance"] = guid
 		}
-		guid["txt_cfg"] = p.CFGScale
+		if p.CFGScale != 0 || p.CFGScaleExplicit {
+			guid["txt_cfg"] = p.CFGScale
+		}
+		if p.Guidance != 0 || p.GuidanceExplicit {
+			guid["distilled_guidance"] = p.Guidance
+		}
 	}
-	if p.Seed != 0 {
-		body["seed"] = p.Seed
-	}
+	// Zero is a valid reproducible seed. The control API defaults omission to -1.
+	body["seed"] = p.Seed
 	if p.Sampler != "" {
 		sp, _ := body["sample_params"].(map[string]any)
 		if sp == nil {
@@ -551,12 +579,23 @@ func SDRequestBody(p GenerateParams) map[string]any {
 		if p.BatchCount > 1 {
 			body["batch_count"] = p.BatchCount
 		}
-		if p.InitImage != "" {
-			body["init_image"] = p.InitImage
-			if p.Strength > 0 {
-				body["strength"] = p.Strength
-			}
+		if p.MaskImage != "" {
+			body["mask_image"] = p.MaskImage
 		}
+		if p.ControlImage != "" {
+			body["control_image"] = p.ControlImage
+			body["control_strength"] = p.ControlStrength
+		}
+		if len(p.RefImages) > 0 {
+			body["ref_images"] = p.RefImages
+		}
+	}
+	if p.InitImage != "" {
+		body["init_image"] = p.InitImage
+		body["strength"] = p.Strength
+	}
+	if len(p.Lora) > 0 {
+		body["lora"] = p.Lora
 	}
 	if p.OutputFormat != "" {
 		body["output_format"] = strings.ToLower(p.OutputFormat)
@@ -590,6 +629,12 @@ func ValidateGenerateParams(p *GenerateParams) {
 	if p.CFGScale > 30 {
 		p.CFGScale = 30
 	}
+	if p.Guidance < 0 {
+		p.Guidance = 0
+	}
+	if p.Guidance > 30 {
+		p.Guidance = 30
+	}
 	if p.Strength < 0 {
 		p.Strength = 0
 	}
@@ -613,18 +658,6 @@ func ValidateGenerateParams(p *GenerateParams) {
 	}
 	if p.FPS > 60 {
 		p.FPS = 60
-	}
-	if p.Seed == 0 {
-		// sd.cpp treats any seed < 0 as random. 0 is never a request for the
-		// literal seed 0 here — the client sends 0 when the user left the
-		// field blank (portable "unset" for an int64 request field) — so it
-		// is mapped to -1 (random) rather than passed through.
-		p.Seed = -1
-	}
-	// Init images over the API are capped: base64 payloads ride inside the
-	// 4 MiB control-API body limit (json.go maxRequestBody).
-	if len(p.InitImage) > 3<<20 {
-		p.InitImage = ""
 	}
 	_ = runtime.GOOS
 }

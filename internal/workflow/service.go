@@ -45,13 +45,13 @@ type Service struct {
 	exec     *Executor
 }
 
-// NewService returns the workflow service. db must have migration 0005.
+// NewService returns the workflow service. db must have migration 0006.
 // events may be nil; media may be nil, which disables planning against a
 // runtime and running graphs.
 func NewService(db *sql.DB, lib Models, media Media, events EventSink) *Service {
 	s := &Service{store: NewStore(db), registry: NewRegistry(), models: lib, media: media}
 	if media != nil {
-		s.exec = NewExecutor(media, events, nil)
+		s.exec = NewPersistentExecutor(media, events, db)
 	}
 	return s
 }
@@ -71,6 +71,31 @@ func (s *Service) Store() *Store { return s.store }
 
 // Registry returns the node registry.
 func (s *Service) Registry() *Registry { return s.registry }
+
+type modelCapabilities interface {
+	GenerationCapabilities(string) (*mediagen.APICapabilities, error)
+}
+
+func (s *Service) ModelCapabilities(id string) *mediagen.APICapabilities {
+	if id == "" {
+		return nil
+	}
+	if m, ok := s.media.(modelCapabilities); ok {
+		caps, err := m.GenerationCapabilities(id)
+		if err == nil {
+			return caps
+		}
+		return &mediagen.APICapabilities{ModelID: id, Reason: err.Error()}
+	}
+	return nil
+}
+
+func (e serviceEnv) GenerationCapabilities(id string) (*mediagen.APICapabilities, error) {
+	if m, ok := e.s.media.(modelCapabilities); ok {
+		return m.GenerationCapabilities(id)
+	}
+	return &mediagen.APICapabilities{Reason: "loaded-model capability discovery unavailable"}, nil
+}
 
 // Capabilities reads what the selected sd.cpp runtime advertises. When there
 // is no usable runtime, Known is false and nodes that need flags are marked

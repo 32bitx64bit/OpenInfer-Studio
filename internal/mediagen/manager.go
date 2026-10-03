@@ -59,6 +59,7 @@ type LoadSettings struct {
 	VAE                 string `json:"vae"`                   // optional standalone VAE path
 	TAESD               string `json:"taesd"`                 // optional tiny decoder
 	ESRGAN              string `json:"esrgan"`                // optional upscaler
+	HiresUpscalersDir   string `json:"hires_upscalers_dir"`   // native model-upscale catalog directory
 	ControlNet          string `json:"control_net"`           // optional
 	LLM                 string `json:"llm"`                   // LLM text encoder (qwen-image / flux2)
 	LLMVision           string `json:"llm_vision"`            // --llm_vision (LLM ViT)
@@ -93,27 +94,37 @@ func DefaultLoadSettings() LoadSettings {
 	return LoadSettings{FlashAttention: true, VAETiling: true, SaveOnSuccess: true}
 }
 
-// GenerateParams is one image/video generation request. Pointer-free on
-// purpose: the zero value is a valid txt2img default.
+// GenerateParams is one image/video generation request. The zero value
+// selects txt2img defaults. Local inputs are encoded only at submission.
 type GenerateParams struct {
-	Kind           string  `json:"kind"` // image|video ("" = image)
-	Prompt         string  `json:"prompt"`
-	NegativePrompt string  `json:"negative_prompt"`
-	Width          int     `json:"width"`  // 0 = server default
-	Height         int     `json:"height"` // 0 = server default
-	Steps          int     `json:"steps"`  // 0 = server default
-	CFGScale       float64 `json:"cfg_scale"`
-	Seed           int64   `json:"seed"` // -1 = random (sd.cpp default)
-	Sampler        string  `json:"sampler"`
-	Scheduler      string  `json:"scheduler"`
-	BatchCount     int     `json:"batch_count"`
-	VideoFrames    int     `json:"video_frames"`
-	FPS            int     `json:"fps"`
-	Guidance       float64 `json:"guidance"`        // distilled guidance (FLUX-class); 0 = server default
-	OutputFormat   string  `json:"output_format"`   // png|jpeg|webp|webm|avi
-	InitImage      string  `json:"init_image"`      // base64 or data URL (img2img)
-	InitImagePath  string  `json:"init_image_path"` // local image file (img2img); read + encoded by the backend
-	Strength       float64 `json:"strength"`        // img2img denoising strength
+	Kind             string   `json:"kind"` // image|video ("" = image)
+	Prompt           string   `json:"prompt"`
+	NegativePrompt   string   `json:"negative_prompt"`
+	Width            int      `json:"width"`  // 0 = server default
+	Height           int      `json:"height"` // 0 = server default
+	Steps            int      `json:"steps"`  // 0 = server default
+	CFGScale         float64  `json:"cfg_scale"`
+	Seed             int64    `json:"seed"` // -1 = random (sd.cpp default)
+	Sampler          string   `json:"sampler"`
+	Scheduler        string   `json:"scheduler"`
+	BatchCount       int      `json:"batch_count"`
+	VideoFrames      int      `json:"video_frames"`
+	FPS              int      `json:"fps"`
+	Guidance         float64  `json:"guidance"`        // distilled guidance (FLUX-class); 0 = server default
+	OutputFormat     string   `json:"output_format"`   // png|jpeg|webp|webm|avi
+	InitImage        string   `json:"init_image"`      // base64 or data URL (img2img)
+	InitImagePath    string   `json:"init_image_path"` // local image file (img2img); read + encoded by the backend
+	Strength         float64  `json:"strength"`        // img2img denoising strength
+	MaskImage        string   `json:"mask_image,omitempty"`
+	MaskImagePath    string   `json:"mask_image_path,omitempty"`
+	ControlImage     string   `json:"control_image,omitempty"`
+	ControlImagePath string   `json:"control_image_path,omitempty"`
+	ControlStrength  float64  `json:"control_strength,omitempty"`
+	RefImages        []string `json:"ref_images,omitempty"`
+	RefImagePaths    []string `json:"ref_image_paths,omitempty"`
+	Lora             []Lora   `json:"lora,omitempty"`
+	CFGScaleExplicit bool     `json:"-"` // preserve a caller's explicit zero
+	GuidanceExplicit bool     `json:"-"`
 }
 
 // Job is the API view of one media generation.
@@ -163,24 +174,29 @@ const (
 // goroutines, so every access (read or write) after the claim is inserted
 // into Manager.servers must hold Manager.mu.
 type server struct {
-	modelID   string
-	runtimeID string
-	exe       string
-	modelPath string
-	port      int
-	handle    *processes.Handle
-	logFile   string
-	help      string
-	caps      []string
-	client    *http.Client
-	ready     bool
-	starting  bool          // launch in flight (claim in m.servers)
-	started   chan struct{} // closed when the launch attempt finishes
+	modelID       string
+	runtimeID     string
+	exe           string
+	modelPath     string
+	port          int
+	nativePort    int // runtime-internal loopback port; never exposed to callers
+	handle        *processes.Handle
+	logFile       string
+	help          string
+	caps          []string
+	client        *http.Client
+	apiKey        string // process-local secret; never persisted or logged
+	gateway       *sdGateway
+	cacheSnapshot *launchCacheSnapshot
+	ready         bool
+	starting      bool          // launch in flight (claim in m.servers)
+	started       chan struct{} // closed when the launch attempt finishes
 
 	state     string // starting|ready|failed
 	errMsg    string
 	detail    string             // what a "starting" server is doing, when it is not just loading weights
 	cancel    context.CancelFunc // aborts the launch's own work (restoring model files) before the process exists
+	launchCtx context.Context
 	startedAt string
 	updatedAt string
 	settings  LoadSettings
@@ -247,7 +263,7 @@ func NewManager(db *sql.DB, layout *config.Layout, rt *runtimes.Manager, lib *mo
 	}
 	return &Manager{
 		db: db, layout: layout, rt: rt, lib: lib, events: events, log: log,
-		http:     &http.Client{Timeout: 0},
+		http:     sdHTTPClient(),
 		servers:  map[string]*server{},
 		jobs:     map[string]*jobHandle{},
 		capCache: map[string][]string{},
@@ -330,20 +346,39 @@ func (m *Manager) EnsureServer(modelID string, s LoadSettings) (int, error) {
 			m.mu.Unlock()
 			<-ch // launch attempt finished (ready or failed); re-check
 			m.mu.Lock()
+			if m.servers[modelID] != sv {
+				m.mu.Unlock()
+				return 0, fmt.Errorf("diffusion server for model %s was stopped during startup", modelID)
+			}
+			if !sv.ready {
+				err := fmt.Errorf("diffusion server startup failed: %s", sv.errMsg)
+				m.mu.Unlock()
+				return 0, err
+			}
 			continue
 		}
 		break
 	}
 	// Claim the launch slot so parallel callers wait instead of racing.
+	previous := m.servers[modelID]
+	ctx, cancel := context.WithCancel(context.Background())
 	claim := &server{
 		modelID: modelID, starting: true, started: make(chan struct{}),
 		state: ServerStarting, startedAt: now(), updatedAt: now(),
+		launchCtx: ctx, cancel: cancel, settings: s,
 	}
 	m.servers[modelID] = claim
 	m.mu.Unlock()
+	if previous != nil {
+		m.closeSDServer(previous)
+	}
 
 	port, err := m.startServer(modelID, s, claim)
 	m.mu.Lock()
+	stillOurs := m.servers[modelID] == claim
+	if err == nil && (!stillOurs || ctx.Err() != nil || claim.state == ServerFailed) {
+		err = fmt.Errorf("diffusion server for model %s was stopped during startup", modelID)
+	}
 	if err != nil {
 		// Keep the failed entry (with its error + log path) so the Library
 		// can show diagnostics, same as a failed llama-server instance. It
@@ -356,27 +391,19 @@ func (m *Manager) EnsureServer(modelID string, s LoadSettings) (int, error) {
 		claim.port = 0
 		claim.updatedAt = now()
 		m.mu.Unlock()
+		m.closeSDServer(claim)
 		close(claim.started)
-		m.publish("media.server_state", map[string]any{"model_id": modelID, "state": ServerFailed, "error": err.Error()})
+		if stillOurs {
+			m.publish("media.server_state", map[string]any{"model_id": modelID, "state": ServerFailed, "error": err.Error()})
+		}
 		return 0, err
 	}
 	claim.starting = false
 	claim.ready = true
 	claim.state = ServerReady
 	claim.updatedAt = now()
-	stillOurs := false
-	if cur, ok := m.servers[modelID]; ok && cur == claim {
-		stillOurs = true
-	}
 	m.mu.Unlock()
 	close(claim.started)
-	if !stillOurs {
-		// StopServer ran during startup — do not orphan the process.
-		if claim.handle != nil {
-			_ = claim.handle.KillTree()
-		}
-		return 0, fmt.Errorf("diffusion server for model %s was stopped during startup", modelID)
-	}
 	if s.SaveOnSuccess && m.lib != nil {
 		if raw, jerr := json.Marshal(s); jerr == nil {
 			if serr := m.lib.SaveLastGood(modelID, raw); serr != nil {
@@ -392,13 +419,23 @@ func (m *Manager) EnsureServer(modelID string, s LoadSettings) (int, error) {
 // StopServer can cancel mid-launch). Local pipeline companions (VAE,
 // text encoders, tokenizer) are paired automatically when the settings
 // leave them empty.
-func (m *Manager) startServer(modelID string, s LoadSettings, sv *server) (int, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+func (m *Manager) startServer(modelID string, s LoadSettings, sv *server) (port int, retErr error) {
 	m.mu.Lock()
-	sv.settings = s
-	sv.cancel = cancel
+	ctx := sv.launchCtx
 	m.mu.Unlock()
+	var endpoint *sdEndpoint
+	var handle *processes.Handle
+	defer func() {
+		if retErr != nil {
+			endpoint.close()
+			if handle != nil {
+				_ = handle.KillTree()
+			}
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 
 	mdl, err := m.lib.Get(modelID)
 	if err != nil {
@@ -418,22 +455,12 @@ func (m *Manager) startServer(modelID string, s LoadSettings, sv *server) (int, 
 	if err != nil {
 		return 0, err
 	}
+	sourceFiles, cacheErr := cacheLaunchFiles(exe, args)
 	m.mu.Lock()
 	sv.resolved = resolved
 	m.mu.Unlock()
 	for _, w := range warnings {
 		m.log.Warn("sd-server launch warning", "model_id", modelID, "warning", w)
-	}
-
-	port, err := allocatePort()
-	if err != nil {
-		return 0, err
-	}
-	// Patch the allocated port into the argv (BuildServerArgs used 0).
-	for i := 0; i+1 < len(args); i++ {
-		if args[i] == "--listen-port" {
-			args[i+1] = fmt.Sprint(port)
-		}
 	}
 
 	logDir := filepath.Join(m.MediaDir(), "logs")
@@ -448,6 +475,10 @@ func (m *Manager) startServer(modelID string, s LoadSettings, sv *server) (int, 
 	// stable-diffusion.cpp cannot read: swap in restored copies first.
 	setDetail := func(detail string) {
 		m.mu.Lock()
+		if m.servers[modelID] != sv || ctx.Err() != nil {
+			m.mu.Unlock()
+			return
+		}
 		changed := sv.detail != detail
 		sv.detail = detail
 		sv.updatedAt = now()
@@ -470,8 +501,25 @@ func (m *Manager) startServer(modelID string, s LoadSettings, sv *server) (int, 
 		return 0, err
 	}
 	setDetail("")
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	args, endpoint, err = configureSDTransport(help, args)
+	if err != nil {
+		return 0, err
+	}
+	if err := m.attachSDTransport(sv, endpoint); err != nil {
+		return 0, err
+	}
+	port = endpoint.port
+	loadedFiles, loadedCacheErr := cacheLaunchFiles(exe, args)
+	if cacheErr == nil && loadedCacheErr == nil {
+		m.mu.Lock()
+		sv.cacheSnapshot = &launchCacheSnapshot{Settings: resolved, Args: cacheArgs(args), SourceFiles: sourceFiles, LoadedFiles: loadedFiles}
+		m.mu.Unlock()
+	}
 	fmt.Fprintf(logFile, "=== sd-server starting %s model=%s ===\n", now(), mdl.PrimaryPath)
-	fmt.Fprintf(logFile, "=== argv: %s ===\n", strings.Join(args, " "))
+	fmt.Fprintf(logFile, "=== argv: %s ===\n", strings.Join(redactSDArgs(args), " "))
 
 	env := SDLaunchEnvironment(exe, args, rt.Backend)
 	if env["GGML_CUDA_DISABLE_GRAPHS"] != "" {
@@ -483,27 +531,30 @@ func (m *Manager) startServer(modelID string, s LoadSettings, sv *server) (int, 
 	if err != nil {
 		return 0, fmt.Errorf("launching sd-server: %w", err)
 	}
+	handle = h
+	// Reap this exact launch and close only its own gateway. The public
+	// listener closes even when the process dies before readiness.
+	exited := make(chan struct{})
+	go func() {
+		_, _ = h.Wait()
+		endpoint.close()
+		close(exited)
+	}()
 	m.mu.Lock()
+	if m.servers[modelID] != sv || ctx.Err() != nil || sv.state != ServerStarting {
+		m.mu.Unlock()
+		return 0, context.Canceled
+	}
 	sv.runtimeID = rt.ID
 	sv.exe = exe
 	sv.modelPath = mdl.PrimaryPath
-	sv.port = port
 	sv.handle = h
 	sv.logFile = logPath
 	sv.help = help
 	sv.caps = caps
-	sv.client = &http.Client{Timeout: 0}
+	sv.client = sdHTTPClient()
 	sv.updatedAt = now()
 	m.mu.Unlock()
-
-	// Reap + observe exit: Cmd.ProcessState stays nil until Wait, so a
-	// died-at-startup server must be detected through a waiter or the
-	// readiness poll would spin until its full deadline.
-	exited := make(chan struct{})
-	go func() {
-		_, _ = h.Wait()
-		close(exited)
-	}()
 
 	if err := m.waitReady(sv, exited, 10*time.Minute); err != nil {
 		_ = h.KillTree()
@@ -517,6 +568,34 @@ func (m *Manager) startServer(modelID string, s LoadSettings, sv *server) (int, 
 	// a crash from an intentional stop.
 	go m.watchServerExit(modelID, sv, exited)
 	return port, nil
+}
+
+// attachSDTransport refuses to publish a listener for a stopped or replaced
+// launch claim. Its caller owns cleanup until startup completes.
+func (m *Manager) attachSDTransport(sv *server, endpoint *sdEndpoint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.servers[sv.modelID] != sv || sv.launchCtx.Err() != nil || sv.state != ServerStarting {
+		return context.Canceled
+	}
+	sv.port, sv.nativePort = endpoint.port, endpoint.nativePort
+	sv.apiKey, sv.gateway = endpoint.key, endpoint.gateway
+	return nil
+}
+
+// closeSDServer captures resources under the manager lock, then tears down
+// this exact launch outside it. It cannot close a replacement's gateway.
+func (m *Manager) closeSDServer(sv *server) {
+	m.mu.Lock()
+	gate, cancel, handle := sv.gateway, sv.cancel, sv.handle
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	gate.Close()
+	if handle != nil {
+		_ = handle.KillTree()
+	}
 }
 
 // watchServerExit observes a ready sd-server's process exit. If the entry
@@ -579,6 +658,7 @@ func (m *Manager) handleServerExit(modelID string, sv *server) {
 	sv.port = 0
 	sv.updatedAt = now()
 	m.mu.Unlock()
+	m.closeSDServer(sv)
 
 	m.publish("media.server_error", map[string]any{"model_id": modelID, "error": errMsg})
 	m.publish("media.server_state", map[string]any{"model_id": modelID, "state": ServerFailed, "error": errMsg})
@@ -591,6 +671,10 @@ func (m *Manager) handleServerExit(modelID string, sv *server) {
 // "failed" state written here with a plain "canceled".
 func (m *Manager) failJobsForModel(modelID, reason string) {
 	m.mu.Lock()
+	var failed *server
+	if sv := m.servers[modelID]; sv != nil && sv.state == ServerFailed {
+		failed = sv
+	}
 	var ids []string
 	for id, jh := range m.jobs {
 		if jh.modelID == modelID && !jh.terminal {
@@ -599,6 +683,9 @@ func (m *Manager) failJobsForModel(modelID, reason string) {
 		}
 	}
 	m.mu.Unlock()
+	if failed != nil {
+		m.closeSDServer(failed)
+	}
 	for _, id := range ids {
 		_ = m.setState(id, StateFailed, "", reason)
 		m.publish("media.progress", map[string]any{"id": id, "model_id": modelID, "state": StateFailed, "error": reason, "message": "Diffusion server crashed"})
@@ -640,21 +727,27 @@ func (m *Manager) waitReady(sv *server, exited <-chan struct{}, timeout time.Dur
 	port := sv.port
 	logFile := sv.logFile
 	modelID, modelPath, settings, handle := sv.modelID, sv.modelPath, sv.resolved, sv.handle
+	launchCtx := sv.launchCtx
 	m.mu.Unlock()
 	deadline := time.Now().Add(timeout)
 	url := fmt.Sprintf("http://127.0.0.1:%d/sdcpp/v1/capabilities", port)
-	client := &http.Client{Timeout: 5 * time.Second}
 	for {
+		if err := launchCtx.Err(); err != nil {
+			return err
+		}
 		if handle.IsCoreDumping() {
 			return errors.New(coreDumpFailure(logFile))
 		}
-		req, _ := http.NewRequest(http.MethodGet, url, nil)
-		if resp, err := client.Do(req); err == nil {
+		ctx, cancel := context.WithTimeout(launchCtx, 5*time.Second)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if resp, err := m.doSD(req, port); err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
+				cancel()
 				return nil
 			}
 		}
+		cancel()
 		select {
 		case <-exited:
 			tail, _ := os.ReadFile(logFile)
@@ -669,7 +762,15 @@ func (m *Manager) waitReady(sv *server, exited <-chan struct{}, timeout time.Dur
 			tail, _ := os.ReadFile(logFile)
 			return fmt.Errorf("sd-server did not become ready within %s:\n%s", timeout, lastLines(string(tail), 8))
 		}
-		time.Sleep(300 * time.Millisecond)
+		timer := time.NewTimer(300 * time.Millisecond)
+		select {
+		case <-timer.C:
+		case <-launchCtx.Done():
+			timer.Stop()
+			return launchCtx.Err()
+		case <-exited:
+			timer.Stop()
+		}
 	}
 }
 
@@ -680,17 +781,9 @@ func (m *Manager) StopServer(modelID string) {
 	m.mu.Lock()
 	sv, ok := m.servers[modelID]
 	delete(m.servers, modelID)
-	var handle *processes.Handle
-	var cancel context.CancelFunc
-	if ok {
-		handle, cancel = sv.handle, sv.cancel
-	}
 	m.mu.Unlock()
-	if cancel != nil {
-		cancel() // a launch still preparing model files stops there
-	}
-	if handle != nil {
-		_ = handle.KillTree()
+	if ok {
+		m.closeSDServer(sv)
 	}
 	m.publish("media.server_stopped", map[string]any{"model_id": modelID})
 	m.publish("media.server_state", map[string]any{"model_id": modelID, "state": ServerStopped})
@@ -769,25 +862,7 @@ func (m *Manager) ServerPort(modelID string) (int, bool) {
 
 // Capabilities proxies the sd-server capability document for a model.
 func (m *Manager) Capabilities(ctx context.Context, modelID string) (map[string]any, error) {
-	port, ok := m.ServerPort(modelID)
-	if !ok {
-		return nil, fmt.Errorf("diffusion server for model %s is not running", modelID)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("http://127.0.0.1:%d/sdcpp/v1/capabilities", port), nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := m.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var out map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return m.fetchCapabilities(ctx, modelID)
 }
 
 // StartGenerate validates a request, records a queued media job, and runs
@@ -810,7 +885,7 @@ func (m *Manager) StartGenerateWith(modelID string, p GenerateParams, ov *LoadOv
 // RunStage runs one generation to completion and returns the finished job.
 // It is the seam the workflow executor drives: same job row, events and
 // cancel path as StartGenerate, but blocking. A canceled ctx cancels the job
-// (including the GPU work) and returns ctx's error; a failed job returns the
+// (and best-effort requests runtime cancellation) and returns ctx's error; a failed job returns the
 // job alongside an error carrying its message.
 func (m *Manager) RunStage(ctx context.Context, modelID string, p GenerateParams, ov *LoadOverrides) (*Job, error) {
 	return m.RunStageWithProgress(ctx, modelID, p, ov, nil)
@@ -865,16 +940,11 @@ func (m *Manager) startGenerate(modelID string, p GenerateParams, ov *LoadOverri
 	if strings.TrimSpace(p.Prompt) == "" {
 		return nil, nil, fmt.Errorf("prompt is required")
 	}
-	// Reject an oversize inline init_image before ValidateGenerateParams,
-	// which otherwise silently drops it (turning img2img into txt2img
-	// without telling the caller). Large images belong in InitImagePath.
-	if err := checkInitImageSize(p); err != nil {
+	p.RefImages = append([]string(nil), p.RefImages...)
+	p.RefImagePaths = append([]string(nil), p.RefImagePaths...)
+	p.Lora = append([]Lora(nil), p.Lora...)
+	if err := validateGenerationInputs(p); err != nil {
 		return nil, nil, err
-	}
-	if p.InitImagePath != "" {
-		if err := validateInitImagePath(p.InitImagePath); err != nil {
-			return nil, nil, err
-		}
 	}
 	ValidateGenerateParams(&p)
 
@@ -962,7 +1032,21 @@ func (m *Manager) runJob(jctx context.Context, id, modelID, kind string, p Gener
 			settings.SaveOnSuccess = false
 		}
 		var err error
-		port, err = m.EnsureServer(modelID, settings)
+		type launchResult struct {
+			port int
+			err  error
+		}
+		launched := make(chan launchResult, 1)
+		go func() { port, err := m.EnsureServer(modelID, settings); launched <- launchResult{port, err} }()
+		select {
+		case result := <-launched:
+			port, err = result.port, result.err
+		case <-jctx.Done():
+			if !jobCanceledByCrash(jctx) {
+				_ = m.setState(id, StateCanceled, "", "canceled")
+			}
+			return
+		}
 		if err != nil {
 			msg := err.Error()
 			_ = m.setState(id, StateFailed, "", msg)
@@ -984,19 +1068,40 @@ func (m *Manager) runJob(jctx context.Context, id, modelID, kind string, p Gener
 	_, _ = m.db.Exec(`UPDATE media_jobs SET runtime_id=?, log_path=?, pid=?, updated_at=? WHERE id=?`, runtimeID, logPath, pid, now(), id)
 	m.publish("media.progress", map[string]any{"id": id, "model_id": modelID, "state": StateRunning, "message": "Submitting job…"})
 
-	// Resolve init_image_path to a data URL just before use: validated and
-	// sized at StartGenerate time, but the (potentially large) decoded
-	// payload is never persisted into params_json.
-	reqParams := p
-	if p.InitImagePath != "" && p.InitImage == "" {
-		dataURL, err := loadInitImageDataURL(p.InitImagePath)
-		if err != nil {
-			msg := err.Error()
-			_ = m.setState(id, StateFailed, "", msg)
-			m.publish("media.progress", map[string]any{"id": id, "state": StateFailed, "error": msg})
+	failRequest := func(err error) {
+		if jctx.Err() != nil && !jobCanceledByCrash(jctx) {
+			_ = m.setState(id, StateCanceled, "", "canceled")
 			return
 		}
-		reqParams.InitImage = dataURL
+		if jobCanceledByCrash(jctx) {
+			return
+		}
+		_ = m.setState(id, StateFailed, "", err.Error())
+		m.publish("media.progress", map[string]any{"id": id, "state": StateFailed, "error": err.Error()})
+	}
+	apiCaps, err := m.generationCapabilities(jctx, modelID)
+	if err != nil {
+		failRequest(err)
+		return
+	}
+	if err = apiCaps.ValidateGeneration(p); err != nil {
+		failRequest(err)
+		return
+	}
+	settings, _ := m.RunningSettings(modelID)
+	reqParams, err := convertPromptLora(p, apiCaps, settings)
+	if err != nil {
+		failRequest(err)
+		return
+	}
+	reqParams, err = resolveGenerationImages(reqParams)
+	if err != nil {
+		failRequest(err)
+		return
+	}
+	if !m.serverMatchesPort(modelID, port) {
+		failRequest(ErrServerNotRunning)
+		return
 	}
 
 	endpoint := "/sdcpp/v1/img_gen"
@@ -1004,19 +1109,6 @@ func (m *Manager) runJob(jctx context.Context, id, modelID, kind string, p Gener
 		endpoint = "/sdcpp/v1/vid_gen"
 	}
 	sdBody := SDRequestBody(reqParams)
-	if p.Guidance > 0 {
-		sp, _ := sdBody["sample_params"].(map[string]any)
-		if sp == nil {
-			sp = map[string]any{}
-			sdBody["sample_params"] = sp
-		}
-		guid, _ := sp["guidance"].(map[string]any)
-		if guid == nil {
-			guid = map[string]any{}
-			sp["guidance"] = guid
-		}
-		guid["distilled_guidance"] = p.Guidance
-	}
 	logOffset := logSize(logPath) // what the server logs from here on belongs to this job
 	jobID, status, err := m.submitSDJob(jctx, port, endpoint, sdBody)
 	if err != nil {
@@ -1024,13 +1116,16 @@ func (m *Manager) runJob(jctx context.Context, id, modelID, kind string, p Gener
 		// native async API itself is missing (older sd.cpp builds); a 400
 		// (bad params) or 429 (queue full) must surface as-is, not retry
 		// through a second, different submission.
-		if shouldFallbackToOpenAICompat(kind, status) {
-			if _, ferr := m.generateOpenAICompat(jctx, id, modelID, p); ferr != nil {
+		if shouldFallbackToOpenAICompat(kind, status) && canFallbackGeneration(reqParams) {
+			if _, ferr := m.generateOpenAICompat(jctx, id, modelID, reqParams); ferr != nil {
 				msg := firstErr(err, ferr)
 				_ = m.setState(id, StateFailed, "", msg)
 				m.publish("media.progress", map[string]any{"id": id, "state": StateFailed, "error": msg})
 			}
 			return
+		}
+		if shouldFallbackToOpenAICompat(kind, status) && !canFallbackGeneration(reqParams) {
+			err = fmt.Errorf("native generation API unavailable; compatibility fallback cannot preserve the requested inputs or sampling controls: %w", err)
 		}
 		msg := err.Error()
 		_ = m.setState(id, StateFailed, "", msg)
@@ -1044,6 +1139,9 @@ func (m *Manager) runJob(jctx context.Context, id, modelID, kind string, p Gener
 		jh.port = port
 	}
 	m.mu.Unlock()
+	if jctx.Err() != nil {
+		m.cancelSDJob(port, jobID)
+	}
 
 	tracker := newLogProgress(logPath, logOffset)
 	result, err := m.pollSDJob(jctx, modelID, port, jobID, func(st string) error {
@@ -1162,7 +1260,7 @@ func (m *Manager) generateOpenAICompat(ctx context.Context, id, modelID string, 
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := m.http.Do(req)
+	resp, err := m.doSD(req, port)
 	if err != nil {
 		return nil, err
 	}
@@ -1191,6 +1289,9 @@ func (m *Manager) generateOpenAICompat(ctx context.Context, id, modelID string, 
 	}
 	if ext == "jpeg" {
 		ext = "jpg"
+	}
+	if !containsChoice([]string{"png", "jpg", "webp"}, ext) {
+		return nil, fmt.Errorf("sd-server returned unsupported image format %q", ext)
 	}
 	var paths []string
 	for i, d := range out.Data {
@@ -1221,14 +1322,17 @@ func (m *Manager) generateOpenAICompat(ctx context.Context, id, modelID string, 
 func (m *Manager) submitSDJob(ctx context.Context, port int, endpoint string, body map[string]any) (string, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, sdSubmitRequestTimeout)
 	defer cancel()
-	payload, _ := json.Marshal(body)
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return "", 0, fmt.Errorf("encoding sd-server request: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		fmt.Sprintf("http://127.0.0.1:%d%s", port, endpoint), bytes.NewReader(payload))
 	if err != nil {
 		return "", 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := m.http.Do(req)
+	resp, err := m.doSD(req, port)
 	if err != nil {
 		return "", 0, err
 	}
@@ -1299,7 +1403,7 @@ func (m *Manager) pollSDJob(ctx context.Context, modelID string, port int, jobID
 			cancel()
 			return nil, err
 		}
-		resp, err := m.http.Do(req)
+		resp, err := m.doSD(req, port)
 		if err != nil {
 			cancel()
 			if onTick != nil {
@@ -1407,6 +1511,13 @@ func (m *Manager) storeSDResult(id, modelID, kind string, p GenerateParams, doc 
 	if ext == "jpeg" {
 		ext = "jpg"
 	}
+	formats := []string{"png", "jpg", "webp"}
+	if kind == KindVideo {
+		formats = []string{"webm", "avi", "mp4"}
+	}
+	if !containsChoice(formats, ext) {
+		return nil, nil, fmt.Errorf("sd-server returned unsupported output format %q", ext)
+	}
 	var paths []string
 	for i, b := range blobs {
 		raw, err := base64.StdEncoding.DecodeString(b)
@@ -1442,18 +1553,24 @@ func (m *Manager) storeSDResult(id, modelID, kind string, p GenerateParams, doc 
 
 // Cancel cancels a queued/running media job. For a job still tracked in
 // memory it cancels the Go context (stopping polling) and best-effort posts
-// the sd.cpp cancel endpoint so the GPU actually stops generating instead
-// of finishing behind the caller's back with later jobs queued after it.
+// the sd.cpp cancel endpoint. GPU abort depends on the runtime's advertised
+// cancel_generating capability; some builds can only cancel queued jobs.
 // A job id from before a backend restart (no longer in memory) still gets
 // its DB row marked canceled if it is non-terminal.
 func (m *Manager) Cancel(id string) error {
 	m.mu.Lock()
 	jh, ok := m.jobs[id]
+	var cancel context.CancelCauseFunc
+	var port int
+	var sdJobID string
+	if ok && jh != nil {
+		cancel, port, sdJobID = jh.cancel, jh.port, jh.sdJobID
+	}
 	m.mu.Unlock()
 	if ok && jh != nil {
-		jh.cancel(nil) // plain user cancel, not errServerCrashed
-		if jh.sdJobID != "" && jh.port != 0 {
-			m.cancelSDJob(jh.port, jh.sdJobID)
+		cancel(nil) // plain user cancel, not errServerCrashed
+		if sdJobID != "" && port != 0 {
+			m.cancelSDJob(port, sdJobID)
 		}
 		return nil
 	}
@@ -1482,7 +1599,7 @@ func (m *Manager) cancelSDJob(port int, sdJobID string) {
 	if err != nil {
 		return
 	}
-	resp, err := m.http.Do(req)
+	resp, err := m.doSD(req, port)
 	if err != nil {
 		return
 	}

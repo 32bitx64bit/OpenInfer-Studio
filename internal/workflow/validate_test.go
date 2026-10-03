@@ -77,16 +77,15 @@ func TestCycleIsReportedOnEveryLoopNode(t *testing.T) {
 
 func TestCapabilityGating(t *testing.T) {
 	g := txt2img()
-	g.Nodes = append(g.Nodes, node("n9", "lora.load", map[string]any{"path": "/loras/x.safetensors"}))
-	g.Edges[0] = wire("n1", "model", "n9", "model")
-	g.Edges = append(g.Edges, wire("n9", "model", "n5", "model"))
+	g.Nodes = append(g.Nodes, node("n9", "vae.load", map[string]any{"path": "/models/vae.safetensors"}))
+	g.Edges[2] = wire("n9", "vae", "n5", "vae")
 
-	noLora := Caps{Known: true, Flags: []string{"vae"}}
-	issues := Validate(g, NewRegistry(), noLora)
+	noVAE := Caps{Known: true, Flags: []string{"lora-model-dir"}}
+	issues := Validate(g, NewRegistry(), noVAE)
 	if !hasIssue(issues, "capability.missing") {
 		t.Fatalf("issues = %+v, want capability.missing", issues)
 	}
-	if msg := issues[0].Message; !strings.Contains(msg, "--lora-model-dir") {
+	if msg := issues[0].Message; !strings.Contains(msg, "--vae") {
 		t.Fatalf("message %q should name the missing flag", msg)
 	}
 

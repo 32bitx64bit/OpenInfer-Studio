@@ -17,6 +17,8 @@ const (
 	StageGenerate = "generate" // one sd-server img_gen / vid_gen request
 	StageResize   = "resize"   // CPU image scaling in the backend
 	StageSave     = "save"     // copy an output into the media store
+	StageImage    = "image"
+	StageUpscale  = "upscale"
 )
 
 // Server actions, relative to what is running now.
@@ -36,6 +38,7 @@ type Plan struct {
 // ImageRef points at an image a stage consumes: the output of an earlier
 // stage, or a local file the user supplied.
 type ImageRef struct {
+	Index int    `json:"index,omitempty"`
 	Stage string `json:"stage,omitempty"`
 	Path  string `json:"path,omitempty"`
 }
@@ -43,9 +46,11 @@ type ImageRef struct {
 // Stage is one unit of work. Generate stages are the only ones that touch
 // the GPU; each absorbs the loaders, prompts and size wired into its Sample.
 type Stage struct {
-	ID     string `json:"id"`
-	NodeID string `json:"node_id"`
-	Kind   string `json:"kind"`
+	Upscale *UpscaleStage `json:"upscale,omitempty"`
+	Image   *ImageStage   `json:"image,omitempty"`
+	ID      string        `json:"id"`
+	NodeID  string        `json:"node_id"`
+	Kind    string        `json:"kind"`
 	// Key is the node's content hash: same key, same output. Volatile stages
 	// (random seed) must never be served from cache.
 	Key      string   `json:"key"`
@@ -63,13 +68,16 @@ type Stage struct {
 
 // GenerateStage is one sd-server request plus the server it needs.
 type GenerateStage struct {
-	Server   string                  `json:"server"` // ServerNeed.Signature
-	Params   mediagen.GenerateParams `json:"params"`
-	Init     *ImageRef               `json:"init,omitempty"` // image to start from (img2img)
-	SeedMode string                  `json:"seed_mode"`
+	Mask      *ImageRef               `json:"mask,omitempty"`
+	Control   *ImageRef               `json:"control,omitempty"`
+	Reference *ImageRef               `json:"reference,omitempty"`
+	Server    string                  `json:"server"` // ServerNeed.Signature
+	Params    mediagen.GenerateParams `json:"params"`
+	Init      *ImageRef               `json:"init,omitempty"` // image to start from (img2img)
+	SeedMode  string                  `json:"seed_mode"`
 }
 
-// ResizeStage scales an image. Width and Height are the resolved output size.
+// ResizeStage scales an image. Zero dimensions resolve from the actual source.
 type ResizeStage struct {
 	Src    ImageRef `json:"src"`
 	Mode   string   `json:"mode"`
@@ -110,6 +118,7 @@ func Build(g Graph, reg *Registry, env Env, caps Caps, opts Options) (*Plan, []I
 		return nil, issues
 	}
 	b := newBuilder(g, reg, env)
+	b.launchCaps = caps
 	b.issues = issues
 	plan := b.build(opts)
 	if HasErrors(b.issues) {
@@ -130,17 +139,19 @@ type nodeKey struct {
 }
 
 type builder struct {
-	g      Graph
-	reg    *Registry
-	env    Env
-	nodes  map[string]Node
-	specs  map[string]NodeSpec
-	in     map[string]map[string]Endpoint // node -> input port -> upstream
-	issues []Issue
-	seen   map[string]bool // dedupes issues reported from more than one pass
+	g          Graph
+	reg        *Registry
+	env        Env
+	launchCaps Caps
+	nodes      map[string]Node
+	specs      map[string]NodeSpec
+	in         map[string]map[string]Endpoint // node -> input port -> upstream
+	issues     []Issue
+	seen       map[string]bool // dedupes issues reported from more than one pass
 
 	models  map[string]*ModelInfo // by library id; nil = failed lookup
 	files   map[string]*FileMeta  // by path; nil = failed lookup
+	apiCaps map[string]capabilityResult
 	keys    map[string]nodeKey
 	imgs    map[string]imgInfo // IMAGE-producing node -> where its image lives
 	servers []ServerNeed
@@ -210,8 +221,12 @@ func (b *builder) build(opts Options) *Plan {
 			b.sample(n, false)
 		case "sample.video":
 			b.sample(n, true)
-		case "image.load":
+		case "image.upscale":
+			b.upscale(n)
+		case "image.load", "mask.load":
 			b.imageLoad(n)
+		case "image.crop", "image.pad", "image.rotate", "image.blend", "image.pick":
+			b.imageOp(n)
 		case "image.resize":
 			b.resize(n)
 		case "image.save":
@@ -435,7 +450,7 @@ func (b *builder) computeKey(n Node) nodeKey {
 				doc.Files = append(doc.Files, fileIdentity{ID: info.ID, Size: info.Size, ModTime: info.ModTime})
 			}
 		}
-	case "textencoder.load", "vae.load", "lora.load", "image.load":
+	case "textencoder.load", "vae.load", "lora.load", "image.load", "mask.load":
 		if path := p.str("path"); path != "" {
 			if meta := b.file(n.ID, path); meta != nil {
 				doc.Files = append(doc.Files, fileIdentity{Path: path, Size: meta.Size, ModTime: meta.ModTime})
@@ -498,10 +513,15 @@ func (b *builder) resize(n Node) {
 	if p.str("mode") == "size" {
 		w, h = p.integer("width"), p.integer("height")
 	} else {
-		w = int(math.Round(float64(src.w) * p.num("scale")))
-		h = int(math.Round(float64(src.h) * p.num("scale")))
+		if src.w == 0 || src.h == 0 {
+			// Resolve dimensions after a native upscaler returns its image.
+			w, h = 0, 0
+		} else {
+			w = int(math.Round(float64(src.w) * p.num("scale")))
+			h = int(math.Round(float64(src.h) * p.num("scale")))
+		}
 	}
-	if w < 16 || h < 16 || w > 4096 || h > 4096 {
+	if (w != 0 || h != 0) && (w < 16 || h < 16 || w > 4096 || h > 4096) {
 		b.errorf("plan.resize_size", n.ID, "", "Resize would produce %d × %d; the limit is 16 to 4096 on each side", w, h)
 		return
 	}
@@ -603,8 +623,7 @@ func (b *builder) sample(n Node, video bool) {
 		}
 	}
 
-	// Prompts and LoRA tags. sd-server applies LoRAs through <lora:name:w>
-	// tags in the prompt, read from one directory fixed at launch.
+	// Prompts stay independent of the native structured LoRA entries.
 	positive := ""
 	if up, _, ok := b.upstream(n, "positive"); ok {
 		positive = b.effective(up).str("text")
@@ -616,32 +635,15 @@ func (b *builder) sample(n Node, video bool) {
 	if up, _, ok := b.upstream(n, "negative"); ok {
 		negative = b.effective(up).str("text")
 	}
-	var tags []string
-	for i := len(loras) - 1; i >= 0; i-- { // checkpoint-side first
-		lp := b.effective(loras[i])
-		path := lp.str("path")
-		b.file(loras[i].ID, path)
-		dir := filepath.Dir(path)
-		name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-		if strings.ContainsAny(name, "<>: \t") {
-			b.errorf("plan.lora_name", loras[i].ID, "", "LoRA file name %q cannot be used in a prompt tag; rename it without spaces, ':' or angle brackets", name)
-			continue
-		}
-		if ov.LoraModelDir != "" && ov.LoraModelDir != dir {
-			b.errorf("plan.lora_dir", loras[i].ID, "", "all LoRAs on one Sample must be in the same folder (%s and %s differ)", ov.LoraModelDir, dir)
-			continue
-		}
-		ov.LoraModelDir = dir
-		tags = append(tags, fmt.Sprintf("<lora:%s:%g>", name, lp.num("strength")))
+	for _, l := range loras {
+		b.file(l.ID, b.effective(l).str("path"))
 	}
 	prompt := positive
-	if len(tags) > 0 {
-		prompt = strings.TrimRight(positive, " ") + " " + strings.Join(tags, " ")
-	}
 
 	gp := mediagen.GenerateParams{
 		Kind:           mediagen.KindImage,
 		Prompt:         prompt,
+		Lora:           b.structuredLoras(n, libraryID, loras),
 		NegativePrompt: negative,
 		Steps:          p.integer("steps"),
 		CFGScale:       p.num("cfg"),
@@ -651,6 +653,7 @@ func (b *builder) sample(n Node, video bool) {
 		Guidance:       p.num("guidance"),
 		OutputFormat:   p.str("output_format"),
 	}
+	b.configureLoraCatalog(n, libraryID, gp.Lora, &ov)
 	if video {
 		gp.Kind = mediagen.KindVideo
 		gp.VideoFrames = p.integer("frames")
@@ -669,10 +672,7 @@ func (b *builder) sample(n Node, video bool) {
 				gp.BatchCount = lp.integer("batch")
 			}
 		default: // an IMAGE producer
-			if video {
-				b.errorf("plan.i2v_unsupported", n.ID, "start", "image-to-video is not available yet; start Sample (video) from an Empty Latent")
-				break
-			}
+
 			src, found := b.imgs[up.ID]
 			if !found {
 				break
@@ -700,6 +700,7 @@ func (b *builder) sample(n Node, video bool) {
 	st := b.newStage(n, StageGenerate)
 	st.Deps = deps
 	st.Generate = &GenerateStage{Server: sig, Params: gp, Init: init, SeedMode: p.str("seed_mode")}
+	b.sampleInputs(n, st, info.ID, video)
 	if !video {
 		b.imgs[n.ID] = imgInfo{ref: ImageRef{Stage: st.ID}, w: gp.Width, h: gp.Height}
 	}

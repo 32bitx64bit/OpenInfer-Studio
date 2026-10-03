@@ -344,6 +344,8 @@ func (h *handlers) generateMedia(w http.ResponseWriter, r *http.Request) {
 	} else {
 		p.Seed = -1
 	}
+	_, p.CFGScaleExplicit = raw["cfg_scale"]
+	_, p.GuidanceExplicit = raw["guidance"]
 	if len(p.Prompt) > 8000 {
 		writeErr(w, 400, "prompt too large", nil)
 		return

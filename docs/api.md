@@ -328,8 +328,45 @@ paths) — the desktop UI loads `file_urls` only.
 | POST `/media/jobs/{id}/save` | `{"dest_path": "/…/photo.png"}` copy outputs out of the managed media dir to a user-chosen absolute path. A single-output job lands exactly on `dest_path`; batch extras get `-1`, `-2`, … before the extension. Returns `{ok, saved:[…]}` |
 | GET `/media/file/{rel}` | serve one stored output (media-root-relative only) |
 | GET `/models/{id}/media/capabilities` | samplers, schedulers, formats, defaults for the running server |
+| GET `/media/servers/{id}/capabilities` | normalized loaded-model capabilities; `id` is the library model id |
+| GET `/media/capabilities?model_id=` | the same normalized document; discovery never starts or reloads a model |
 | POST `/models/{id}/media/server/start\|stop` | manage the model's sd-server |
-| POST `/models/{id}/media/generate` | `{kind, prompt, negative_prompt, width, height, steps, cfg_scale, seed, sampler, scheduler, guidance, output_format, batch_count, strength, init_image_path, video_frames, fps}` |
+| POST `/models/{id}/media/generate` | `{kind, prompt, negative_prompt, width, height, steps, cfg_scale, seed, sampler, scheduler, guidance, output_format, batch_count, strength, init_image_path, mask_image_path, control_image_path, control_strength, ref_image_paths, lora, video_frames, fps}` |
+
+The normalized capabilities document reports `known`, `reason`, `model_id`,
+`runtime_id`, `current_mode`, `supported_modes`, `features_by_mode`, `samplers`,
+`schedulers`, `output_formats_by_mode`, `defaults_by_mode`, `loras`, `upscale`,
+`upscalers` and `limits`. Model-dependent features come from the running
+server's `/sdcpp/v1/capabilities`, separately from launch flags parsed from
+`--help`. Unknown discovery does not enable advanced features. Legacy
+single-mode fields apply only to the advertised `current_mode`.
+
+Managed SD endpoints use a unique in-memory bearer key for each process.
+Builds advertising `--api-key` enforce it natively. Stock builds use a Go
+authentication adapter on a random loopback port, forwarding only to that
+process's separate runtime-internal loopback port. The adapter closes on
+stop, crash or failed startup; keys never enter settings, history or logs.
+
+`defaults_by_mode` uses workflow parameter names (`width`, `height`, `batch`,
+`steps`, `sampler`, `scheduler`, `cfg`, `guidance`, `strength`, `frames`, `fps`)
+and includes only values actually returned by the runtime. The editor can apply
+these defaults to a sampler and its connected size in one undo step.
+Native sampler/scheduler `default` sentinels map to the empty automatic choice;
+step count `0` also means automatic. Literal seed `0` and explicit zero CFG or
+distilled guidance remain zero in native requests.
+
+Inpainting needs `init_image` and `mask_image` support in `img_gen`; white mask
+pixels are regenerated and black pixels preserved. Control images, reference
+images, structured LoRAs, and image-to-video are accepted only when the active
+mode advertises them. `lora` is an array of
+`{path, multiplier, is_high_noise?}` entries with absolute local paths. The
+backend maps them into the configured advertised catalog; legacy prompt tags
+are converted to structured entries when they resolve there. Graph LoRA
+loaders configure the selected files' shared catalog directory, including
+subfolders, and reload the server when necessary. Native upscaling uses only
+advertised RGB model upscalers.
+Unsupported fields, sampler/scheduler choices, formats and limits produce
+validation errors rather than silently dropping the requested behavior.
 
 Diffusion `POST /models/{id}/preview` returns `can_load` with the component
 report. A preparation failure returns HTTP 200, `can_load:false`, empty
@@ -411,53 +448,81 @@ Events: `media.progress` (`id`, `state`, `message`, `sd_status`, `progress`, `ou
 
 A workflow is a JSON node graph the QML canvas edits. The backend owns the node
 registry, validation, planning and running; QML only draws. Runs go through one
-FIFO queue (one GPU, one run at a time), live in memory (the last 30 are kept),
-and write their outputs as ordinary media files and `media_jobs` rows. There is
-no node cache yet: every run recomputes every stage.
+FIFO queue (one GPU, one run at a time; at most 20 waiting). Run snapshots and
+terminal node results persist in SQLite, and outputs remain ordinary media
+files and `media_jobs` rows. Interrupted queued/running work is recorded as
+canceled after restart and is never silently replayed.
+
+Fixed-seed stages can reuse results when their graph parameters, input files,
+dependency outputs and verified runtime/model/load configuration match.
+Missing or modified outputs invalidate reuse. Random-seed stages and their
+dependent stages are volatile; Save always produces a fresh copy. Unknown
+runtime identities skip generation caching. `force:true` bypasses reuse.
 
 | Method & path | Purpose |
 |---|---|
-| GET `/workflow/node-types[?runtime_id=]` | `{node_types, port_types, runtime}`. Every node type with its ports, parameters and `available`/`reason` for the selected sd.cpp runtime (a node needing a flag the runtime does not advertise is unavailable). The canvas draws sockets, widgets, palette and inspector from this |
+| GET `/workflow/node-types[?runtime_id=&model_id=]` | `{node_types, port_types, runtime, api_capabilities}`. Ports, parameters and availability for the selected runtime and loaded model. The canvas draws sockets, widgets, palette and inspector from this |
 | GET/POST `/workflows` | list `{workflows:[{id,name,node_count,created_at,updated_at}]}` / create `{name?, graph}` → **201** record |
 | GET/PUT/DELETE `/workflows/{id}` | load a record `{id,name,graph,created_at,updated_at}` / `{name?, graph?}` replace either part / delete |
+| POST `/workflows/import` | `{path}` import an absolute native workflow JSON path → **201** record |
+| POST `/workflows/{id}/export` | `{path}` atomically export to an absolute `.json` path |
+| POST `/workflow/masks` | `{image_path, strokes:[{points:[[x,y],…],radius,erase?}]}` → **201** `{path,file_url}` |
 | POST `/workflows/validate` | `{graph, only?, runtime_id?}` → `{ok, errors[], warnings[], plan, runtime}`. `only` plans a node and everything upstream ("Run to here") |
-| POST `/workflow/runs` | `{graph, only?, runtime_id?}` → **202** `{run, warnings}`. A graph with problems is **400** `{error, errors[], warnings[]}` and nothing is queued; a full queue is **429** |
-| GET `/workflow/runs` | recent runs, newest first |
-| GET `/workflow/runs/{id}` | `{id, state, error?, nodes:{<node id>:{state, message?, outputs?, file_urls?, job_id?, ms?}}, created_at, started_at?, finished_at?}` |
-| POST `/workflow/runs/{id}/cancel` | cancel a queued or running run (the running GPU job is canceled too) |
+| POST `/workflow/runs` | `{graph, workflow_id?, only?, force?, runtime_id?}` → **202** `{run, warnings}`. A graph with problems is **400** `{error, errors[], warnings[]}` and nothing is queued; a full queue is **429** |
+| GET `/workflow/runs` | up to 200 recent durable runs, newest first, including global queued/running work |
+| GET `/workflow/runs/{id}` | `{id, state, error?, workflow_id?, graph?, source_graph?, only?, nodes:{<node id>:{state, cached?, seed?, progress?, message?, outputs?, file_urls?, job_id?, ms?}}, created_at, started_at?, finished_at?}` |
+| POST `/workflow/runs/{id}/cancel` | cancel any queued or running run; generation forwards native job cancellation. Active GPU work may continue when the runtime cannot abort it; synchronous upscaling discards canceled results |
+
+Workflow exports are `{format:"openinfer-workflow",version:1,name,graph}`.
+Imports also accept raw version-1 OpenInfer graphs. These are native OpenInfer
+documents; model references remain library ids and file references remain local
+paths, so recipients must have those resources available.
+
+Mask points are normalized coordinates in `[0,1]`. Radius is a fraction of the
+longest source-image dimension, greater than zero and at most `0.5`. Limits:
+1000 strokes, 20000 total points, source dimensions at most 4096 each. Raster
+work is limited to 300 million candidate pixels; excessive complexity returns
+a visible error. Painting observes request cancellation and writes a managed
+grayscale PNG. PNG, JPEG and GIF source images are supported.
 
 Saving never requires a valid graph (drafts are normal); only the document
 shape is checked (`version: 1`, at most 500 nodes / 2000 edges). A bad
 document is **400**, an unknown id **404**.
 
 Graph document: `{version:1, name?, nodes:[{id, type, title?, pos:[x,y],
-params?}], edges:[{from:[node,port], to:[node,port]}], groups?, view?}`. Models
+params?, collapsed?}], edges:[{from:[node,port], to:[node,port]}], groups?, view?}`. Models
 are referenced by library id (`{"library_id": "…", "name": "…"}`), never by
 path; local files (LoRA, VAE, text encoder, input image) by absolute path.
+Groups retain their title, node membership, color and note text.
 
 Issues are `{severity, code, node?, port?, param?, message}` so the canvas can
 mark the exact socket. Codes: `node.*`, `edge.*` (`type`, `multiple`,
 `endpoint`, `self`), `input.missing`, `param.*` (`unknown`, `required`, `type`,
 `range`, `enum`), `graph.cycle`, `capability.missing`, and planner errors
 `plan.*` (`model_missing`, `file_missing`, `prompt_empty`, `clip_source`,
-`vae_source`, `lora_dir`, `lora_name`, `image_size`, `i2v_unsupported`, …).
+`vae_source`, `image_size`, `api_capability`, `mask_start`, `mask_size`, …).
 
 Events: `workflow.run_queued` (`run_id`, `nodes`), `workflow.run_started`,
 `workflow.node_state` (`run_id`, `node_id`, `state` pending|running|done|failed|
-canceled, `message?`, `outputs?`, `file_urls?`, `job_id?`, `ms?`) and
+canceled, `cached?`, `seed?`, `message?`, `outputs?`, `file_urls?`, `job_id?`, `ms?`) and
 `workflow.run_finished` (`run_id`, `state` complete|failed|canceled, `error?`).
 Loaders, prompts and sizes have no work of their own: they take the state of the
 stage that consumes them. A random seed (`-1`) is resolved to a concrete one
-before submitting and reported in the node's `message` (`seed N`). Run states
-are in memory, so a stage's `outputs` are media-root-relative paths and
-`file_urls` are local `file://` URLs for previews.
+before submitting and recorded on the node and in the resolved run `graph`.
+`source_graph` preserves the original submission, including `seed:-1`, so
+editor matching and rerunning random workflows remain correct. Inspection
+and restore use the resolved graph. A stage's `outputs` are media-root-relative
+paths and `file_urls` are local `file://` URLs for previews.
 
 `plan` is `{stages, servers, warnings?}`. Stages are `generate` (one sd-server
-request, with the full `GenerateParams` it will send), `resize` (CPU, in the
-backend) or `save`. Each carries a content-hash `key` (`volatile` when a seed
+request, with the full `GenerateParams` it will send), `resize`, `image` (CPU
+crop, padding, rotate/flip, blend or batch-image selection), `upscale` (native
+RGB upscale) or `save`. CPU operations use PNG, JPEG and GIF inputs and write
+PNG outputs; image transforms are limited to 4096 on each side. Unknown
+upscaler dimensions are checked when the output arrives. Each stage carries a content-hash `key` (`volatile` when a seed
 is random, so it must never be cached). `servers` lists each sd-server the plan
 uses by load `signature` with `action`: `reuse` (a running server already has
-the graph's VAE / text encoder / LoRA folder), `start`, or `restart` (sd-server
+the graph's VAE / text encoder), `start`, or `restart` (sd-server
 only reads those at launch, so changing one reloads the model).
 
 ## Chat

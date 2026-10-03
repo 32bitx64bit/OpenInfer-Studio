@@ -127,12 +127,41 @@ func TestSDRequestBody(t *testing.T) {
 }
 
 func TestValidateGenerateParams(t *testing.T) {
-	p := GenerateParams{Width: 99999, Steps: 999, CFGScale: 99, BatchCount: 99, VideoFrames: 9999, FPS: 999}
+	p := GenerateParams{Width: 99999, Steps: 999, CFGScale: 99, BatchCount: 99, VideoFrames: 9999, FPS: 999, Seed: -1}
 	ValidateGenerateParams(&p)
 	if p.Width != 4096 || p.Steps != 300 || p.CFGScale != 30 || p.BatchCount != 8 || p.VideoFrames != 512 || p.FPS != 60 {
 		t.Fatalf("clamps not applied: %+v", p)
 	}
 	if p.Seed != -1 {
 		t.Fatalf("seed default = %d, want -1", p.Seed)
+	}
+}
+
+func TestESRGANOverrideConfiguresNativeUpscalerCatalog(t *testing.T) {
+	dir := t.TempDir()
+	model := filepath.Join(dir, "model.safetensors")
+	upscaler := filepath.Join(dir, "RGB.safetensors")
+	for _, path := range []string{model, upscaler} {
+		if err := os.WriteFile(path, []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	help := sdHelpSample + "\n --upscale-model FNAME\n --hires-upscalers-dir DIR\n"
+	args, err := BuildServerArgs(LoadSettings{ESRGAN: upscaler}, model, false, ParseSDCapabilities(help), help, "127.0.0.1", 1234)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--hires-upscalers-dir "+dir) {
+		t.Fatalf("catalog dir missing: %v", args)
+	}
+	if strings.Contains(strings.Join(redactSDArgs([]string{"--api-key", "secret"}), " "), "secret") {
+		t.Fatal("process key not redacted")
+	}
+	if key, err := sdProcessAuth(sdHelpSample); err != nil || len(key) != 64 {
+		t.Fatal("stock runtime requires a managed gateway key")
+	}
+	if key, err := sdProcessAuth(sdHelpSample + "\n --api-key TOKEN\n"); err != nil || len(key) != 64 {
+		t.Fatalf("auth key length=%d err=%v", len(key), err)
 	}
 }

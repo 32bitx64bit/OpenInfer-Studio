@@ -44,6 +44,14 @@
         <file>qml/pages/LibraryPage.qml</file>
         <file>qml/pages/GraphPage.qml</file>
         <file>qml/components/graph/GraphNode.qml</file>
+        <file>qml/components/graph/GraphMinimap.qml</file>
+        <file>qml/components/graph/RunHistoryPanel.qml</file>
+        <file>qml/components/graph/RunHistoryCard.qml</file>
+        <file>qml/components/graph/RunHistory.js</file>
+        <file>qml/components/graph/ImageViewer.qml</file>
+        <file>qml/components/graph/ImageViewport.qml</file>
+        <file>qml/components/graph/MaskEditor.qml</file>
+
         <file>qml/components/graph/Socket.qml</file>
         <file>qml/components/graph/QuickAdd.qml</file>
         <file>qml/components/graph/NodeNumber.qml</file>

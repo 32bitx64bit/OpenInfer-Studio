@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -65,7 +66,7 @@ func TestDefaultTxt2ImgMatchesTheFormRequest(t *testing.T) {
 		"guidance": 3.5, "output_format": "png", "batch_count": 1
 	}`)
 	got := plan.Stages[0].Generate.Params
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("graph request differs from form request\n got:  %+v\n want: %+v", got, want)
 	}
 	// And the sd-server body built from either is identical.
@@ -99,7 +100,7 @@ func TestImg2ImgFromFileMatchesTheFormRequest(t *testing.T) {
 		"sampler": "", "scheduler": "", "guidance": 0, "output_format": "png",
 		"batch_count": 1, "strength": 0.6, "init_image_path": "/img/fisherman.png"
 	}`)
-	if got := plan.Stages[0].Generate.Params; got != want {
+	if got := plan.Stages[0].Generate.Params; !reflect.DeepEqual(got, want) {
 		t.Fatalf("img2img request differs\n got:  %+v\n want: %+v", got, want)
 	}
 }
@@ -163,7 +164,7 @@ func TestGraphWithoutSaveHasNothingToRun(t *testing.T) {
 	}
 }
 
-func TestLoraBecomesPromptTagAndLaunchDirectory(t *testing.T) {
+func TestLoraBecomesStructuredNativeInput(t *testing.T) {
 	g := txt2img()
 	g.Nodes = append(g.Nodes, node("n9", "lora.load", map[string]any{"path": "/loras/film-grain-v2.safetensors", "strength": 0.65}))
 	g.Edges[0] = wire("n1", "model", "n9", "model")
@@ -171,15 +172,18 @@ func TestLoraBecomesPromptTagAndLaunchDirectory(t *testing.T) {
 
 	plan := mustPlan(t, g, newFakeEnv(), Options{})
 	gen := plan.Stages[0].Generate
-	if gen.Params.Prompt != "Studio portrait of an elderly fisherman <lora:film-grain-v2:0.65>" {
+	if gen.Params.Prompt != "Studio portrait of an elderly fisherman" {
 		t.Fatalf("prompt = %q", gen.Params.Prompt)
 	}
+	if len(gen.Params.Lora) != 1 || gen.Params.Lora[0].Path != "/loras/film-grain-v2.safetensors" || gen.Params.Lora[0].Multiplier != 0.65 {
+		t.Fatalf("structured LoRA: %+v", gen.Params.Lora)
+	}
 	if plan.Servers[0].Overrides.LoraModelDir != "/loras" {
-		t.Fatalf("overrides = %+v, want lora dir /loras", plan.Servers[0].Overrides)
+		t.Fatal("selected files must be registered in the native LoRA catalog")
 	}
 }
 
-func TestLorasInDifferentFoldersAreRejected(t *testing.T) {
+func TestStructuredLorasMayLiveInSharedCatalogSubfolders(t *testing.T) {
 	g := txt2img()
 	g.Nodes = append(g.Nodes,
 		node("n9", "lora.load", map[string]any{"path": "/loras/film-grain-v2.safetensors"}),
@@ -188,8 +192,11 @@ func TestLorasInDifferentFoldersAreRejected(t *testing.T) {
 	g.Edges = append(g.Edges, wire("n9", "model", "n10", "model"), wire("n10", "model", "n5", "model"))
 
 	plan, issues := Build(g, NewRegistry(), newFakeEnv(), allCaps, Options{})
-	if plan != nil || !hasIssue(issues, "plan.lora_dir") {
-		t.Fatalf("plan=%v issues=%+v, want plan.lora_dir", plan, issues)
+	if plan == nil || HasErrors(issues) || len(plan.Stages[0].Generate.Params.Lora) != 2 {
+		t.Fatalf("structured native LoRAs: plan=%v issues=%+v", plan, issues)
+	}
+	if plan.Servers[0].Overrides.LoraModelDir != "/loras" {
+		t.Fatal("nested LoRAs must share their common catalog tree")
 	}
 }
 
@@ -253,7 +260,7 @@ func TestUnreadableImageSizeIsReported(t *testing.T) {
 	}
 }
 
-func TestImageToVideoIsNotAvailableYet(t *testing.T) {
+func TestImageToVideoRequiresAdvertisedSupport(t *testing.T) {
 	g := Graph{Version: 1,
 		Nodes: []Node{
 			node("n1", "checkpoint.load", map[string]any{"model": modelRef("m2")}),
@@ -269,7 +276,7 @@ func TestImageToVideoIsNotAvailableYet(t *testing.T) {
 		},
 	}
 	plan, issues := Build(g, NewRegistry(), newFakeEnv(), allCaps, Options{})
-	if plan != nil || !hasIssue(issues, "plan.i2v_unsupported") {
+	if plan != nil || !hasIssue(issues, "plan.api_capability") {
 		t.Fatalf("plan=%v issues=%+v, want plan.i2v_unsupported", plan, issues)
 	}
 }

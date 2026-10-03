@@ -68,7 +68,7 @@ func TestViewMarksUnavailableNodes(t *testing.T) {
 		t.Fatal("vae.load should be available when --vae is advertised")
 	}
 	if v := byType(partial, "lora.load"); v.Available {
-		t.Fatal("lora.load should be unavailable without --lora-model-dir")
+		t.Fatal("lora.load should be unavailable without advertised structured API support")
 	}
 }
 
