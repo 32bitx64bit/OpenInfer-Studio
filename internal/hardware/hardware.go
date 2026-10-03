@@ -53,6 +53,10 @@ func Detect(modelsDir, runtimesDir string) *Info {
 	return info
 }
 
+// DiskFree is the space available to an unprivileged writer on the volume
+// holding dir, or on its nearest existing ancestor; 0 when it cannot be read.
+func DiskFree(dir string) uint64 { return diskFree(dir) }
+
 // Recommendation explains an automatic backend choice. The UI must display
 // the reason and allow override — detection is a heuristic, not a guarantee.
 type Recommendation struct {
