@@ -32,7 +32,8 @@ const (
 type Companion struct {
 	Role     string `json:"role"`
 	Label    string `json:"label"`
-	Status   string `json:"status"` // ready | missing
+	Status   string `json:"status"` // ready | missing | incompatible
+	Reason   string `json:"reason,omitempty"`
 	Path     string `json:"path,omitempty"`
 	RepoPath string `json:"repo_path,omitempty"`
 	Size     int64  `json:"size"`
@@ -188,7 +189,13 @@ func DiscoverCompanions(modelRoot, primaryPath string) map[string]string {
 		if role == "" {
 			return nil
 		}
-		if score := companionPreference(p); score > best[role] {
+		score := companionPreference(p)
+		if role == CompanionVAE && vaeIncompatibility(p) != "" {
+			// Keep it for diagnostics if it is the only candidate, but never
+			// let a known incompatible file beat a usable local alternative.
+			score = 1
+		}
+		if score > best[role] {
 			best[role] = score
 			out[role] = p
 		}
@@ -289,6 +296,14 @@ func ComponentReport(modelRoot, primaryPath string, repoFiles []string, repoSize
 			Role: role, Label: CompanionLabel(role), Status: "ready",
 			Path: lp, Size: size,
 		})
+	}
+	for i := range out {
+		if out[i].Role == CompanionVAE && out[i].Path != "" {
+			if why := vaeIncompatibility(out[i].Path); why != "" {
+				out[i].Status = "incompatible"
+				out[i].Reason = why
+			}
+		}
 	}
 	// Stable order: companions that decide startup first.
 	sort.Slice(out, func(i, j int) bool { return out[i].Role < out[j].Role })

@@ -63,6 +63,18 @@ func TestSupportsSDFlag(t *testing.T) {
 	}
 }
 
+func TestRawArgsRetainNegativeVRAMBudgetAndRejectShortFlags(t *testing.T) {
+	caps := ParseSDCapabilities(sdHelpSample)
+	args, warnings := parseSDRawArgs("--max-vram -2 --backend ROCm0", caps, sdHelpSample)
+	if strings.Join(args, " ") != "--max-vram -2 --backend ROCm0" || len(warnings) != 0 {
+		t.Fatalf("negative budget lost: %v %v", args, warnings)
+	}
+	args, warnings = parseSDRawArgs("--max-vram -x", caps, sdHelpSample)
+	if strings.Contains(strings.Join(args, " "), "-x") || len(warnings) == 0 {
+		t.Fatalf("short flag accepted as budget: %v %v", args, warnings)
+	}
+}
+
 func TestBuildServerArgsGating(t *testing.T) {
 	caps := ParseSDCapabilities(sdHelpSample)
 	dir := t.TempDir()

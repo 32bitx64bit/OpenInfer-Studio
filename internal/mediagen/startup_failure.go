@@ -19,24 +19,36 @@ type packedFile struct {
 	Why  string
 }
 
-// packedFiles checks the model and every pipeline file the settings name.
-func packedFiles(modelPath string, s LoadSettings) []packedFile {
-	parts := []struct{ role, path string }{
+// launchFile is one weight file a launch hands to sd-server.
+type launchFile struct{ Role, Path string }
+
+// launchFiles lists the model and every pipeline file the settings name.
+func launchFiles(modelPath string, s LoadSettings) []launchFile {
+	parts := []launchFile{
 		{"diffusion model", modelPath},
 		{CompanionLabel(CompanionVAE), s.VAE},
 		{CompanionLabel(CompanionLLM), s.LLM},
+		{"LLM vision tower", s.LLMVision},
 		{CompanionLabel(CompanionT5XXL), s.T5XXL},
 		{CompanionLabel(CompanionClipL), s.ClipL},
 		{CompanionLabel(CompanionClipG), s.ClipG},
 		{CompanionLabel(CompanionClipVision), s.ClipVision},
 	}
-	var out []packedFile
+	var out []launchFile
 	for _, p := range parts {
-		if p.path == "" {
-			continue
+		if p.Path != "" {
+			out = append(out, p)
 		}
-		if why := sdmodel.PackedReason(p.path); why != "" {
-			out = append(out, packedFile{Role: p.role, Path: p.path, Why: why})
+	}
+	return out
+}
+
+// packedFiles checks the model and every pipeline file the settings name.
+func packedFiles(modelPath string, s LoadSettings) []packedFile {
+	var out []packedFile
+	for _, p := range launchFiles(modelPath, s) {
+		if why := sdmodel.PackedReason(p.Path); why != "" {
+			out = append(out, packedFile{Role: p.Role, Path: p.Path, Why: why})
 		}
 	}
 	return out
@@ -68,9 +80,10 @@ var (
 // A log that is nothing but noise comes back as its raw tail.
 func cleanLogTail(text string, n int) string {
 	var kept []string
-	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+	for _, line := range strings.FieldsFunc(text, func(r rune) bool { return r == '\r' || r == '\n' }) {
+		line = ansiEscapeRe.ReplaceAllString(line, "")
 		trimmed := strings.TrimSpace(line)
-		if gdbFrameRe.MatchString(trimmed) || gdbNoiseRe.MatchString(trimmed) {
+		if gdbFrameRe.MatchString(trimmed) || gdbNoiseRe.MatchString(trimmed) || workCounterRe.MatchString(trimmed) {
 			continue
 		}
 		if len(kept) > 0 && kept[len(kept)-1] == line {
@@ -103,6 +116,9 @@ func looksLikeLoaderAbort(text string) bool {
 // ready: the cause first (named packed files when the abort fits them), the
 // cleaned log tail, and where the full log is.
 func startupFailure(logText, logPath, modelPath string, s LoadSettings) string {
+	// Logs append across attempts. Only the current launch can explain this
+	// failure; old missing-tensor errors must not mask a new OOM or I/O error.
+	logText = latestStartupLog(logText)
 	var b strings.Builder
 	b.WriteString("sd-server exited during startup")
 	missing := parseMissingTensors(logText)
@@ -136,6 +152,14 @@ func startupFailure(logText, logPath, modelPath string, s LoadSettings) string {
 		b.WriteString("\n\nFull log: " + logPath)
 	}
 	return b.String()
+}
+
+func latestStartupLog(text string) string {
+	const marker = "=== sd-server starting "
+	if i := strings.LastIndex(text, "\n"+marker); i >= 0 {
+		return text[i+1:]
+	}
+	return text
 }
 
 // missingTensorRe matches the validation errors stable-diffusion.cpp prints
@@ -280,8 +304,8 @@ func explainMissing(b *strings.Builder, missing []missingGroup, modelPath string
 		if why := sdmodel.PackedReason(path); why != "" {
 			fmt.Fprintf(b, "    it is stored as %s, a ComfyUI-only pack stable-diffusion.cpp cannot map to the names it expects\n", why)
 		}
-		if strings.HasPrefix(role, "VAE") && sdmodel.ComponentRole(path, nil) == sdmodel.RoleAudioVAE {
-			b.WriteString("    that is an audio VAE: --vae needs the video (or image) VAE published with the model\n")
+		if why := vaeIncompatibility(path); strings.HasPrefix(role, "VAE") && why != "" {
+			fmt.Fprintf(b, "    %s\n", why)
 		} else if strings.HasPrefix(role, "VAE") && ok {
 			if keys["encoder"] == 0 && keys["decoder"] > 0 {
 				b.WriteString("    it has a decoder but no encoder: this model also needs the encoder (image-to-video and first/last-frame modes encode their input frames)\n")

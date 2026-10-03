@@ -383,6 +383,14 @@ func parseSDRawArgs(raw string, caps []string, help string) (args []string, warn
 	}
 	prevFlagAccepted := false
 	for _, tok := range tokens {
+		// Budgets such as --max-vram -2 are values, not short flags.
+		if prevFlagAccepted && strings.HasPrefix(tok, "-") {
+			if _, err := strconv.ParseFloat(tok, 64); err == nil {
+				args = append(args, tok)
+				prevFlagAccepted = false
+				continue
+			}
+		}
 		if strings.HasPrefix(tok, "-") {
 			if sdForbiddenRawFlags[tok] {
 				warnings = append(warnings, fmt.Sprintf("raw flag %s may not override the managed network/model flags; skipped", tok))
@@ -444,6 +452,7 @@ func PrepareLaunch(rt *runtimes.Runtime, help, modelPath string, s LoadSettings)
 	// checkpoints. Explicit settings always win.
 	ApplyCompanions(&resolved, ModelRoot(modelPath), modelPath)
 	warnings = append(warnings, packedWarnings(modelPath, resolved)...)
+	warnings = append(warnings, reshapedWarnings(modelPath, resolved)...)
 
 	resolvedHelp = help
 	if strings.TrimSpace(resolvedHelp) == "" {
@@ -465,6 +474,21 @@ func PrepareLaunch(rt *runtimes.Runtime, help, modelPath string, s LoadSettings)
 	rawArgs, rawWarnings := parseSDRawArgs(resolved.RawArgs, caps, resolvedHelp)
 	args = append(args, rawArgs...)
 	warnings = append(warnings, rawWarnings...)
+	args, memoryWarning := applySDMemoryHeadroom(args, rt.Backend, caps, resolvedHelp)
+	if memoryWarning != "" {
+		warnings = append(warnings, memoryWarning)
+	}
+	if err := validateLaunchComponents(args); err != nil {
+		return "", nil, resolved, resolvedHelp, caps, warnings, err
+	}
+	ltxWarnings, ltxErr := ltxBroadcastWarnings(args, rt.Backend)
+	warnings = append(warnings, ltxWarnings...)
+	if ltxErr != nil {
+		return "", nil, resolved, resolvedHelp, caps, warnings, ltxErr
+	}
+	if ltxHIPGraphWorkaround(args, rt.Backend) {
+		warnings = append(warnings, ltxHIPGraphWarning)
+	}
 	return exe, args, resolved, resolvedHelp, caps, warnings, nil
 }
 

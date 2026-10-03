@@ -118,6 +118,7 @@ type GenerateParams struct {
 
 // Job is the API view of one media generation.
 type Job struct {
+	Progress    *Progress       `json:"progress,omitempty"`
 	ID          string          `json:"id"`
 	ModelID     string          `json:"model_id"`
 	Kind        string          `json:"kind"`
@@ -178,6 +179,8 @@ type server struct {
 
 	state     string // starting|ready|failed
 	errMsg    string
+	detail    string             // what a "starting" server is doing, when it is not just loading weights
+	cancel    context.CancelFunc // aborts the launch's own work (restoring model files) before the process exists
 	startedAt string
 	updatedAt string
 	settings  LoadSettings
@@ -194,6 +197,7 @@ type ServerView struct {
 	RuntimeID string          `json:"runtime_id"`
 	LogPath   string          `json:"log_path"`
 	Error     string          `json:"error"`
+	Detail    string          `json:"detail,omitempty"` // progress text while starting, e.g. restoring tensor shapes
 	LogTail   string          `json:"log_tail,omitempty"`
 	StartedAt string          `json:"started_at"`
 	UpdatedAt string          `json:"updated_at"`
@@ -204,10 +208,13 @@ type ServerView struct {
 // cancellation function, which model/port it is running against, and the
 // sd.cpp job id (once submitted) so Cancel can reach the server too.
 type jobHandle struct {
-	cancel  context.CancelCauseFunc
-	modelID string
-	port    int
-	sdJobID string
+	cancel     context.CancelCauseFunc
+	modelID    string
+	port       int
+	sdJobID    string
+	progress   *Progress
+	onProgress func(Progress)
+	terminal   bool
 }
 
 // errServerCrashed is the cancellation cause used when a job is aborted
@@ -225,6 +232,8 @@ type Manager struct {
 	events EventSink
 	log    *slog.Logger
 	http   *http.Client
+
+	restoreMu sync.Mutex // one restored-GGUF copy is written at a time
 
 	mu       sync.Mutex
 	servers  map[string]*server // keyed by model ID
@@ -343,6 +352,7 @@ func (m *Manager) EnsureServer(modelID string, s LoadSettings) (int, error) {
 		claim.ready = false
 		claim.state = ServerFailed
 		claim.errMsg = err.Error()
+		claim.detail = ""
 		claim.port = 0
 		claim.updatedAt = now()
 		m.mu.Unlock()
@@ -383,8 +393,11 @@ func (m *Manager) EnsureServer(modelID string, s LoadSettings) (int, error) {
 // text encoders, tokenizer) are paired automatically when the settings
 // leave them empty.
 func (m *Manager) startServer(modelID string, s LoadSettings, sv *server) (int, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	m.mu.Lock()
 	sv.settings = s
+	sv.cancel = cancel
 	m.mu.Unlock()
 
 	mdl, err := m.lib.Get(modelID)
@@ -431,14 +444,38 @@ func (m *Manager) startServer(modelID string, s LoadSettings, sv *server) (int, 
 		return 0, err
 	}
 	defer logFile.Close()
+	// GGUFs converted with ComfyUI-GGUF carry reshaped tensors that
+	// stable-diffusion.cpp cannot read: swap in restored copies first.
+	setDetail := func(detail string) {
+		m.mu.Lock()
+		changed := sv.detail != detail
+		sv.detail = detail
+		sv.updatedAt = now()
+		m.mu.Unlock()
+		if !changed {
+			return
+		}
+		m.publish("media.server_state", map[string]any{"model_id": modelID, "state": ServerStarting, "detail": detail})
+	}
+	if err := m.restoreReshapedGGUFs(ctx, args, logFile, setDetail); err != nil {
+		if ctx.Err() != nil {
+			return 0, fmt.Errorf("diffusion server for model %s was stopped during startup", modelID)
+		}
+		return 0, err
+	}
+	if err := m.prepareLTXBroadcast(ctx, args, rt.Backend, logFile, setDetail); err != nil {
+		if ctx.Err() != nil {
+			return 0, fmt.Errorf("diffusion server for model %s was stopped during startup", modelID)
+		}
+		return 0, err
+	}
+	setDetail("")
 	fmt.Fprintf(logFile, "=== sd-server starting %s model=%s ===\n", now(), mdl.PrimaryPath)
 	fmt.Fprintf(logFile, "=== argv: %s ===\n", strings.Join(args, " "))
 
-	env := map[string]string{}
-	for _, kv := range runtimes.LibPathEnv(exe) {
-		if k, v, ok := strings.Cut(kv, "="); ok {
-			env[k] = v
-		}
+	env := SDLaunchEnvironment(exe, args, rt.Backend)
+	if env["GGML_CUDA_DISABLE_GRAPHS"] != "" {
+		fmt.Fprintf(logFile, "=== %s (GGML_CUDA_DISABLE_GRAPHS=1) ===\n", ltxHIPGraphWarning)
 	}
 	h, err := processes.Start(processes.Spec{
 		Exe: exe, Args: args, Dir: filepath.Dir(exe), Env: env,
@@ -489,26 +526,50 @@ func (m *Manager) startServer(modelID string, s LoadSettings, sv *server) (int, 
 // in-flight jobs for the model are failed promptly instead of hanging or
 // retrying against a dead port.
 func (m *Manager) watchServerExit(modelID string, sv *server, exited <-chan struct{}) {
-	<-exited
+	// A Linux process can spend minutes writing a core dump before Wait
+	// returns. It has already crashed, so fail jobs and release its process
+	// group as soon as the kernel reports that state.
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-exited:
+			m.handleServerExit(modelID, sv)
+			return
+		case <-ticker.C:
+			m.mu.Lock()
+			if m.servers[modelID] != sv || sv.state == ServerFailed {
+				m.mu.Unlock()
+				return
+			}
+			h, port, path := sv.handle, sv.port, sv.logFile
+			m.mu.Unlock()
+			if h.IsCoreDumping() {
+				m.abortServer(modelID, port, coreDumpFailure(path))
+				return
+			}
+		}
+	}
+}
+
+func (m *Manager) handleServerExit(modelID string, sv *server) {
 	m.mu.Lock()
 	cur, ok := m.servers[modelID]
-	if !ok || cur != sv {
+	if !ok || cur != sv || sv.state == ServerFailed {
 		m.mu.Unlock()
 		return // stopped deliberately, or already replaced by a newer launch
 	}
 	logFile := sv.logFile
 	m.mu.Unlock()
 
-	tail, _ := os.ReadFile(logFile)
-	msg := lastLines(string(tail), 40)
-	if strings.TrimSpace(msg) == "" {
-		msg = "no output captured"
+	errMsg := runtimeFailure(readLogFrom(logFile, 0), logFile)
+	if sv.handle != nil && sv.handle.Cmd != nil && sv.handle.Cmd.ProcessState != nil {
+		errMsg = sv.handle.Cmd.ProcessState.String() + "\n" + errMsg
 	}
-	errMsg := fmt.Sprintf("sd-server exited unexpectedly:\n%s", msg)
 
 	m.mu.Lock()
 	cur, ok = m.servers[modelID]
-	if !ok || cur != sv {
+	if !ok || cur != sv || sv.state == ServerFailed {
 		m.mu.Unlock()
 		return
 	}
@@ -532,7 +593,7 @@ func (m *Manager) failJobsForModel(modelID, reason string) {
 	m.mu.Lock()
 	var ids []string
 	for id, jh := range m.jobs {
-		if jh.modelID == modelID {
+		if jh.modelID == modelID && !jh.terminal {
 			ids = append(ids, id)
 			jh.cancel(errServerCrashed)
 		}
@@ -578,12 +639,15 @@ func (m *Manager) waitReady(sv *server, exited <-chan struct{}, timeout time.Dur
 	m.mu.Lock()
 	port := sv.port
 	logFile := sv.logFile
-	modelID, modelPath, settings := sv.modelID, sv.modelPath, sv.resolved
+	modelID, modelPath, settings, handle := sv.modelID, sv.modelPath, sv.resolved, sv.handle
 	m.mu.Unlock()
 	deadline := time.Now().Add(timeout)
 	url := fmt.Sprintf("http://127.0.0.1:%d/sdcpp/v1/capabilities", port)
 	client := &http.Client{Timeout: 5 * time.Second}
 	for {
+		if handle.IsCoreDumping() {
+			return errors.New(coreDumpFailure(logFile))
+		}
 		req, _ := http.NewRequest(http.MethodGet, url, nil)
 		if resp, err := client.Do(req); err == nil {
 			resp.Body.Close()
@@ -617,10 +681,14 @@ func (m *Manager) StopServer(modelID string) {
 	sv, ok := m.servers[modelID]
 	delete(m.servers, modelID)
 	var handle *processes.Handle
+	var cancel context.CancelFunc
 	if ok {
-		handle = sv.handle
+		handle, cancel = sv.handle, sv.cancel
 	}
 	m.mu.Unlock()
+	if cancel != nil {
+		cancel() // a launch still preparing model files stops there
+	}
 	if handle != nil {
 		_ = handle.KillTree()
 	}
@@ -649,10 +717,10 @@ func (m *Manager) StopAll() {
 // for failed entries.
 func (m *Manager) ListServers() []ServerView {
 	type snap struct {
-		modelID, runtimeID, logFile, errMsg, state, startedAt, updatedAt string
-		port                                                             int
-		pid                                                              int
-		settings                                                         LoadSettings
+		modelID, runtimeID, logFile, errMsg, detail, state, startedAt, updatedAt string
+		port                                                                     int
+		pid                                                                      int
+		settings                                                                 LoadSettings
 	}
 	m.mu.Lock()
 	snaps := make([]snap, 0, len(m.servers))
@@ -662,7 +730,7 @@ func (m *Manager) ListServers() []ServerView {
 			pid = sv.handle.Cmd.Process.Pid
 		}
 		snaps = append(snaps, snap{
-			modelID: id, runtimeID: sv.runtimeID, logFile: sv.logFile, errMsg: sv.errMsg,
+			modelID: id, runtimeID: sv.runtimeID, logFile: sv.logFile, errMsg: sv.errMsg, detail: sv.detail,
 			state: sv.state, startedAt: sv.startedAt, updatedAt: sv.updatedAt,
 			port: sv.port, pid: pid, settings: sv.settings,
 		})
@@ -673,7 +741,7 @@ func (m *Manager) ListServers() []ServerView {
 	for _, s := range snaps {
 		v := ServerView{
 			ModelID: s.modelID, State: s.state, Port: s.port, PID: s.pid,
-			RuntimeID: s.runtimeID, LogPath: s.logFile, Error: s.errMsg,
+			RuntimeID: s.runtimeID, LogPath: s.logFile, Error: s.errMsg, Detail: s.detail,
 			StartedAt: s.startedAt, UpdatedAt: s.updatedAt,
 		}
 		if b, err := json.Marshal(s.settings); err == nil {
@@ -735,7 +803,7 @@ func (m *Manager) StartGenerate(modelID string, p GenerateParams) (*Job, error) 
 // running server does not already satisfy it, the server is restarted with
 // the overrides applied before the job is submitted.
 func (m *Manager) StartGenerateWith(modelID string, p GenerateParams, ov *LoadOverrides) (*Job, error) {
-	j, _, err := m.startGenerate(modelID, p, ov)
+	j, _, err := m.startGenerate(modelID, p, ov, nil)
 	return j, err
 }
 
@@ -745,7 +813,14 @@ func (m *Manager) StartGenerateWith(modelID string, p GenerateParams, ov *LoadOv
 // (including the GPU work) and returns ctx's error; a failed job returns the
 // job alongside an error carrying its message.
 func (m *Manager) RunStage(ctx context.Context, modelID string, p GenerateParams, ov *LoadOverrides) (*Job, error) {
-	j, done, err := m.startGenerate(modelID, p, ov)
+	return m.RunStageWithProgress(ctx, modelID, p, ov, nil)
+}
+
+// RunStageWithProgress forwards this job's observed progress to the workflow
+// executing it. The callback is scoped to the job, so simultaneous generations
+// cannot update another workflow node.
+func (m *Manager) RunStageWithProgress(ctx context.Context, modelID string, p GenerateParams, ov *LoadOverrides, onProgress func(Progress)) (*Job, error) {
+	j, done, err := m.startGenerate(modelID, p, ov, onProgress)
 	if err != nil {
 		return nil, err
 	}
@@ -779,7 +854,7 @@ func (m *Manager) RunStage(ctx context.Context, modelID string, p GenerateParams
 
 // startGenerate validates, records the queued job and runs it in the
 // background; the returned channel closes once the job goroutine is done.
-func (m *Manager) startGenerate(modelID string, p GenerateParams, ov *LoadOverrides) (*Job, <-chan struct{}, error) {
+func (m *Manager) startGenerate(modelID string, p GenerateParams, ov *LoadOverrides, onProgress func(Progress)) (*Job, <-chan struct{}, error) {
 	kind := p.Kind
 	if kind == "" {
 		kind = KindImage
@@ -826,7 +901,7 @@ func (m *Manager) startGenerate(modelID string, p GenerateParams, ov *LoadOverri
 	}
 	jctx, cancel := context.WithCancelCause(context.Background())
 	m.mu.Lock()
-	m.jobs[id] = &jobHandle{cancel: cancel, modelID: modelID}
+	m.jobs[id] = &jobHandle{cancel: cancel, modelID: modelID, onProgress: onProgress}
 	m.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
@@ -942,6 +1017,7 @@ func (m *Manager) runJob(jctx context.Context, id, modelID, kind string, p Gener
 		}
 		guid["distilled_guidance"] = p.Guidance
 	}
+	logOffset := logSize(logPath) // what the server logs from here on belongs to this job
 	jobID, status, err := m.submitSDJob(jctx, port, endpoint, sdBody)
 	if err != nil {
 		// Fall back to the synchronous OpenAI-compat endpoint only when the
@@ -969,12 +1045,16 @@ func (m *Manager) runJob(jctx context.Context, id, modelID, kind string, p Gener
 	}
 	m.mu.Unlock()
 
-	result, err := m.pollSDJob(jctx, modelID, port, jobID, func(st string) {
-		msg := "Generating…"
-		if st == "queued" {
-			msg = "Queued"
+	tracker := newLogProgress(logPath, logOffset)
+	result, err := m.pollSDJob(jctx, modelID, port, jobID, func(st string) error {
+		progress := tracker.snapshot(id, st)
+		if tracker.fatal != "" {
+			msg := runtimeFailure(tracker.fatal, logPath)
+			m.abortServer(modelID, port, msg)
+			return errors.New(msg)
 		}
-		m.publish("media.progress", map[string]any{"id": id, "model_id": modelID, "state": StateRunning, "sd_status": st, "message": msg})
+		m.publish("media.progress", map[string]any{"id": id, "model_id": modelID, "state": StateRunning, "sd_status": st, "message": progress.Message, "progress": progress})
+		return nil
 	})
 	if err != nil {
 		if jctx.Err() != nil {
@@ -985,7 +1065,7 @@ func (m *Manager) runJob(jctx context.Context, id, modelID, kind string, p Gener
 			m.publish("media.progress", map[string]any{"id": id, "state": StateCanceled, "message": "Canceled"})
 			return
 		}
-		msg := err.Error()
+		msg := explainJobFailure(readLogFrom(logPath, logOffset), err.Error())
 		_ = m.setState(id, StateFailed, "", msg)
 		m.publish("media.progress", map[string]any{"id": id, "state": StateFailed, "error": msg})
 		return
@@ -1139,6 +1219,8 @@ func (m *Manager) generateOpenAICompat(ctx context.Context, id, modelID string, 
 // status code (0 on transport error) so callers can tell "endpoint missing"
 // (404/405) apart from a request-level rejection (400/429/…).
 func (m *Manager) submitSDJob(ctx context.Context, port int, endpoint string, body map[string]any) (string, int, error) {
+	ctx, cancel := context.WithTimeout(ctx, sdSubmitRequestTimeout)
+	defer cancel()
 	payload, _ := json.Marshal(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		fmt.Sprintf("http://127.0.0.1:%d%s", port, endpoint), bytes.NewReader(payload))
@@ -1156,7 +1238,7 @@ func (m *Manager) submitSDJob(ctx context.Context, port int, endpoint string, bo
 		Error   string `json:"error"`
 		Message string `json:"message"`
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&out)
+	decodeErr := json.NewDecoder(resp.Body).Decode(&out)
 	if resp.StatusCode != 202 {
 		msg := out.Error
 		if msg == "" {
@@ -1167,6 +1249,9 @@ func (m *Manager) submitSDJob(ctx context.Context, port int, endpoint string, bo
 		}
 		return "", resp.StatusCode, fmt.Errorf("sd-server submit: %s", msg)
 	}
+	if decodeErr != nil {
+		return "", resp.StatusCode, fmt.Errorf("reading sd-server submission acknowledgement: %w", decodeErr)
+	}
 	if out.ID == "" {
 		return "", resp.StatusCode, fmt.Errorf("sd-server returned no job id")
 	}
@@ -1176,15 +1261,17 @@ func (m *Manager) submitSDJob(ctx context.Context, port int, endpoint string, bo
 // sdPollInterval/sdPollErrorBound are package vars (not consts) so tests can
 // shrink them instead of waiting out the real ~20s transport-error bound.
 var (
-	sdPollInterval   = 1500 * time.Millisecond
-	sdPollErrorBound = 20 * time.Second
+	sdPollInterval         = 1500 * time.Millisecond
+	sdPollErrorBound       = 20 * time.Second
+	sdPollRequestTimeout   = 5 * time.Second
+	sdSubmitRequestTimeout = 30 * time.Second
 )
 
 // pollSDJob polls GET /sdcpp/v1/jobs/{id} until terminal. It never spins
 // forever: it fails fast once the model's supervised server is no longer
 // the one it started against, on HTTP 404/410 (job gone), or after
 // sdPollErrorBound of consecutive transport errors / missing status.
-func (m *Manager) pollSDJob(ctx context.Context, modelID string, port int, jobID string, onTick func(string)) (map[string]any, error) {
+func (m *Manager) pollSDJob(ctx context.Context, modelID string, port int, jobID string, onTick func(string) error) (map[string]any, error) {
 	url := fmt.Sprintf("http://127.0.0.1:%d/sdcpp/v1/jobs/%s", port, jobID)
 	var errSince time.Time
 	bump := func(reason string) error {
@@ -1206,12 +1293,20 @@ func (m *Manager) pollSDJob(ctx context.Context, modelID string, port int, jobID
 		if !m.serverMatchesPort(modelID, port) {
 			return nil, fmt.Errorf("diffusion server for model %s is no longer running", modelID)
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		pollCtx, cancel := context.WithTimeout(ctx, sdPollRequestTimeout)
+		req, err := http.NewRequestWithContext(pollCtx, http.MethodGet, url, nil)
 		if err != nil {
+			cancel()
 			return nil, err
 		}
 		resp, err := m.http.Do(req)
 		if err != nil {
+			cancel()
+			if onTick != nil {
+				if err := onTick("unresponsive"); err != nil {
+					return nil, err
+				}
+			}
 			if ferr := bump(err.Error()); ferr != nil {
 				return nil, ferr
 			}
@@ -1219,27 +1314,45 @@ func (m *Manager) pollSDJob(ctx context.Context, modelID string, port int, jobID
 		}
 		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
 			resp.Body.Close()
+			cancel()
 			return nil, fmt.Errorf("sd-server job %s no longer exists (HTTP %d)", jobID, resp.StatusCode)
 		}
 		var doc map[string]any
-		_ = json.NewDecoder(resp.Body).Decode(&doc)
+		decodeErr := json.NewDecoder(resp.Body).Decode(&doc)
 		resp.Body.Close()
+		cancel()
 		st, _ := doc["status"].(string)
-		if st == "" {
-			if ferr := bump("sd-server returned no status"); ferr != nil {
+		if decodeErr != nil || resp.StatusCode != http.StatusOK || st == "" {
+			if onTick != nil {
+				if err := onTick("unresponsive"); err != nil {
+					return nil, err
+				}
+			}
+			reason := "sd-server returned no status"
+			if decodeErr != nil {
+				reason = "reading sd-server job response: " + decodeErr.Error()
+			} else if resp.StatusCode != http.StatusOK {
+				reason = fmt.Sprintf("sd-server job poll returned HTTP %d", resp.StatusCode)
+			}
+			if ferr := bump(reason); ferr != nil {
 				return nil, ferr
 			}
 			continue
 		}
 		errSince = time.Time{}
 		if onTick != nil {
-			onTick(st)
+			if err := onTick(st); err != nil {
+				return nil, err
+			}
 		}
 		switch st {
 		case "completed":
 			return doc, nil
 		case "failed", "cancelled":
 			msg := "generation failed"
+			if text, ok := doc["error"].(string); ok && text != "" {
+				msg = text
+			}
 			if e, ok := doc["error"].(map[string]any); ok {
 				if s, ok := e["message"].(string); ok && s != "" {
 					msg = s
@@ -1403,6 +1516,12 @@ func (m *Manager) Get(id string) (*Job, error) {
 		return nil, err
 	}
 	j.Params = json.RawMessage(params)
+	m.mu.Lock()
+	if h := m.jobs[id]; h != nil && h.progress != nil {
+		p := *h.progress
+		j.Progress = &p
+	}
+	m.mu.Unlock()
 	j.Result = json.RawMessage(result)
 	var meta struct {
 		Outputs []string `json:"outputs"`
@@ -1454,6 +1573,35 @@ func (m *Manager) setState(id, state, outPath, errMsg string) error {
 }
 
 func (m *Manager) publish(event string, payload any) {
+	if event == "media.progress" {
+		if data, ok := payload.(map[string]any); ok {
+			id, _ := data["id"].(string)
+			state, _ := data["state"].(string)
+			var callback func(Progress)
+			p, hasProgress := data["progress"].(Progress)
+			if !hasProgress {
+				p.JobID = id
+				p.Message, _ = data["message"].(string)
+				p.Phase, _ = data["sd_status"].(string)
+			}
+			m.mu.Lock()
+			if h := m.jobs[id]; h != nil {
+				if h.terminal && state == StateRunning {
+					m.mu.Unlock()
+					return
+				}
+				h.terminal = state == StateFailed || state == StateCanceled || state == StateComplete
+				h.progress = &p
+				if state == StateRunning {
+					callback = h.onProgress
+				}
+			}
+			m.mu.Unlock()
+			if callback != nil {
+				callback(p)
+			}
+		}
+	}
 	if m.events != nil {
 		m.events.Publish(event, payload)
 	}
