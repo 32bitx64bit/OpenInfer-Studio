@@ -321,7 +321,7 @@ paths) — the desktop UI loads `file_urls` only.
 
 | Method & path | Purpose |
 |---|---|
-| GET `/media/servers` | live sd-server processes with state and log tail |
+| GET `/media/servers` | live sd-server processes with state and log tail; a `starting` one may carry `detail` (e.g. `restoring tensor shapes (45%)`) |
 | GET `/media/jobs[?model_id=]` | recent jobs |
 | GET `/media/jobs/{id}` | one job |
 | POST `/media/jobs/{id}/cancel` | cancel a queued/running job |
@@ -331,8 +331,80 @@ paths) — the desktop UI loads `file_urls` only.
 | POST `/models/{id}/media/server/start\|stop` | manage the model's sd-server |
 | POST `/models/{id}/media/generate` | `{kind, prompt, negative_prompt, width, height, steps, cfg_scale, seed, sampler, scheduler, guidance, output_format, batch_count, strength, init_image_path, video_frames, fps}` |
 
-Events: `media.progress` (`id`, `state`, `message`, `sd_status`, `outputs`),
-`media.server_state`, `media.server_starting`, `media.server_ready`,
+Diffusion `POST /models/{id}/preview` returns `can_load` with the component
+report. A preparation failure returns HTTP 200, `can_load:false`, empty
+`args`/`command`, and the reason in `warnings`; malformed request bodies still
+return HTTP 400. Components can have `status:"incompatible"` and a `reason`.
+This status is distinct from a missing download. The desktop displays these
+reasons and disables loading until preparation succeeds. `can_load:true`
+means no known preparation blocker was found, not verified runtime execution.
+
+Launch preparation checks the effective VAE's tensor header (including raw
+`--vae` overrides) before starting sd-server. LTX-2.5 diffusion-decoder VAEs
+are rejected with instructions to use the convolutional variant; converting
+the unsupported decoder to GGUF does not make its architecture compatible.
+Local pairing prefers alternatives without a known conflict, and download
+plans prefer the published LTX convolutional video VAE when available.
+Startup diagnostics use only the latest launch in the append-only model log.
+
+GGUFs converted with ComfyUI-GGUF store some tensors reshaped (flattened, or in
+rows of 256 for k-quants) and keep the real shape in `comfy.gguf.orig_shape.*`
+metadata. stable-diffusion.cpp reads the stored shapes, so it rejects such a
+file with "wrong shape" errors. Before launching sd-server, Studio swaps every
+such GGUF in the argv (model, text encoders, …) for a restored copy under
+`media/restored/`: tensors whose bytes already have the original layout only get
+their dims back, quantized ones whose original rows cannot hold whole k-quant
+blocks are decoded to F16. The copy is written once (needs free space equal to
+the file), reused while the source is unchanged, and the source file is never
+modified. The load preview lists each such file under `warnings`.
+
+On CUDA/HIP, LTX-2.5 diffusion GGUFs with F16/BF16 keyframe embeddings and
+modulation tables get a separate cached compatibility copy under
+`media/restored/`. Only those small parameters are losslessly promoted to F32;
+large quantized matrices, tensor shapes, metadata, and the source file are
+preserved. This avoids the GPU broadcast assertion that runtime tensor-type
+rules cannot fix because sd.cpp skips conversion of embedding/modulation
+parameters. Preparation reports a percentage, checks free disk space, supports
+cancellation, validates the copy, and reuses it while the source is unchanged.
+The load preview warns about the one-time copy and its disk requirement.
+
+On HIP, an unset Max VRAM reserves 2 GiB because ROCm's free-memory report
+can omit desktop allocations. An explicit `max_vram` (including `"0"`) or raw
+`--max-vram` overrides that reserve. Studio applies this only if the runtime
+advertises `--max-vram`; CPU computation is excluded.
+
+HIP launches of LTX diffusion GGUFs also set `GGML_CUDA_DISABLE_GRAPHS=1`
+to avoid ROCm graph-instantiation crashes in video decoding. Kernel execution
+remains on the GPU. Other models, CUDA runtimes, and explicit CPU computation
+are unaffected. The load preview warns about this workaround and includes the
+launch `environment` alongside its argv.
+
+Active `media.progress` events and media job responses can carry `progress`:
+`{job_id,phase,message,current?,total?,unit?,sampling_current?,sampling_total?,elapsed_ms,quiet_ms,server_responding?}`.
+Counters come from sd-server's log: `unit:"tensors"` measures weight loading;
+`unit:"steps"` measures completed sampler iterations, and `unit:"tiles"`
+measures VAE decoding tiles. Counts are never inferred
+from elapsed time. Sampling counts remain available during weight offloading
+between iterations. `quiet_ms` measures time without new log output, while
+`server_responding` reflects the native job poll and is absent before polling;
+a quiet responsive server
+does not prove that GPU work is advancing. Unknown phases have no percentage.
+Workflow node snapshots and `workflow.node_state` events forward this same
+progress for the specific stage's job. Live progress is kept in memory.
+
+Native job submissions have a thirty-second acknowledgement deadline. Polls
+have a five-second request deadline, including response-body reads, and a
+bounded consecutive-error window. A fatal assertion observed in
+the current job's log stops that server's process group and fails its jobs
+with the assertion as the cause, without waiting for debugger/core-dump work.
+On Linux, supervision also detects the kernel's `CoreDumping` state and fails
+the server's jobs immediately; a process still writing its dump is already
+crashed, even if process exit has not yet arrived.
+The graph periodically reconciles run state so a missed finish event cannot
+leave its nodes permanently marked running.
+
+Events: `media.progress` (`id`, `state`, `message`, `sd_status`, `progress`, `outputs`),
+`media.server_state` (`detail` while starting), `media.server_starting`, `media.server_ready`,
 `media.server_error`, `media.server_stopped`.
 
 ## Workflows (Image Studio Graph view)
