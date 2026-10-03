@@ -224,7 +224,9 @@ Item {
         if (page.instances[m.id] !== undefined) return page.statusText(m.id)
         if (page.isDiffusion(m) && page.mediaServers[m.id] !== undefined) {
             var st = page.mediaServers[m.id].state
-            return st === "starting" ? "loading" : st
+            if (st !== "starting") return st
+            var detail = page.mediaServers[m.id].detail
+            return detail ? "loading · " + detail : "loading"
         }
         return ""
     }

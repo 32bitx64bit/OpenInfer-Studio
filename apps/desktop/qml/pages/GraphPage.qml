@@ -537,7 +537,8 @@ Item {
             var prev = runStates[p.node_id] || {}
             next[p.node_id] = {
                 state: p.state, message: p.message || "", file_urls: p.file_urls || [], outputs: p.outputs || [],
-                ms: p.ms || 0, startedMs: p.state === "running" ? Date.now() : (prev.startedMs || 0)
+                ms: p.ms || 0, progress: p.progress || null, job_id: p.job_id || "",
+                startedMs: prev.startedMs || (p.state === "running" ? Date.now() : 0)
             }
             runStates = next
         } else if (name === "workflow.run_finished") {
@@ -574,15 +575,36 @@ Item {
             if (page.runId && page.running) {
                 api.get("/api/v1/workflow/runs/" + page.runId, function(st, data) {
                     if (st !== 200 || !data) return
-                    var states = {}
-                    for (var id in data.nodes) {
-                        var n = data.nodes[id]
-                        states[id] = { state: n.state, message: n.message || "", file_urls: n.file_urls || [], ms: n.ms || 0 }
-                    }
-                    page.runStates = states
-                    page.running = data.state === "running" || data.state === "queued"
+                    page.applyRunView(data)
                 })
             }
+        }
+    }
+
+    function applyRunView(data) {
+        var states = {}
+        for (var id in data.nodes) {
+            var n = data.nodes[id]
+            var prev = page.runStates[id] || {}
+            states[id] = { state: n.state, message: n.message || "", file_urls: n.file_urls || [],
+                outputs: n.outputs || [], ms: n.ms || 0, progress: n.progress || null, job_id: n.job_id || "",
+                startedMs: prev.startedMs || (n.state === "running" ? Date.now() : 0) }
+        }
+        page.runStates = states
+        page.running = data.state === "running" || data.state === "queued"
+        if (data.state === "failed") page.runError = data.error || "The run failed"
+    }
+
+    // Reconcile authoritative state even when a terminal event was missed.
+    Timer {
+        interval: 3000
+        running: page.running && page.runId !== ""
+        repeat: true
+        onTriggered: {
+            var id = page.runId
+            page.api.get("/api/v1/workflow/runs/" + id, function(st, data) {
+                if (st === 200 && data && page.runId === id) page.applyRunView(data)
+            })
         }
     }
 

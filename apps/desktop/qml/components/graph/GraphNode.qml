@@ -17,6 +17,7 @@ Rectangle {
 
     readonly property var runState: host ? host.runStateFor(node.id) : null
     readonly property string st: runState ? (runState.state || "") : ""
+    readonly property var workProgress: runState ? runState.progress || null : null
     readonly property var shownIssues: host ? host.issuesFor(node.id) : []
     readonly property int rows: Math.max(GM.list(spec.inputs).length, GM.list(spec.outputs).length)
     readonly property color catColor: GM.categoryColor(spec.category)
@@ -133,7 +134,7 @@ Rectangle {
                     }
                 }
             }
-            // Indeterminate bar: sd-server reports status, not step progress.
+            // Use observed counters. Unknown phases remain indeterminate.
             Rectangle {
                 visible: root.st === "running"
                 anchors.left: parent.left
@@ -144,14 +145,21 @@ Rectangle {
                 clip: true
                 Rectangle {
                     id: runner
+                    visible: !root.workProgress || !(root.workProgress.total > 0)
                     width: parent.width * 0.4
                     height: 2
                     color: AppTheme.accentHi
                     SequentialAnimation on x {
-                        running: root.st === "running"
+                        running: root.st === "running" && runner.visible
                         loops: Animation.Infinite
                         NumberAnimation { from: -runner.width; to: header.width; duration: 1600 }
                     }
+                }
+                Rectangle {
+                    visible: !!root.workProgress && root.workProgress.total > 0
+                    width: parent.width * (visible ? Math.max(0, Math.min(1, (root.workProgress.current || 0) / root.workProgress.total)) : 0)
+                    height: 2
+                    color: AppTheme.accentHi
                 }
             }
         }
@@ -250,6 +258,19 @@ Rectangle {
                     font.pixelSize: AppTheme.fontSmall
                     color: root.st === "failed" ? AppTheme.danger : AppTheme.textDim
                     text: root.runState && root.runState.message ? root.runState.message : ""
+                }
+                Text {
+                    width: parent.width
+                    visible: root.st === "running" && !!root.workProgress && (root.workProgress.quiet_ms >= 15000 || root.workProgress.server_responding === false)
+                    wrapMode: Text.Wrap
+                    font.pixelSize: AppTheme.fontSmall
+                    color: AppTheme.warning
+                    text: {
+                        if (!root.workProgress) return ""
+                        if (root.workProgress.server_responding === false) return "Server is not responding; checking…"
+                        var s = Math.floor(root.workProgress.quiet_ms / 1000)
+                        return "Server responding; no new progress for " + Math.floor(s / 60) + ":" + (s % 60 < 10 ? "0" : "") + (s % 60)
+                    }
                 }
                 Image {
                     id: preview

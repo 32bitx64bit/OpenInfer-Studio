@@ -341,6 +341,8 @@ Dialog {
     }
 
     function setSDSetting(key, value) {
+        root.sdPreviewRequest++
+        root.preview = null
         var s = Object.assign({}, root.sdSettings)
         s[key] = value
         root.sdSettings = s
@@ -367,16 +369,26 @@ Dialog {
         return 0
     }
 
-    function refreshDiffusion() {
+    property int sdPreviewRequest: 0
+    function refreshDiffusion(startWhenReady) {
         if (!modelId || !root.isImageGen) return
         var mid = modelId
+        var request = ++root.sdPreviewRequest
+        root.preview = null
         root.api.post("/api/v1/models/" + mid + "/preview", root.sdSettings, function(st, data) {
-            if (st !== 200 || root.modelId !== mid) return
+            if (root.modelId !== mid || request !== root.sdPreviewRequest) return
+            if (st !== 200) {
+                root.sdLoadError = (data && (data.detail || data.error)) || ("Preview failed: HTTP " + st)
+                return
+            }
             root.preview = data
+            root.sdLoadError = ""
             root.sdComponents = (data && data.components) || []
             root.sdSourceRepo = (data && data.source_repo) || ""
             root.sdMissingCount = (data && data.components_missing) || 0
             root.sdMissingBytes = (data && data.components_missing_bytes) || 0
+            if (startWhenReady === true && data && data.can_load === true && root.visible)
+                root.loadDiffusion()
         })
         root.api.post("/api/v1/models/" + mid + "/estimate", root.sdSettings, function(st, data) {
             if (st === 200 && root.modelId === mid) root.estimate = data
@@ -419,6 +431,7 @@ Dialog {
     }
 
     function loadDiffusion() {
+        if (!root.preview || root.preview.can_load !== true) return
         root.sdLoadError = ""
         // Model weights load for minutes, so behave exactly like the LLM
         // "Load model": answer 202, emit loaded() and close at once. The
@@ -461,8 +474,7 @@ Dialog {
                     root.sdFetching = false
                     root.sdFetchDownloadId = ""
                     if (!root.visible || !root.isImageGen || !root.modelId) return
-                    root.refreshDiffusion()
-                    root.loadDiffusion()
+                    root.refreshDiffusion(true)
                 } else if (payload.state === "failed" || payload.state === "canceled") {
                     root.sdFetching = false
                     root.sdFetchDownloadId = ""
@@ -1766,14 +1778,14 @@ Dialog {
                                 Layout.fillWidth: true
                                 spacing: 8
                                 Tag {
-                                    text: modelData.status === "ready" ? "ready" : "missing"
+                                    text: modelData.status
                                     tone: modelData.status === "ready" ? AppTheme.success : AppTheme.warning
                                 }
                                 Label {
-                                    text: modelData.label
+                                    text: modelData.label + ((modelData.reason || "") !== "" ? ": " + modelData.reason : "")
                                     color: AppTheme.text
                                     Layout.fillWidth: true
-                                    elide: Text.ElideRight
+                                    wrapMode: Text.WordWrap
                                 }
                                 Label {
                                     text: modelData.status === "ready" ? "" : AppTheme.bytes(modelData.size || 0)
@@ -1842,7 +1854,7 @@ Dialog {
                 FormField {
                     Layout.fillWidth: true
                     label: "Max VRAM budget"
-                    hint: "Optional per-device budget, e.g. 8 (GiB). Empty = runtime default."
+                    hint: "Per-device budget in GiB, e.g. 12. Empty = Studio's automatic headroom on ROCm; -2 reserves 2 GiB; 0 uses the runtime default."
                     AppTextField {
                         width: parent.width
                         placeholderText: "e.g. 8"
@@ -1890,6 +1902,17 @@ Dialog {
                         placeholderText: "/path/to/vae.safetensors"
                         text: root.sdSettings.vae || ""
                         onEditingFinished: root.setSDSetting("vae", text.trim())
+                    }
+                }
+
+                Repeater {
+                    model: root.preview ? root.preview.warnings || [] : []
+                    delegate: Label {
+                        required property string modelData
+                        Layout.fillWidth: true
+                        text: modelData
+                        color: root.preview && root.preview.can_load === false ? AppTheme.danger : AppTheme.warning
+                        wrapMode: Text.WordWrap
                     }
                 }
 
@@ -1994,6 +2017,7 @@ Dialog {
                         readonly property bool overBudget: !!(root.estimate && root.estimate.fits === false)
                         text: root.sdMissingCount > 0 ? "Load anyway"
                             : (overBudget ? "Load anyway" : "Load model")
+                        enabled: !!root.preview && root.preview.can_load === true
                         primary: root.sdMissingCount <= 0 && !overBudget
                         danger: root.sdMissingCount > 0 || overBudget
                         ToolTip.visible: hovered && (root.sdMissingCount > 0 || overBudget)
