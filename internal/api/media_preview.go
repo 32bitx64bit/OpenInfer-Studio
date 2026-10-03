@@ -63,6 +63,7 @@ func (h *handlers) previewDiffusionLoad(w http.ResponseWriter, r *http.Request, 
 
 	resp := map[string]any{
 		"modality":                 "diffusion",
+		"can_load":                 false,
 		"args":                     []string{},
 		"command":                  "",
 		"source_repo":              repoID,
@@ -88,7 +89,10 @@ func (h *handlers) previewDiffusionLoad(w http.ResponseWriter, r *http.Request, 
 	exe, args, resolved, _, _, prepWarnings, err := mediagen.PrepareLaunch(rt, help, m.PrimaryPath, s)
 	warnings = append(warnings, prepWarnings...)
 	if err != nil {
-		writeErr(w, 400, "preview failed", err)
+		// Keep the component report visible when preflight fails. A bare 400
+		// used to leave the dialog showing its previous successful preview.
+		resp["warnings"] = append(warnings, err.Error())
+		writeJSON(w, 200, resp)
 		return
 	}
 
@@ -124,6 +128,8 @@ func (h *handlers) previewDiffusionLoad(w http.ResponseWriter, r *http.Request, 
 	}
 
 	resp["args"] = args
+	resp["environment"] = mediagen.SDLaunchEnvironment(exe, args, rt.Backend)
+	resp["can_load"] = true
 	resp["command"] = strings.Join(append([]string{exe}, args...), " ")
 	resp["resolutions"] = resolutions
 	resp["warnings"] = warnings

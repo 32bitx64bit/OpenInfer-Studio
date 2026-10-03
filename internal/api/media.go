@@ -98,6 +98,7 @@ func mediaJobView(j *mediagen.Job, mediaDir string) map[string]any {
 		"output_format": j.Format, "width": j.Width, "height": j.Height,
 		"frames": j.Frames, "seed": j.Seed, "runtime_id": j.RuntimeID,
 		"log_path": j.LogPath, "result": j.Result, "error": j.Error,
+		"progress":   j.Progress,
 		"created_at": j.CreatedAt, "updated_at": j.UpdatedAt, "finished_at": j.FinishedAt,
 	}
 }

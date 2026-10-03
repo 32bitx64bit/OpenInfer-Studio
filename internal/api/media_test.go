@@ -50,6 +50,26 @@ func TestSaveTargets(t *testing.T) {
 	})
 }
 
+func TestMediaJobResponsePreservesObservedProgress(t *testing.T) {
+	responding := true
+	j := &mediagen.Job{ID: "video-job", State: mediagen.StateRunning, Progress: &mediagen.Progress{
+		JobID: "video-job", Phase: "sampling", Current: 1, Total: 20, Unit: "steps", ServerResponding: &responding,
+	}}
+	b, err := json.Marshal(mediaJobView(j, t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Progress *mediagen.Progress `json:"progress"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Progress == nil || got.Progress.JobID != j.ID || got.Progress.Current != 1 || got.Progress.Total != 20 || got.Progress.Unit != "steps" {
+		t.Fatalf("API serialization dropped live counters: %s", b)
+	}
+}
+
 // newSaveTest wires a real media manager over a temp database and returns the
 // handler, its open database, media dir, and temp root.
 func newSaveTest(t *testing.T) (*handlers, *sql.DB, string, string) {
