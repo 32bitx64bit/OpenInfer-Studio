@@ -1,5 +1,5 @@
+pragma ComponentBehavior: Bound
 import QtQuick
-import QtQuick.Controls
 import "../.."
 import "../"
 import "../../js/graphModel.js" as GM
@@ -14,23 +14,26 @@ Rectangle {
     property var spec          // node-type descriptor from /workflow/node-types
     property var host          // GraphPage
     property bool selected: false
+    readonly property bool collapsed: host ? root.host.isCollapsed(root.node.id) : !!root.node.collapsed
+    property int previewIndex: 0
+    property var widgetsByName: ({})
 
-    readonly property var runState: host ? host.runStateFor(node.id) : null
+    readonly property var runState: host ? root.host.runStateFor(root.node.id) : null
     readonly property string st: runState ? (runState.state || "") : ""
     readonly property var workProgress: runState ? runState.progress || null : null
-    readonly property var shownIssues: host ? host.issuesFor(node.id) : []
-    readonly property int rows: Math.max(GM.list(spec.inputs).length, GM.list(spec.outputs).length)
-    readonly property color catColor: GM.categoryColor(spec.category)
+    readonly property var shownIssues: host ? root.host.issuesFor(root.node.id) : []
+    readonly property int rows: Math.max(GM.list(root.spec.inputs).length, GM.list(root.spec.outputs).length)
+    readonly property color catColor: GM.categoryColor(root.spec.category)
     property var visibleParams: {
         if (!host) return []
-        host.visRev
-        return GM.list(spec.params).filter(function(ps) { return host.paramVisible(node, ps) })
+        root.host.visRev
+        return GM.list(root.spec.params).filter(function(ps) { return root.host.paramVisible(node, ps) })
     }
     property real nowMs: Date.now()
 
-    x: node.pos[0]
-    y: node.pos[1]
-    width: GM.nodeWidth(node.type)
+    x: { if (host) root.host.layoutRev; return root.node.pos[0] }
+    y: { if (host) root.host.layoutRev; return root.node.pos[1] }
+    width: GM.nodeWidth(root.node.type)
     height: col.implicitHeight + 6
     radius: AppTheme.radius
     color: AppTheme.surface
@@ -43,10 +46,10 @@ Rectangle {
     opacity: st === "pending" ? 0.82 : 1
     z: selected ? 5 : 1
 
-    onXChanged: if (body.drag.active) host.nodeMoved(node.id, x, y)
-    onYChanged: if (body.drag.active) host.nodeMoved(node.id, x, y)
+    onHeightChanged: if (host && node) root.host.measureNode(root.node.id, height)
+    Component.onCompleted: if (host && node) root.host.measureNode(root.node.id, height)
 
-    // Soft outline behind a selected node.
+    // Soft outline behind a selected root.node.
     Rectangle {
         anchors.fill: parent
         anchors.margins: -4
@@ -64,12 +67,15 @@ Rectangle {
         anchors.fill: parent
         z: -1
         acceptedButtons: Qt.LeftButton | Qt.RightButton
-        drag.target: root
-        drag.threshold: 4
+        preventStealing: true
         onPressed: function(m) {
-            host.select(node.id)
-            if (m.button === Qt.RightButton) host.openMenu(node.id)
+            if (m.button === Qt.RightButton) { root.host.openMenu(root.node.id); return }
+            root.host.beginMove(root.node.id, m.modifiers, mapToItem(root.host.world, m.x, m.y))
         }
+        onPositionChanged: function(m) { if (pressed) root.host.moveNodes(mapToItem(root.host.world, m.x, m.y)) }
+        onReleased: root.host.endMove(false)
+        onCanceled: root.host.endMove(true)
+        onDoubleClicked: root.host.toggleCollapse([root.node.id])
     }
 
     Column {
@@ -103,7 +109,7 @@ Rectangle {
                 anchors.right: tag.left
                 anchors.rightMargin: 6
                 anchors.verticalCenter: parent.verticalCenter
-                text: node.title || spec.title
+                text: root.node.title || root.spec.title
                 color: AppTheme.text
                 font.pixelSize: AppTheme.fontSmall + 1
                 font.weight: Font.DemiBold
@@ -126,6 +132,7 @@ Rectangle {
                         var s = Math.max(0, Math.round((root.nowMs - (root.runState.startedMs || root.nowMs)) / 1000))
                         return "running " + Math.floor(s / 60) + ":" + (s % 60 < 10 ? "0" : "") + (s % 60)
                     case "done":
+                        if (root.runState.cached) return "cached"
                         return root.runState.ms ? "done " + (root.runState.ms / 1000).toFixed(1) + " s" : "done"
                     case "failed": return "failed"
                     case "canceled": return "canceled"
@@ -176,28 +183,30 @@ Rectangle {
         Repeater {
             model: root.rows
             delegate: Item {
+                id: socketRow
+                required property int index
                 width: col.width
                 height: GM.ROW
-                readonly property var inPort: index < GM.list(spec.inputs).length ? spec.inputs[index] : null
-                readonly property var outPort: index < GM.list(spec.outputs).length ? spec.outputs[index] : null
+                readonly property var inPort: index < GM.list(root.spec.inputs).length ? root.spec.inputs[index] : null
+                readonly property var outPort: index < GM.list(root.spec.outputs).length ? root.spec.outputs[index] : null
                 Text {
-                    visible: inPort !== null
+                    visible: socketRow.inPort !== null
                     x: 16
                     anchors.verticalCenter: parent.verticalCenter
                     text: {
-                        if (!inPort) return ""
-                        var t = GM.types(inPort)
-                        return inPort.name + (t.length > 1 ? "  (" + t.join(" or ").toLowerCase() + ")" : "")
+                        if (!socketRow.inPort) return ""
+                        var t = GM.types(socketRow.inPort)
+                        return socketRow.inPort.name + (t.length > 1 ? "  (" + t.join(" or ").toLowerCase() + ")" : "")
                     }
-                    color: inPort && inPort.required ? AppTheme.textDim : AppTheme.textFaint
+                    color: socketRow.inPort && socketRow.inPort.required ? AppTheme.textDim : AppTheme.textFaint
                     font.pixelSize: AppTheme.fontSmall
                 }
                 Text {
-                    visible: outPort !== null
+                    visible: socketRow.outPort !== null
                     anchors.right: parent.right
                     anchors.rightMargin: 16
                     anchors.verticalCenter: parent.verticalCenter
-                    text: outPort ? outPort.name : ""
+                    text: socketRow.outPort ? socketRow.outPort.name : ""
                     color: AppTheme.textDim
                     font.pixelSize: AppTheme.fontSmall
                 }
@@ -207,7 +216,8 @@ Rectangle {
         // ---- parameters ----
         Item {
             width: parent.width
-            height: paramCol.implicitHeight > 0 ? paramCol.implicitHeight + 14 : 4
+            visible: !root.collapsed
+            height: root.collapsed ? 0 : paramCol.implicitHeight > 0 ? paramCol.implicitHeight + 14 : 4
             Column {
                 id: paramCol
                 x: 10
@@ -219,8 +229,10 @@ Rectangle {
                     model: root.visibleParams
                     delegate: Loader {
                         id: loader
+                        required property var modelData
                         width: paramCol.width
                         property var ps: modelData
+                        enabled: !root.host.inspectingRun
                         source: root.widgetFile(ps)
                         onLoaded: root.bindWidget(item, ps)
                     }
@@ -235,8 +247,8 @@ Rectangle {
             // Visibility must not depend on the height of its own children:
             // a hidden item reports its children as hidden, so they would
             // never contribute a height and the footer would stay hidden.
-            visible: root.hasFooter
-            height: root.hasFooter ? footerCol.implicitHeight + 12 : 0
+            visible: root.hasFooter && !root.collapsed
+            height: visible ? footerCol.implicitHeight + 12 : 0
             Rectangle {
                 visible: footerCol.implicitHeight > 0
                 anchors.top: parent.top
@@ -251,6 +263,11 @@ Rectangle {
                 width: parent.width - 20
                 spacing: 6
 
+                Text {
+                    visible: !!root.runState && root.runState.seed !== undefined && root.runState.seed !== null
+                    text: visible ? "Seed " + root.runState.seed : ""
+                    color: AppTheme.textFaint; font.pixelSize: AppTheme.fontSmall
+                }
                 Text {
                     width: parent.width
                     visible: text !== ""
@@ -274,6 +291,7 @@ Rectangle {
                 }
                 Image {
                     id: preview
+                    objectName: "nodePreview"
                     visible: root.previewUrl !== "" && !root.isVideo && status === Image.Ready
                     width: parent.width
                     height: visible ? Math.min(root.previewMax, width * implicitHeight / Math.max(1, implicitWidth)) : 0
@@ -285,7 +303,7 @@ Rectangle {
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: Qt.openUrlExternally(root.previewUrl)
+                        onClicked: root.host.viewImages(root.previewSources, root.previewIndex)
                     }
                 }
                 AppButton {
@@ -295,9 +313,37 @@ Rectangle {
                     implicitHeight: 28
                     onClicked: Qt.openUrlExternally(root.previewUrl)
                 }
+                Row {
+                    visible: root.previewSources.length > 1
+                    spacing: 8
+                    AppButton {
+                        objectName: "previousPreview"
+                        text: "‹"; flat: true; implicitHeight: 26
+                        enabled: root.previewIndex > 0
+                        onClicked: root.previewIndex--
+                    }
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: (root.previewIndex + 1) + " / " + root.previewSources.length
+                        color: AppTheme.textDim; font.pixelSize: AppTheme.fontSmall
+                    }
+                    AppButton {
+                        objectName: "nextPreview"
+                        text: "›"; flat: true; implicitHeight: 26
+                        enabled: root.previewIndex + 1 < root.previewSources.length
+                        onClicked: root.previewIndex++
+                    }
+                }
+                Text {
+                    width: parent.width
+                    visible: root.node.type === "image.load" && root.previewUrl !== "" && preview.status === Image.Error
+                    text: "Input image is unavailable"
+                    color: AppTheme.warning; font.pixelSize: AppTheme.fontSmall
+                }
                 Repeater {
                     model: root.shownIssues
                     delegate: Text {
+                        required property var modelData
                         width: footerCol.width
                         wrapMode: Text.Wrap
                         text: modelData.message
@@ -311,32 +357,41 @@ Rectangle {
 
     // ---- sockets ----
     Repeater {
-        model: GM.list(spec.inputs)
+        model: GM.list(root.spec.inputs)
         delegate: Socket {
+            required property var modelData
+            required index
             host: root.host; nodeId: root.node.id; cardColor: root.color; nodeWidth: root.width
-            port: modelData; index: model.index; isOutput: false
+            port: modelData; isOutput: false
         }
     }
     Repeater {
-        model: GM.list(spec.outputs)
+        model: GM.list(root.spec.outputs)
         delegate: Socket {
+            required property var modelData
+            required index
             host: root.host; nodeId: root.node.id; cardColor: root.color; nodeWidth: root.width
-            port: modelData; index: model.index; isOutput: true
+            port: modelData; isOutput: true
         }
     }
 
     readonly property bool hasFooter: shownIssues.length > 0
-        || (runState !== null && ((runState.message || "") !== "" || previewUrl !== ""))
+        || previewUrl !== "" || (runState !== null && ((runState.message || "") !== "" || runState.seed !== undefined))
 
     // ---- previews ----
-    readonly property string previewUrl: {
-        var urls = runState && runState.file_urls ? runState.file_urls : []
-        if (urls.length === 0) return ""
-        if (node.type === "image.load") return ""
-        return urls[0]
+    readonly property var previewSources: {
+        if (host) root.host.graphRev
+        if (root.node.type === "image.load" || root.node.type === "mask.load") {
+            var ps = GM.list(root.spec.params).filter(function(p) { return p.kind === "path" })[0]
+            var path = ps && host ? root.host.getParam(node, ps) : ""
+            return path ? [GM.localPathToFileUrl(path)] : []
+        }
+        return runState && runState.file_urls ? runState.file_urls : []
     }
+    onPreviewSourcesChanged: previewIndex = Math.max(0, Math.min(previewIndex, previewSources.length - 1))
+    readonly property string previewUrl: previewSources[previewIndex] || ""
     readonly property bool isVideo: /\.(webm|avi|mp4)$/i.test(previewUrl)
-    readonly property real previewMax: (node.type === "image.save" || node.type === "video.save") ? 280 : 150
+    readonly property real previewMax: (root.node.type === "image.save" || root.node.type === "video.save") ? 280 : 150
 
     function widgetFile(ps) {
         switch (ps.kind) {
@@ -349,27 +404,28 @@ Rectangle {
         }
     }
     function bindWidget(item, ps) {
+        widgetsByName[ps.name] = item
         item.spec = ps
-        item.value = host.getParam(node, ps)
+        item.value = root.host.getParam(node, ps)
         if (item.options !== undefined)
-            item.options = ps.kind === "model" ? host.modelOptions : host.paramOptions(ps)
-        item.edited.connect(function(v) { host.setParam(node.id, ps.name, v) })
+            item.options = ps.kind === "model" ? root.host.modelOptions : root.host.paramOptions(ps)
+        item.edited.connect(function(v) { root.host.setParam(root.node.id, ps.name, v, ps.kind === "text" || ps.kind === "string") })
         if (ps.kind === "path" && item.browseClicked)
-            item.browseClicked.connect(function() { host.browse(node.id, ps.name) })
+            item.browseClicked.connect(function() { root.host.browse(root.node.id, ps.name) })
     }
     function syncParams() {
-        for (var i = 0; i < paramRepeater.count; i++) {
-            var l = paramRepeater.itemAt(i)
-            if (l && l.item && l.item.syncFrom) l.item.syncFrom(host.getParam(node, l.ps))
+        for (var i = 0; i < visibleParams.length; i++) {
+            var ps = visibleParams[i], widget = widgetsByName[ps.name]
+            if (widget && widget.syncFrom) widget.syncFrom(root.host.getParam(node, ps))
         }
     }
     Connections {
         target: root.host
         function onParamsRevChanged() { root.syncParams() }
         function onModelOptionsChanged() {
-            for (var i = 0; i < paramRepeater.count; i++) {
-                var l = paramRepeater.itemAt(i)
-                if (l && l.item && l.ps.kind === "model") l.item.options = host.modelOptions
+            for (var i = 0; i < root.visibleParams.length; i++) {
+                var ps = root.visibleParams[i], widget = root.widgetsByName[ps.name]
+                if (widget && ps.kind === "model") widget.options = root.host.modelOptions
             }
         }
     }

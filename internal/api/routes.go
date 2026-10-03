@@ -85,6 +85,8 @@ func (s *Server) RegisterRoutes(d *Deps) {
 	s.Handle("GET /api/v1/models/{id}/activity", h.modelActivity)
 
 	s.Handle("GET /api/v1/media/servers", h.listMediaServers)
+	s.Handle("GET /api/v1/media/servers/{id}/capabilities", h.mediaGenerationCapabilities)
+	s.Handle("GET /api/v1/media/capabilities", h.mediaGenerationCapabilities)
 	s.Handle("GET /api/v1/media/jobs", h.listMediaJobs)
 	s.Handle("GET /api/v1/media/jobs/{id}", h.getMediaJob)
 	s.Handle("POST /api/v1/media/jobs/{id}/cancel", h.cancelMediaJob)
@@ -96,8 +98,11 @@ func (s *Server) RegisterRoutes(d *Deps) {
 	s.Handle("POST /api/v1/models/{id}/media/generate", h.generateMedia)
 
 	s.Handle("GET /api/v1/workflow/node-types", h.workflowNodeTypes)
+	s.Handle("POST /api/v1/workflow/masks", h.paintWorkflowMask)
 	s.Handle("GET /api/v1/workflows", h.listWorkflows)
 	s.Handle("POST /api/v1/workflows", h.createWorkflow)
+	s.Handle("POST /api/v1/workflows/import", h.importWorkflow)
+	s.Handle("POST /api/v1/workflows/{id}/export", h.exportWorkflow)
 	s.Handle("POST /api/v1/workflows/validate", h.validateWorkflow)
 	s.Handle("POST /api/v1/workflow/runs", h.startWorkflowRun)
 	s.Handle("GET /api/v1/workflow/runs", h.listWorkflowRuns)

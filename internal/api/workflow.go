@@ -38,10 +38,13 @@ func (h *handlers) workflowNodeTypes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	info, caps := svc.Capabilities(r.URL.Query().Get("runtime_id"))
+	apiCaps := svc.ModelCapabilities(r.URL.Query().Get("model_id"))
+	caps.API = apiCaps
 	writeJSON(w, http.StatusOK, map[string]any{
-		"node_types": svc.Registry().View(caps),
-		"port_types": workflow.AllPortTypes,
-		"runtime":    info,
+		"node_types":       svc.Registry().View(caps),
+		"port_types":       workflow.AllPortTypes,
+		"runtime":          info,
+		"api_capabilities": apiCaps,
 	})
 }
 
@@ -179,9 +182,11 @@ func (h *handlers) startWorkflowRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Graph     json.RawMessage `json:"graph"`
-		Only      string          `json:"only"`
-		RuntimeID string          `json:"runtime_id"`
+		Graph      json.RawMessage `json:"graph"`
+		Only       string          `json:"only"`
+		RuntimeID  string          `json:"runtime_id"`
+		WorkflowID string          `json:"workflow_id"`
+		Force      bool            `json:"force"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -201,7 +206,7 @@ func (h *handlers) startWorkflowRun(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": msg, "errors": errs, "warnings": warns})
 		return
 	}
-	view, err := exec.Submit(plan)
+	view, err := exec.SubmitWithOptions(plan, workflow.RunOptions{Graph: &g, WorkflowID: body.WorkflowID, Only: body.Only, Force: body.Force})
 	if errors.Is(err, workflow.ErrQueueFull) {
 		writeErr(w, http.StatusTooManyRequests, "too many runs queued", err)
 		return
@@ -230,7 +235,12 @@ func (h *handlers) listWorkflowRuns(w http.ResponseWriter, r *http.Request) {
 	if exec == nil {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runs": exec.List()})
+	runs, err := exec.History()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "reading run history", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
 }
 
 func (h *handlers) getWorkflowRun(w http.ResponseWriter, r *http.Request) {

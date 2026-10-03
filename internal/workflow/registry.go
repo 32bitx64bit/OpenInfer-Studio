@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/openinfer/openinfer-studio/internal/mediagen"
 )
 
 // Caps is what the selected sd.cpp runtime advertises (sd-server --help).
 // Same rule as the llama.cpp side: a node that needs a flag the runtime does
 // not list is shown disabled, and a graph using it is rejected.
 type Caps struct {
+	API *mediagen.APICapabilities
 	// Known is false when no stable-diffusion.cpp runtime is installed.
 	Known bool
 	// Flags are capability ids as parsed by mediagen.ParseSDCapabilities.
@@ -37,7 +40,7 @@ type Registry struct {
 // NewRegistry returns the registry of built-in node types.
 func NewRegistry() *Registry {
 	r := &Registry{index: map[string]int{}}
-	for _, s := range builtinSpecs() {
+	for _, s := range append(append(builtinSpecs(), imageSpecs()...), upscaleSpec()) {
 		// Descriptors are a JSON contract: lists are always arrays, never null.
 		if s.Inputs == nil {
 			s.Inputs = []Port{}
@@ -71,6 +74,24 @@ func (r *Registry) View(caps Caps) []NodeTypeView {
 	out := make([]NodeTypeView, 0, len(r.specs))
 	for _, s := range r.specs {
 		v := NodeTypeView{NodeSpec: s, Available: true}
+		switch s.APIFeature {
+		case "upscale":
+			rgb := false
+			if caps.API != nil {
+				for _, upscaler := range caps.API.Upscalers {
+					rgb = rgb || (upscaler.Model && upscaler.ImageUpscale && upscaler.Name != "")
+				}
+			}
+			if caps.API == nil || !caps.API.Known || !caps.API.Upscale || !rgb {
+				v.Available = false
+				v.Reason = "Load a compatible model to discover native image upscaling support"
+			}
+		case "lora":
+			if caps.API == nil || !(caps.API.SupportsFeature("img_gen", "lora") || caps.API.SupportsFeature("vid_gen", "lora")) {
+				v.Available = false
+				v.Reason = "Load a compatible model to discover structured LoRA support"
+			}
+		}
 		if reason := missingCapability(s.Requires, caps); reason != "" {
 			v.Available = false
 			v.Reason = reason
@@ -122,7 +143,7 @@ func samplerParams(video bool) []ParamSpec {
 	ps := []ParamSpec{
 		{Name: "seed", Kind: ParamSeed, Default: -1},
 		{Name: "seed_mode", Kind: ParamEnum, Options: []string{"fixed", "increment", "random"}, Default: "fixed"},
-		{Name: "steps", Kind: ParamInt, Min: ptr(1), Max: ptr(300), Default: 20},
+		{Name: "steps", Label: "Steps (0 = auto)", Kind: ParamInt, Min: ptr(0), Max: ptr(300), Default: 20},
 		{Name: "cfg", Kind: ParamFloat, Min: ptr(0), Max: ptr(30), Default: 7.0},
 		{Name: "guidance", Kind: ParamFloat, Min: ptr(0), Max: ptr(30), Default: 0.0},
 		{Name: "sampler", Kind: ParamEnum, From: "capabilities.samplers"},
@@ -136,6 +157,7 @@ func samplerParams(video bool) []ParamSpec {
 		)
 	}
 	return append(ps,
+		ParamSpec{Name: "control_strength", Kind: ParamFloat, Min: ptr(0), Max: ptr(10), Default: 0.9, ShowWhen: "control is IMAGE"},
 		ParamSpec{Name: "strength", Kind: ParamFloat, Min: ptr(0), Max: ptr(1), Default: 0.75, ShowWhen: "start is IMAGE"},
 		ParamSpec{Name: "output_format", Kind: ParamEnum, Options: []string{"png", "jpeg", "webp"}, Default: "png"},
 	)
@@ -148,8 +170,21 @@ func samplerInputs() []Port {
 		{Name: "vae", Type: PortTypes{TypeVAE}},
 		{Name: "positive", Type: PortTypes{TypeCond}, Required: true},
 		{Name: "negative", Type: PortTypes{TypeCond}},
+		{Name: "mask", Type: PortTypes{TypeMask}},
+		{Name: "control", Type: PortTypes{TypeImage}},
+		{Name: "reference", Type: PortTypes{TypeImage}},
 		{Name: "start", Type: PortTypes{TypeSize, TypeImage}, Required: true},
 	}
+}
+
+func videoInputs() []Port {
+	out := []Port{}
+	for _, p := range samplerInputs() {
+		if p.Name != "mask" && p.Name != "control" && p.Name != "reference" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func builtinSpecs() []NodeSpec {
@@ -193,14 +228,14 @@ func builtinSpecs() []NodeSpec {
 		},
 		{
 			Type: "lora.load", Category: CatLoaders, Title: "Load LoRA",
-			Description: "Applies a LoRA to the model through the prompt. All LoRAs on one Sample must live in one folder.",
+			Description: "Applies a local LoRA through the runtime’s structured API when the loaded model supports it.",
 			Inputs:      []Port{{Name: "model", Type: PortTypes{TypeModel}, Required: true}},
 			Outputs:     []Port{{Name: "model", Type: PortTypes{TypeModel}}},
 			Params: []ParamSpec{
 				{Name: "path", Kind: ParamPath, Required: true},
 				{Name: "strength", Kind: ParamFloat, Min: ptr(-2), Max: ptr(2), Default: 1.0},
 			},
-			Requires: []string{"lora-model-dir"},
+			APIFeature: "lora",
 		},
 		{
 			Type: "prompt", Category: CatPrompt, Title: "Prompt",
@@ -231,8 +266,8 @@ func builtinSpecs() []NodeSpec {
 		},
 		{
 			Type: "sample.video", Category: CatSample, Title: "Sample (video)",
-			Description: "Text-to-video. Image-to-video is not available yet.",
-			Inputs:      samplerInputs(),
+			Description: "Text-to-video, or image-to-video when the loaded model advertises it.",
+			Inputs:      videoInputs(),
 			Outputs:     []Port{{Name: "video", Type: PortTypes{TypeVideo}}},
 			Params:      samplerParams(true),
 		},

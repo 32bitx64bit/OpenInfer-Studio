@@ -2,12 +2,15 @@ package workflow
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
 	"image/png"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand/v2"
 	"net/url"
 	"os"
@@ -69,6 +72,8 @@ type progressStageRunner interface {
 
 // NodeState is one node's progress within a run.
 type NodeState struct {
+	Cached   bool               `json:"cached,omitempty"`
+	Seed     *int64             `json:"seed,omitempty"`
 	Progress *mediagen.Progress `json:"progress,omitempty"`
 	State    string             `json:"state"`
 	Message  string             `json:"message,omitempty"`
@@ -80,13 +85,17 @@ type NodeState struct {
 
 // RunView is a copy of a run's state, safe to serialise.
 type RunView struct {
-	ID         string               `json:"id"`
-	State      string               `json:"state"`
-	Error      string               `json:"error,omitempty"`
-	Nodes      map[string]NodeState `json:"nodes"`
-	CreatedAt  string               `json:"created_at"`
-	StartedAt  string               `json:"started_at,omitempty"`
-	FinishedAt string               `json:"finished_at,omitempty"`
+	SourceGraph *Graph               `json:"source_graph,omitempty"`
+	Graph       *Graph               `json:"graph,omitempty"`
+	WorkflowID  string               `json:"workflow_id,omitempty"`
+	Only        string               `json:"only,omitempty"`
+	ID          string               `json:"id"`
+	State       string               `json:"state"`
+	Error       string               `json:"error,omitempty"`
+	Nodes       map[string]NodeState `json:"nodes"`
+	CreatedAt   string               `json:"created_at"`
+	StartedAt   string               `json:"started_at,omitempty"`
+	FinishedAt  string               `json:"finished_at,omitempty"`
 }
 
 type run struct {
@@ -94,6 +103,7 @@ type run struct {
 	plan    *Plan
 	ctx     context.Context
 	cancel  context.CancelFunc
+	force   bool
 	outputs map[string][]string // stage id -> media-root-relative outputs
 }
 
@@ -106,11 +116,15 @@ type Executor struct {
 	events EventSink
 	log    *slog.Logger
 
-	mu    sync.Mutex
-	runs  map[string]*run
-	order []string
-	queue chan *run
-	quit  chan struct{}
+	mu        sync.Mutex
+	runs      map[string]*run
+	order     []string
+	queue     chan *run
+	quit      chan struct{}
+	done      chan struct{}
+	closeOnce sync.Once
+	db        *sql.DB
+	initErr   error
 }
 
 // NewExecutor starts the single worker. Call Close to stop it.
@@ -120,7 +134,7 @@ func NewExecutor(runner StageRunner, events EventSink, log *slog.Logger) *Execut
 	}
 	e := &Executor{
 		runner: runner, events: events, log: log,
-		runs: map[string]*run{}, queue: make(chan *run, maxQueuedRuns), quit: make(chan struct{}),
+		runs: map[string]*run{}, queue: make(chan *run, maxQueuedRuns), quit: make(chan struct{}), done: make(chan struct{}),
 	}
 	go e.loop()
 	return e
@@ -128,12 +142,33 @@ func NewExecutor(runner StageRunner, events EventSink, log *slog.Logger) *Execut
 
 // Close stops the worker and cancels the active run.
 func (e *Executor) Close() {
-	close(e.quit)
-	e.mu.Lock()
-	for _, r := range e.runs {
-		r.cancel()
-	}
-	e.mu.Unlock()
+	e.closeOnce.Do(func() {
+		close(e.quit)
+		e.mu.Lock()
+		for _, r := range e.runs {
+			r.cancel()
+			if r.view.State == RunQueued {
+				r.view.State, r.view.FinishedAt = RunCanceled, ts()
+				for id, ns := range r.view.Nodes {
+					ns.State = NodeCanceled
+					r.view.Nodes[id] = ns
+				}
+				if err := e.persistLocked(r); err != nil {
+					e.log.Error("saving canceled workflow", "err", err)
+				}
+			}
+		}
+		e.mu.Unlock()
+		<-e.done
+	})
+}
+
+// NewPersistentExecutor adds history and result reuse to the same serialized queue.
+func NewPersistentExecutor(runner StageRunner, events EventSink, db *sql.DB) *Executor {
+	e := NewExecutor(runner, events, nil)
+	e.db = db
+	e.initErr = e.recoverRuns()
+	return e
 }
 
 func (e *Executor) publish(event string, payload map[string]any) {
@@ -147,12 +182,49 @@ func ts() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 // Submit queues a plan. It returns immediately; progress arrives as
 // workflow.* events and through Get.
 func (e *Executor) Submit(plan *Plan) (RunView, error) {
+	return e.SubmitWithOptions(plan, RunOptions{})
+}
+
+func (e *Executor) SubmitWithOptions(plan *Plan, opts RunOptions) (RunView, error) {
+	if e.initErr != nil {
+		return RunView{}, e.initErr
+	}
+	select {
+	case <-e.quit:
+		return RunView{}, errors.New("workflow executor stopped")
+	default:
+	}
 	if plan == nil || len(plan.Stages) == 0 {
 		return RunView{}, errors.New("nothing to run")
 	}
+	raw, err := json.Marshal(plan)
+	if err != nil {
+		return RunView{}, err
+	}
+	var snapshot Plan
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return RunView{}, err
+	}
+	plan = &snapshot
+	var graph *Graph
+	if opts.Graph != nil {
+		raw, err := json.Marshal(opts.Graph)
+		if err != nil {
+			return RunView{}, err
+		}
+		graph = &Graph{}
+		if err := json.Unmarshal(raw, graph); err != nil {
+			return RunView{}, err
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &run{plan: plan, ctx: ctx, cancel: cancel, outputs: map[string][]string{}}
-	r.view = RunView{ID: uuid.NewString(), State: RunQueued, Nodes: map[string]NodeState{}, CreatedAt: ts()}
+	r := &run{plan: plan, ctx: ctx, cancel: cancel, force: opts.Force, outputs: map[string][]string{}}
+	r.view = RunView{ID: uuid.NewString(), State: RunQueued, Nodes: map[string]NodeState{}, CreatedAt: ts(), Graph: graph, WorkflowID: opts.WorkflowID, Only: opts.Only}
+	if graph != nil {
+		raw, _ := json.Marshal(graph)
+		r.view.SourceGraph = &Graph{}
+		_ = json.Unmarshal(raw, r.view.SourceGraph)
+	}
 	for _, st := range plan.Stages {
 		r.view.Nodes[st.NodeID] = NodeState{State: NodePending}
 		for _, id := range st.Absorbs {
@@ -161,6 +233,23 @@ func (e *Executor) Submit(plan *Plan) (RunView, error) {
 	}
 
 	e.mu.Lock()
+	select {
+	case <-e.quit:
+		e.mu.Unlock()
+		cancel()
+		return RunView{}, errors.New("workflow executor stopped")
+	default:
+	}
+	if len(e.queue) >= cap(e.queue) {
+		e.mu.Unlock()
+		cancel()
+		return RunView{}, ErrQueueFull
+	}
+	if err := e.persistLocked(r); err != nil {
+		e.mu.Unlock()
+		cancel()
+		return RunView{}, err
+	}
 	select {
 	case e.queue <- r:
 	default:
@@ -193,8 +282,32 @@ func (e *Executor) evictLocked() {
 
 func (r *run) snapshotLocked() RunView {
 	v := r.view
+	if r.view.Graph != nil {
+		raw, _ := json.Marshal(r.view.Graph)
+		v.Graph = &Graph{}
+		_ = json.Unmarshal(raw, v.Graph)
+	}
+	if r.view.SourceGraph != nil {
+		raw, _ := json.Marshal(r.view.SourceGraph)
+		v.SourceGraph = &Graph{}
+		_ = json.Unmarshal(raw, v.SourceGraph)
+	}
 	v.Nodes = make(map[string]NodeState, len(r.view.Nodes))
 	for k, n := range r.view.Nodes {
+		n.Outputs = append([]string(nil), n.Outputs...)
+		n.FileURLs = append([]string(nil), n.FileURLs...)
+		if n.Seed != nil {
+			seed := *n.Seed
+			n.Seed = &seed
+		}
+		if n.Progress != nil {
+			progress := *n.Progress
+			if progress.ServerResponding != nil {
+				responding := *progress.ServerResponding
+				progress.ServerResponding = &responding
+			}
+			n.Progress = &progress
+		}
 		v.Nodes[k] = n
 	}
 	return v
@@ -206,7 +319,8 @@ func (e *Executor) Get(id string) (RunView, bool) {
 	defer e.mu.Unlock()
 	r, ok := e.runs[id]
 	if !ok {
-		return RunView{}, false
+		v, err := e.storedRun(id)
+		return v, err == nil
 	}
 	return r.snapshotLocked(), true
 }
@@ -231,6 +345,9 @@ func (e *Executor) Cancel(id string) error {
 	r, ok := e.runs[id]
 	if !ok {
 		e.mu.Unlock()
+		if _, err := e.storedRun(id); err == nil {
+			return nil
+		}
 		return ErrRunNotFound
 	}
 	queued := r.view.State == RunQueued
@@ -242,6 +359,13 @@ func (e *Executor) Cancel(id string) error {
 			r.view.Nodes[k] = n
 		}
 	}
+	if queued {
+		if err := e.persistLocked(r); err != nil {
+			e.mu.Unlock()
+			r.cancel()
+			return err
+		}
+	}
 	e.mu.Unlock()
 	r.cancel()
 	if queued {
@@ -251,6 +375,7 @@ func (e *Executor) Cancel(id string) error {
 }
 
 func (e *Executor) loop() {
+	defer close(e.done)
 	for {
 		select {
 		case <-e.quit:
@@ -288,6 +413,15 @@ func (e *Executor) setNode(r *run, nodeID string, ns NodeState) {
 	if ns.Progress != nil {
 		payload["progress"] = ns.Progress
 	}
+	if ns.Cached {
+		payload["cached"] = true
+	}
+	if ns.Seed != nil {
+		payload["seed"] = *ns.Seed
+	}
+	if ns.State == NodeDone || ns.State == NodeFailed || ns.State == NodeCanceled {
+		e.persist(r)
+	}
 	e.publish("workflow.node_state", payload)
 }
 
@@ -303,6 +437,9 @@ func (e *Executor) finish(r *run, state, msg string) {
 	r.view.Error = msg
 	r.view.FinishedAt = ts()
 	id := r.view.ID
+	if err := e.persistLocked(r); err != nil {
+		e.log.Error("saving finished workflow", "err", err)
+	}
 	e.mu.Unlock()
 	payload := map[string]any{"run_id": id, "state": state}
 	if msg != "" {
@@ -317,6 +454,7 @@ func (e *Executor) execute(r *run) {
 	r.view.StartedAt = ts()
 	id := r.view.ID
 	e.mu.Unlock()
+	e.persist(r)
 	e.publish("workflow.run_started", map[string]any{"run_id": id})
 
 	servers := map[string]ServerNeed{}
@@ -339,7 +477,20 @@ func (e *Executor) execute(r *run) {
 		e.setNode(r, st.NodeID, NodeState{State: NodeRunning})
 
 		start := time.Now()
-		outs, jobID, msg, err := e.runStage(r, st, servers, prefix)
+		inputIdentity := e.cacheInputIdentity(r, st)
+		key := e.cacheKey(r, st, servers)
+		entry, hit := e.cached(key)
+		if r.force {
+			hit = false
+		}
+		var outs []string
+		var jobID, msg string
+		var err error
+		if hit {
+			outs, jobID, msg = entry.Outputs, entry.JobID, entry.Message
+		} else {
+			outs, jobID, msg, err = e.runStage(r, st, servers, prefix)
+		}
 		elapsed := time.Since(start).Milliseconds()
 		if err != nil {
 			if r.ctx.Err() != nil {
@@ -360,7 +511,24 @@ func (e *Executor) execute(r *run) {
 				e.setNode(r, a, NodeState{State: NodeDone})
 			}
 		}
+		e.mu.Lock()
+		seed := r.view.Nodes[st.NodeID].Seed
+		e.mu.Unlock()
+		if hit {
+			seed = entry.Seed
+			e.recordSeed(r, st.NodeID, seed)
+		}
+		if !hit {
+			// A source or running configuration changed during execution: this
+			// result cannot be attributed to the new identity. A newly loaded
+			// server may establish its first identity only after generating.
+			resolvedKey := e.cacheKey(r, st, servers)
+			if inputIdentity != "" && inputIdentity == e.cacheInputIdentity(r, st) && (key == "" || key == resolvedKey) {
+				e.putCache(resolvedKey, cacheEntry{Outputs: outs, JobID: jobID, Message: msg, Seed: seed})
+			}
+		}
 		e.setNode(r, st.NodeID, NodeState{
+			Cached: hit, Seed: seed,
 			State: NodeDone, Message: msg, Outputs: outs, FileURLs: e.fileURLs(outs), JobID: jobID, Millis: elapsed,
 		})
 	}
@@ -397,6 +565,11 @@ func (e *Executor) runStage(r *run, st Stage, servers map[string]ServerNeed, pre
 	case StageResize:
 		outs, err = e.runResize(r, st, prefix)
 		return outs, "", "", err
+	case StageUpscale:
+		return e.runUpscale(r, st, servers)
+	case StageImage:
+		outs, err = e.runImage(r, st, prefix)
+		return outs, "", "", err
 	case StageSave:
 		outs, err = e.runSave(r, st, prefix)
 		return outs, "", "", err
@@ -411,11 +584,14 @@ func (e *Executor) runGenerate(r *run, st Stage, servers map[string]ServerNeed) 
 		return nil, "", "", fmt.Errorf("plan references unknown server %q", gs.Server)
 	}
 	p := gs.Params
+	p.CFGScaleExplicit = true
+	p.GuidanceExplicit = true
 	if p.Seed < 0 {
 		// Resolve "random" here so the run is reproducible and the seed that
 		// made an image is visible on the node and in the job row.
 		p.Seed = 1 + rand.Int64N(1<<31-1)
 	}
+	e.recordSeed(r, st.NodeID, &p.Seed)
 	if gs.Init != nil {
 		path, err := e.resolveImage(r, *gs.Init)
 		if err != nil {
@@ -423,6 +599,36 @@ func (e *Executor) runGenerate(r *run, st Stage, servers map[string]ServerNeed) 
 		}
 		p.InitImagePath = path
 	}
+	for _, input := range []struct {
+		ref *ImageRef
+		dst *string
+	}{{gs.Mask, &p.MaskImagePath}, {gs.Control, &p.ControlImagePath}} {
+		if input.ref != nil {
+			path, err := e.resolveImage(r, *input.ref)
+			if err != nil {
+				return nil, "", "", err
+			}
+			*input.dst = path
+		}
+	}
+	if gs.Reference != nil {
+		path, err := e.resolveImage(r, *gs.Reference)
+		if err != nil {
+			return nil, "", "", err
+		}
+		p.RefImagePaths = []string{path}
+	}
+	if p.InitImagePath != "" && (p.Width == 0 || p.Height == 0) {
+		img, err := readImage(p.InitImagePath)
+		if err != nil {
+			return nil, "", "", err
+		}
+		p.Width, p.Height = img.Bounds().Dx(), img.Bounds().Dy()
+		if p.Width > 4096 || p.Height > 4096 {
+			return nil, "", "", fmt.Errorf("starting image exceeds 4096 × 4096; resize it before sampling")
+		}
+	}
+
 	ov := need.Overrides
 	var job *mediagen.Job
 	var err error
@@ -460,10 +666,10 @@ func (e *Executor) resolveImage(r *run, ref ImageRef) (string, error) {
 	e.mu.Lock()
 	outs := r.outputs[ref.Stage]
 	e.mu.Unlock()
-	if len(outs) == 0 {
-		return "", fmt.Errorf("stage %s produced no image", ref.Stage)
+	if ref.Index < 0 || ref.Index >= len(outs) {
+		return "", fmt.Errorf("stage %s has no image at index %d", ref.Stage, ref.Index)
 	}
-	return filepath.Join(e.runner.MediaDir(), filepath.FromSlash(outs[0])), nil
+	return filepath.Join(e.runner.MediaDir(), filepath.FromSlash(outs[ref.Index])), nil
 }
 
 func (e *Executor) runResize(r *run, st Stage, prefix string) ([]string, error) {
@@ -491,7 +697,18 @@ func (e *Executor) runResize(r *run, st Stage, prefix string) ([]string, error) 
 	if err != nil {
 		return nil, err
 	}
-	out := resizeImage(img, rz.Width, rz.Height, rz.Filter)
+	width, height := rz.Width, rz.Height
+	if width == 0 && height == 0 && rz.Mode != "size" {
+		width = int(math.Round(float64(cfg.Width) * rz.Scale))
+		height = int(math.Round(float64(cfg.Height) * rz.Scale))
+	}
+	if width < 16 || height < 16 || width > 4096 || height > 4096 {
+		return nil, fmt.Errorf("Resize would produce %d × %d; the limit is 16 to 4096 on each side", width, height)
+	}
+	if err := r.ctx.Err(); err != nil {
+		return nil, err
+	}
+	out := resizeImage(img, width, height, rz.Filter)
 
 	rel := filepath.ToSlash(filepath.Join("images", fmt.Sprintf("wf-%s-%s.png", prefix, st.ID)))
 	dest := filepath.Join(e.runner.MediaDir(), filepath.FromSlash(rel))
@@ -560,7 +777,7 @@ func (e *Executor) runSave(r *run, st Stage, prefix string) ([]string, error) {
 	name := savePrefix(sv.Prefix, fallback)
 	var outs []string
 	for i, src := range sources {
-		rel := filepath.ToSlash(filepath.Join(sub, fmt.Sprintf("%s%s-%d%s", name, prefix, i, strings.ToLower(filepath.Ext(src)))))
+		rel := filepath.ToSlash(filepath.Join(sub, fmt.Sprintf("%s%s-%s-%d%s", name, prefix, st.ID, i, strings.ToLower(filepath.Ext(src)))))
 		if err := copyFileAtomic(src, filepath.Join(e.runner.MediaDir(), filepath.FromSlash(rel))); err != nil {
 			return nil, err
 		}

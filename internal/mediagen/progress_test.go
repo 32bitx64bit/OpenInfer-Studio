@@ -188,6 +188,10 @@ func TestAssertionFailsRunningJobAndServerWithoutWaitingForProcessExit(t *testin
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/sdcpp/v1/capabilities" {
+			http.NotFound(w, r)
+			return
+		}
 		if r.Method == http.MethodPost {
 			w.WriteHeader(http.StatusAccepted)
 			_, _ = w.Write([]byte(`{"id":"asserted"}`))

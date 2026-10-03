@@ -1,8 +1,10 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
 import QtQuick.Shapes
+import QtQuick.Window
 import ".."
 import "../components"
 import "../components/graph"
@@ -24,6 +26,9 @@ Item {
     property var nodeTypes: []
     property var specs: ({})
     property var runtimeInfo: ({})
+    property var apiCapabilities: ({})
+    property string capabilityModelId: ""
+    property int capabilityRequest: 0
     property var modelOptions: []
     property var workflows: []
 
@@ -32,13 +37,31 @@ Item {
     property var graph: GM.newGraph()
     property var nodeById: ({})
     property var nodeIds: []
+    property var nodeCards: []
     property var edgeList: []
     property int graphRev: 0       // any content change
+    property int documentRev: 0    // editor changes; inspection does not dirty saves
     property int visRev: 0         // changes which params/sockets are shown
     property int edgeRev: 0        // wires changed
     property int paramsRev: 0      // params changed from outside a widget
     property int layoutRev: 0      // a node moved
     property string selectedId: ""
+    property var selectedIds: []
+    property var history: GM.newHistory()
+    property int historyRev: 0
+    readonly property bool canUndo: { historyRev; return history.past.length > 0 && !inspectingRun }
+    readonly property bool canRedo: { historyRev; return history.future.length > 0 && !inspectingRun }
+    property var moveGesture: null
+    property var wireBefore: null
+    property var nodeSizes: ({})
+    property var marquee: null
+    property bool historyOpen: false
+    property bool minimapOpen: true
+    property string comparisonSource: ""
+    property var editorView: null
+    property var saveQueue: []
+    property bool saveInFlight: false
+    property int openRequest: 0
     property var wireDrag: null
     property string saveState: ""
 
@@ -56,26 +79,59 @@ Item {
     property var runStates: ({})
     property string runId: ""
     property bool running: false
+    property var selectedRun: null
+    property bool inspectingRun: false
+    property var activeRuns: ({})
+    property var submittedRuns: ({})
+    property var seedAdvanced: ({})
+    property var runRequestSerial: ({})
+    property int runListSerial: 0
+    property int runEventRevision: 0
+    property bool forceRun: false
+    readonly property int activeRunCount: Object.keys(activeRuns).length
+    readonly property var selectedRuntimeDefaults: {
+        graphRev
+        if (inspectingRun || selectedIds.length !== 1 || apiCapabilities.known !== true) return null
+        var node = nodeById[selectedId]
+        if (!node || (node.type !== "sample" && node.type !== "sample.video")) return null
+        var modes = apiCapabilities.defaults_by_mode || {}
+        var defaults = modes[node.type === "sample.video" ? "vid_gen" : "img_gen"]
+        return defaults && Object.keys(defaults).length > 0 ? defaults : null
+    }
+    readonly property bool runMatchesEditor: {
+        graphRev
+        return !!selectedRun && !!selectedRun.graph && selectedRun.workflow_id === workflowId
+            && GM.executionKey(selectedRun.source_graph || selectedRun.graph) === GM.executionKey(graph)
+    }
     property string runError: ""
     property string hintText: ""
 
-    readonly property var samplerNames: ["", "euler", "euler_a", "heun", "dpm2", "dpm++2s_a", "dpm++2m", "dpm++2mv2", "ipndm", "ipndm_v", "lcm", "ddim_trailing", "tcd"]
-    readonly property var schedulerNames: ["", "discrete", "karras", "exponential", "ays", "gits", "smoothstep", "sgm_uniform", "simple", "lcm"]
     property bool paletteOpen: true
 
     // ------------------------------------------------------------------
     // Loading
     // ------------------------------------------------------------------
+    function graphModelId() {
+        for (var i = 0; i < graph.nodes.length; i++) {
+            var n = graph.nodes[i]
+            if (n.type === "checkpoint.load" && n.params && n.params.model && n.params.model.library_id)
+                return n.params.model.library_id
+        }
+        return preferredModelId || ""
+    }
     function loadNodeTypes() {
-        api.get("/api/v1/workflow/node-types", function(st, data) {
-            if (st !== 200 || !data) return
+        var model = graphModelId(), request = ++capabilityRequest
+        capabilityModelId = model
+        api.get("/api/v1/workflow/node-types" + (model ? "?model_id=" + encodeURIComponent(model) : ""), function(st, data) {
+            if (st !== 200 || !data || request !== page.capabilityRequest || model !== page.graphModelId()) return
             var map = {}
             var list = data.node_types || []
             for (var i = 0; i < list.length; i++) map[list[i].type] = list[i]
             page.specs = map
             page.nodeTypes = list
             page.runtimeInfo = data.runtime || {}
-            if (page.workflowId) page.rebuild()
+            page.apiCapabilities = data.api_capabilities || {}
+            if (page.workflowId) { page.rebuild(); page.validateSoon.restart() }
         })
     }
     function loadLibrary() {
@@ -97,11 +153,15 @@ Item {
         })
     }
     function openWorkflow(id) {
-        api.get("/api/v1/workflows/" + id, function(st, data) {
-            if (st !== 200 || !data) return
+        autosave.stop()
+        validateSoon.stop()
+        var request = ++openRequest
+        var fetch = function() { page.api.get("/api/v1/workflows/" + id, function(st, data) {
+            if (st !== 200 || !data || request !== page.openRequest) return
             var g = data.graph || GM.newGraph()
             g.nodes = g.nodes || []
             g.edges = g.edges || []
+            g.groups = g.groups || []
             for (var i = 0; i < g.nodes.length; i++) {
                 g.nodes[i].params = g.nodes[i].params || {}
                 g.nodes[i].pos = g.nodes[i].pos || [0, 0]
@@ -109,42 +169,98 @@ Item {
             g.name = data.name
             page.workflowId = data.id
             page.graph = g
-            page.selectedId = ""
+            page.documentRev++
+            page.inspectingRun = false
+            page.editorView = null
+            page.selectedRun = null
+            page.runId = ""
+            page.running = false
+            page.setSelection([])
+            page.history = GM.newHistory(); page.historyRev++
+            page.nodeSizes = ({})
+            page.saveState = "saved"
             page.runStates = ({})
             page.runError = ""
             page.showIssues = false
+            page.issues = []; page.issueMap = ({}); page.planInfo = null
             page.rebuild()
+            page.loadNodeTypes()
             if (g.view && g.view.zoom) {
                 page.panX = g.view.x; page.panY = g.view.y; page.zoom = g.view.zoom
             } else {
                 Qt.callLater(page.fitView)
             }
             page.validateSoon.restart()
-        })
+        }) }
+        if (workflowId && (saveState === "dirty" || saveState === "error" || saveState === "saving")) {
+            save(function(ok) {
+                if (request !== page.openRequest) return
+                if (ok) fetch()
+                else { page.hintText = "Save failed; current workflow stays open"; hintTimer.restart() }
+            })
+        } else fetch()
     }
 
     // ------------------------------------------------------------------
     // Graph state
     // ------------------------------------------------------------------
+    function canvasGraph() { return inspectingRun && selectedRun && selectedRun.graph ? selectedRun.graph : graph }
     function rebuild() {
         var map = {}
         var ids = []
-        for (var i = 0; i < graph.nodes.length; i++) {
-            var n = graph.nodes[i]
+        var cards = []
+        var shown = canvasGraph()
+        for (var i = 0; i < shown.nodes.length; i++) {
+            var n = shown.nodes[i]
             map[n.id] = n
-            if (specs[n.type]) ids.push(n.id)
+            if (specs[n.type]) { ids.push(n.id); cards.push({ node: n, spec: specs[n.type] }) }
         }
         nodeById = map
         nodeIds = ids
-        edgeList = graph.edges.slice()
+        nodeCards = cards
+        edgeList = shown.edges.slice()
         edgeRev++; visRev++; layoutRev++; graphRev++
     }
     function touch(structural) {
         graphRev++
+        documentRev++
         if (structural) rebuild()
         saveState = "dirty"
         autosave.restart()
         validateSoon.restart()
+        if (graphModelId() !== capabilityModelId) loadNodeTypes()
+    }
+    function snapshot() { return { graph: GM.clone(graph), selectedIds: selectedIds.slice() } }
+    function commitEdit(before, label, key) {
+        if (GM.recordEdit(history, before, snapshot(), label, key || "", Date.now())) historyRev++
+    }
+    function applySnapshot(state) {
+        if (!state) return
+        viewport.forceActiveFocus()
+        graph = GM.clone(state.graph)
+        setSelection(state.selectedIds || [])
+        paramsRev++
+        touch(true)
+    }
+    function undoEdit() { if (canUndo) { applySnapshot(GM.undo(history)); historyRev++ } }
+    function redoEdit() { if (canRedo) { applySnapshot(GM.redo(history)); historyRev++ } }
+    function setSelection(ids) {
+        selectedIds = ids.slice()
+        selectedId = ids.length ? ids[ids.length - 1] : ""
+    }
+    function isSelected(id) { return selectedIds.indexOf(id) >= 0 }
+    function measureNode(id, height) {
+        if (!nodeSizes[id] || Math.abs(nodeSizes[id].h - height) > 0.5) {
+            nodeSizes[id] = { h: height }
+            layoutRev++
+        }
+    }
+    function isCollapsed(id) { visRev; return !!nodeById[id] && !!nodeById[id].collapsed }
+    function toggleCollapse(ids) {
+        if (inspectingRun || !ids.length) return
+        var before = snapshot(), collapse = !ids.every(function(id) { return nodeById[id] && nodeById[id].collapsed })
+        ids.forEach(function(id) { if (nodeById[id]) nodeById[id].collapsed = collapse })
+        visRev++; layoutRev++; touch(false); commitEdit(before, collapse ? "Collapse selection" : "Expand selection")
     }
     function nodeSpec(id) {
         var n = nodeById[id]
@@ -156,14 +272,18 @@ Item {
         var v = GM.effectiveParam(specs[node.type], node, ps.name)
         return v === undefined ? "" : v
     }
-    function setParam(nodeId, name, value) {
+    function setParam(nodeId, name, value, coalesce) {
+        if (inspectingRun) return
         var node = nodeById[nodeId]
         if (!node) return
+        if (JSON.stringify(GM.effectiveParam(specs[node.type], node, name)) === JSON.stringify(value)) return
+        var before = snapshot()
         node.params = node.params || {}
         node.params[name] = value
         var spec = specs[node.type]
         if (GM.affectsLayout(spec, name)) visRev++
         touch(false)
+        commitEdit(before, "Edit " + name, coalesce ? nodeId + ":" + name : "")
     }
     function setParamExternal(nodeId, name, value) {
         setParam(nodeId, name, value)
@@ -171,41 +291,73 @@ Item {
     }
     function paramVisible(node, ps) {
         visRev
-        return GM.paramVisible(graph, specs, node, ps)
+        return GM.paramVisible(canvasGraph(), specs, node, ps)
     }
     function paramOptions(ps) {
-        var list = ps.from === "capabilities.samplers" ? samplerNames
-                 : ps.from === "capabilities.schedulers" ? schedulerNames
-                 : (ps.options || [])
+        var advertised = ps.from && ps.from.indexOf("capabilities.") === 0
+        var field = advertised ? ps.from.substring("capabilities.".length) : ""
+        var known = apiCapabilities.known === true
+        var choices = known && Array.isArray(apiCapabilities[field]) ? apiCapabilities[field] : []
+        if (field === "upscalers") choices = choices.filter(function(v) { return v && v.model === true && v.image_upscale === true }).map(function(v) { return v.name })
+        var list = advertised ? [""].concat(choices.filter(function(v) { return typeof v === "string" && v !== "" })) : (ps.options || [])
         return list.map(function(o) { return { text: o === "" ? "default" : o, value: o } })
     }
     function isConnected(nodeId, port, isOutput) {
         edgeRev
-        for (var i = 0; i < graph.edges.length; i++) {
-            var e = graph.edges[i]
+        var shown = canvasGraph()
+        for (var i = 0; i < shown.edges.length; i++) {
+            var e = shown.edges[i]
             if (isOutput ? (e.from[0] === nodeId && e.from[1] === port) : (e.to[0] === nodeId && e.to[1] === port)) return true
         }
         return false
     }
     function issuesFor(nodeId) {
+        if (inspectingRun) return []
         if (!showIssues && selectedId !== nodeId) return []
         return issueMap[nodeId] || []
     }
-    function runStateFor(nodeId) { return runStates[nodeId] || null }
-    function select(id) {
-        selectedId = id
+    function runStateFor(nodeId) { return inspectingRun || runMatchesEditor ? runStates[nodeId] || null : null }
+    function select(id, modifiers, preserve) {
+        var next = selectedIds.slice()
+        if (modifiers & (Qt.ControlModifier | Qt.ShiftModifier)) {
+            var at = next.indexOf(id)
+            if (at >= 0) next.splice(at, 1); else next.push(id)
+            setSelection(next)
+        } else if (!preserve || !isSelected(id)) setSelection(id ? [id] : [])
         viewport.forceActiveFocus()
     }
-    function nodeMoved(id, x, y) {
-        var n = nodeById[id]
-        if (!n) return
-        n.pos = [Math.round(x), Math.round(y)]
+    function beginMove(id, modifiers, pt) {
+        select(id, modifiers, true)
+        if (inspectingRun || !isSelected(id)) return
+        startMove(pt)
+    }
+    function startMove(pt) {
+        var starts = {}
+        selectedIds.forEach(function(id) { if (nodeById[id]) starts[id] = nodeById[id].pos.slice() })
+        autosave.stop()
+        moveGesture = { point: pt, starts: starts, before: snapshot(), moved: false }
+    }
+    function moveNodes(pt) {
+        if (!moveGesture) return
+        var dx = pt.x - moveGesture.point.x, dy = pt.y - moveGesture.point.y
+        if (!moveGesture.moved && Math.abs(dx) + Math.abs(dy) < 4 / zoom) return
+        moveGesture.moved = true
+        for (var id in moveGesture.starts) {
+            var p = moveGesture.starts[id]
+            nodeById[id].pos = [Math.round(p[0] + dx), Math.round(p[1] + dy)]
+        }
         layoutRev++
-        saveState = "dirty"
-        autosave.restart()
+    }
+    function endMove(cancel) {
+        var gesture = moveGesture
+        moveGesture = null
+        if (!gesture) return
+        if (cancel && gesture.moved) { applySnapshot(gesture.before); return }
+        if (gesture.moved) { touch(false); commitEdit(gesture.before, "Move selection") }
+        else if (saveState === "dirty") autosave.restart()
     }
     function openMenu(id) {
-        selectedId = id
+        if (!isSelected(id)) setSelection([id])
         nodeMenu.popup()
     }
 
@@ -223,8 +375,8 @@ Item {
         }
     }
     function edgeDim(edge) {
-        if (selectedId === "") return false
-        return edge.from[0] !== selectedId && edge.to[0] !== selectedId
+        if (!selectedIds.length) return false
+        return !isSelected(edge.from[0]) && !isSelected(edge.to[0])
     }
     function dragPoints() {
         layoutRev
@@ -243,6 +395,8 @@ Item {
         }
     }
     function beginWire(nodeId, port, isOutput, pt) {
+        if (inspectingRun) return
+        wireBefore = snapshot()
         if (!isOutput) {
             var e = GM.edgeInto(graph, nodeId, port)
             if (e) {   // pick the wire up by its input end
@@ -294,20 +448,26 @@ Item {
             if (why === "") {
                 GM.connect(graph, from, to)
                 touch(true)
+                commitEdit(wireBefore, "Connect nodes")
+                wireBefore = null
                 return
             }
             hintText = why
             hintTimer.restart()
         }
-        if (d.rerouted) { touch(true); return }          // a dropped, picked-up wire is deleted
+        if (d.rerouted) { touch(true); commitEdit(wireBefore, "Disconnect nodes"); wireBefore = null; return }
+        wireBefore = null
         if (!target) openQuickAddForWire(d, pt)
     }
 
     // Adding and removing nodes -------------------------------------------
     function addNodeAt(spec, x, y, params) {
+        if (inspectingRun || !workflowId) return null
+        var before = snapshot()
         var n = GM.addNode(graph, spec, x, y, params)
         touch(true)
-        selectedId = n.id
+        setSelection([n.id])
+        commitEdit(before, "Add node")
         return n
     }
     function viewCenter() {
@@ -319,21 +479,98 @@ Item {
         addNodeAt(spec, c.x - GM.nodeWidth(spec.type) / 2 + jitter, c.y - 80 + jitter, null)
     }
     function deleteSelected() {
-        if (!selectedId) return
-        GM.removeNode(graph, selectedId)
-        selectedId = ""
+        if (!selectedIds.length || inspectingRun) return
+        var before = snapshot()
+        selectedIds.forEach(function(id) { GM.removeNode(graph, id) })
+        setSelection([])
         touch(true)
+        commitEdit(before, "Delete selection")
     }
     function duplicateSelected() {
-        var n = nodeById[selectedId]
-        if (!n) return
-        var c = GM.duplicateNode(graph, n, specs[n.type])
+        if (!selectedIds.length || inspectingRun) return
+        var before = snapshot(), section = GM.copySection(graph, selectedIds)
+        var b = GM.sectionBounds(graph, specs, selectedIds, nodeSizes)
+        setSelection(GM.pasteSection(graph, section, b.x + 28, b.y + 28))
         touch(true)
-        selectedId = c.id
+        commitEdit(before, "Duplicate section")
+    }
+    function selectConnected() { setSelection(GM.connectedSection(canvasGraph(), selectedIds)) }
+    function copySelected() {
+        if (!selectedIds.length) return
+        clipboard.text = JSON.stringify(GM.copySection(canvasGraph(), selectedIds))
+        clipboard.selectAll(); clipboard.copy(); clipboard.deselect()
+    }
+    function pasteSelected() {
+        if (inspectingRun || !workflowId) return
+        clipboard.clear(); clipboard.paste()
+        try {
+            var section = GM.parseSection(clipboard.text, specs), before = snapshot(), c = viewCenter()
+            setSelection(GM.pasteSection(graph, section, c.x - 100, c.y - 60))
+            touch(true); commitEdit(before, "Paste section")
+        } catch (error) { hintText = String(error.message || error); hintTimer.restart() }
+    }
+    function alignSelected(mode) {
+        if (selectedIds.length < 2 || inspectingRun) return
+        var before = snapshot()
+        GM.alignNodes(graph, specs, selectedIds, mode, nodeSizes)
+        layoutRev++; touch(false); commitEdit(before, "Align " + mode)
+    }
+    function applyRuntimeDefaults() {
+        var defaults = selectedRuntimeDefaults, node = nodeById[selectedId]
+        if (!defaults || !node) return
+        var before = snapshot()
+        var sampleFields = ["steps", "sampler", "scheduler", "cfg", "guidance", "strength", "frames", "fps"]
+        var parameters = GM.list(specs[node.type].params).map(function(p) { return p.name })
+        node.params = node.params || {}
+        sampleFields.forEach(function(key) {
+            if (parameters.indexOf(key) >= 0 && Object.prototype.hasOwnProperty.call(defaults, key)) node.params[key] = defaults[key]
+        })
+        var start = GM.edgeInto(graph, node.id, "start")
+        var size = start ? GM.findNode(graph, start.from[0]) : null
+        if (size && size.type === "latent.empty") {
+            size.params = size.params || {}
+            var sizeParams = GM.list(specs[size.type].params).map(function(p) { return p.name })
+            var sizeFields = ["width", "height", "batch"]
+            sizeFields.forEach(function(key) {
+                if (sizeParams.indexOf(key) >= 0 && Object.prototype.hasOwnProperty.call(defaults, key)) size.params[key] = defaults[key]
+            })
+        }
+        if (JSON.stringify(before.graph) !== JSON.stringify(graph)) {
+            paramsRev++; visRev++; touch(false); commitEdit(before, "Apply runtime defaults")
+        }
+    }
+    function frameBounds(group) {
+        layoutRev
+        var b = GM.sectionBounds(canvasGraph(), specs, GM.list(group.nodes), nodeSizes)
+        if (!b) return null
+        var titleHeight = 32 + (group.note ? 40 : 0)
+        return { x: b.x - 20, y: b.y - titleHeight - 12, w: b.w + 40, h: b.h + titleHeight + 32, titleHeight: titleHeight }
+    }
+    function editFrame(index) {
+        if (inspectingRun || (!selectedIds.length && index < 0)) return
+        frameDialog.groupIndex = index
+        frameText.text = index < 0 ? "Section" : graph.groups[index].title
+        frameNote.text = index < 0 ? "" : graph.groups[index].note || ""
+        frameDialog.open()
+    }
+    function saveFrame(index, title, note) {
+        if (inspectingRun || !title.trim()) return
+        var before = snapshot()
+        graph.groups = GM.list(graph.groups)
+        if (index < 0) graph.groups.push({ title: title.trim(), note: note, color: "#6aa8e0", nodes: selectedIds.slice() })
+        else { graph.groups[index].title = title.trim(); graph.groups[index].note = note }
+        touch(true); commitEdit(before, "Edit frame and note")
+    }
+    function removeFrame(index) {
+        if (inspectingRun) return
+        var before = snapshot()
+        graph.groups.splice(index, 1)
+        touch(true); commitEdit(before, "Remove frame")
     }
 
     property var quickCtx: null
     function openQuickAdd(wx, wy) {
+        if (inspectingRun) return
         quickCtx = { x: wx, y: wy, wire: null }
         quickAdd.heading = "Add a node"
         quickAdd.accepts = null
@@ -357,6 +594,8 @@ Item {
         quickAdd.openAtItem(world, pt.x, pt.y)
     }
     function quickPicked(spec) {
+        if (inspectingRun) return
+        var before = snapshot()
         var c = quickCtx || viewCenter()
         var d = c.wire
         var x = c.x, y = c.y
@@ -375,7 +614,8 @@ Item {
                 else GM.connect(graph, { node: node.id, port: side[idx].name }, { node: d.fromNode, port: d.fromPort })
             }
             touch(true)
-            selectedId = node.id
+            setSelection([node.id])
+            commitEdit(before, "Add connected node")
             return
         }
         addNodeAt(spec, x, y, null)
@@ -388,15 +628,20 @@ Item {
         panX = px - (px - panX) * k
         panY = py - (py - panY) * k
         zoom = nz
-        saveState = saveState === "" ? "" : "dirty"
+        saveViewport()
     }
     function fitView() {
-        var b = GM.bounds(graph, specs)
+        var b = GM.sectionBounds(canvasGraph(), specs, nodeIds, nodeSizes)
         if (!b || viewport.width < 50) return
         var z = Math.min((viewport.width - 80) / b.w, (viewport.height - 80) / b.h, 1)
         zoom = Math.max(0.3, z)
         panX = (viewport.width - b.w * zoom) / 2 - b.x * zoom
         panY = Math.max(24, (viewport.height - b.h * zoom) / 2 - b.y * zoom)
+        saveViewport()
+    }
+    function saveViewport() {
+        if (inspectingRun || !workflowId) return
+        documentRev++; saveState = "dirty"; autosave.restart()
     }
 
     // ------------------------------------------------------------------
@@ -407,21 +652,36 @@ Item {
         interval: 1200
         onTriggered: page.save()
     }
-    function save() {
+    function save(then) {
         if (!workflowId) return
         saveState = "saving"
-        var doc = GM.forApi(graph, { x: panX, y: panY, zoom: zoom })
-        api.put("/api/v1/workflows/" + workflowId, { name: graph.name || "Untitled workflow", graph: doc }, function(st) {
-            saveState = st === 200 ? "saved" : "error"
+        var view = inspectingRun && editorView ? editorView : { x: panX, y: panY, zoom: zoom }
+        var job = { id: workflowId, rev: documentRev, doc: GM.forApi(graph, view), then: typeof then === "function" ? then : null }
+        // Serialize writes so a slower previous save cannot overwrite a later edit.
+        var last = saveQueue[saveQueue.length - 1]
+        if (last && last.id === job.id && !last.then && !job.then) saveQueue[saveQueue.length - 1] = job
+        else saveQueue.push(job)
+        drainSaves()
+    }
+    function drainSaves() {
+        if (saveInFlight || !saveQueue.length) return
+        var job = saveQueue.shift()
+        saveInFlight = true
+        api.put("/api/v1/workflows/" + job.id, { name: job.doc.name || "Untitled workflow", graph: job.doc }, function(st, data) {
+            page.saveInFlight = false
+            if (page.workflowId === job.id) page.saveState = st !== 200 ? "error" : page.documentRev === job.rev ? "saved" : "dirty"
+            if (job.then) job.then(st === 200, data)
+            page.drainSaves()
         })
     }
     function rename(name) {
+        if (inspectingRun) return
         name = (name || "").trim()
         if (!name || name === graph.name) return
+        var before = snapshot()
         graph.name = name
-        api.put("/api/v1/workflows/" + workflowId, { name: name }, function(st) {
-            if (st === 200) page.loadWorkflows("")
-        })
+        touch(false); commitEdit(before, "Rename workflow")
+        save(function(ok) { if (ok) page.loadWorkflows("") })
     }
     property alias validateSoon: validateTimer
     Timer {
@@ -431,8 +691,9 @@ Item {
     }
     function validate() {
         if (!workflowId) return
+        var id = workflowId, revision = documentRev
         api.post("/api/v1/workflows/validate", { graph: GM.forApi(graph) }, function(st, data) {
-            if (st !== 200 || !data) return
+            if (st !== 200 || !data || id !== page.workflowId || revision !== page.documentRev) return
             page.issues = (data.errors || []).concat(data.warnings || [])
             page.issueMap = GM.issuesByNode(data.errors || [])
             page.planInfo = data.plan || null
@@ -463,8 +724,8 @@ Item {
     function canRunTo(id) {
         var n = nodeById[id]
         if (!n) return false
-        return n.type === "sample" || n.type === "sample.video" || n.type === "image.resize"
-            || n.type === "image.save" || n.type === "video.save"
+        return ["sample", "sample.video", "image.resize", "image.save", "video.save", "image.crop",
+                "image.pad", "image.rotate", "image.blend", "image.pick", "image.upscale"].indexOf(n.type) >= 0
     }
     function pickModel() {
         if (preferredModelId) for (var i = 0; i < modelOptions.length; i++) if (modelOptions[i].id === preferredModelId) return modelOptions[i]
@@ -493,7 +754,10 @@ Item {
             if (st !== 200) return
             page.workflowId = ""
             page.graph = GM.newGraph()
+            page.inspectingRun = false; page.selectedRun = null; page.runId = ""; page.running = false
+            page.history = GM.newHistory(); page.historyRev++; page.setSelection([])
             page.nodeIds = []; page.edgeList = []; page.nodeById = ({})
+            page.nodeCards = []
             page.runStates = ({})
             page.loadWorkflows("first")
         })
@@ -503,34 +767,47 @@ Item {
     // Running
     // ------------------------------------------------------------------
     function run(only) {
-        if (!workflowId || running) return
+        if (!workflowId || inspectingRun) return
         runError = ""
         autosave.stop(); save()
-        api.post("/api/v1/workflow/runs", { graph: GM.forApi(graph), only: only || "" }, function(st, data) {
+        var doc = GM.forApi(graph), id = workflowId, key = GM.executionKey(doc)
+        api.post("/api/v1/workflow/runs", { graph: doc, only: only || "", workflow_id: id, force: forceRun }, function(st, data) {
             if (st === 202 && data && data.run) {
-                page.runId = data.run.id
-                var states = {}
-                for (var id in data.run.nodes) states[id] = { state: data.run.nodes[id].state }
-                page.runStates = states
-                page.running = true
-                page.showIssues = false
+                // Use the returned snapshot; never invent run nodes or outputs.
+                page.submittedRuns[data.run.id] = true
+                page.trackRun(data.run)
+                if (id === page.workflowId && !page.inspectingRun) {
+                    page.applyRunView(data.run, true)
+                    page.showIssues = false
+                }
             } else if (st === 400 && data) {
+                if (id !== page.workflowId || key !== GM.executionKey(page.graph)) return
                 page.issueMap = GM.issuesByNode(data.errors || [])
                 page.issues = (data.errors || []).concat(data.warnings || [])
                 page.showIssues = true
                 var first = (data.errors || [])[0]
                 page.runError = first ? first.message : (data.error || "Nothing to run")
             } else {
+                if (id !== page.workflowId) return
                 page.runError = (data && (data.detail || data.error)) || "Could not start the run"
             }
         })
     }
     function cancelRun() {
         if (!runId) return
-        api.post("/api/v1/workflow/runs/" + runId + "/cancel", {}, function() {})
+        api.post("/api/v1/workflow/runs/" + runId + "/cancel", {}, function(st, data) {
+            if (st !== 200) page.runError = (data && (data.detail || data.error)) || "Could not cancel the run"
+        })
     }
     function onRunEvent(name, p) {
-        if (!p || p.run_id !== runId) return
+        if (!p || !p.run_id) return
+        runEventRevision++
+        runRequestSerial[p.run_id] = (runRequestSerial[p.run_id] || 0) + 1
+        if (name === "workflow.run_queued" || name === "workflow.run_started" || name === "workflow.run_finished") {
+            refreshRun(p.run_id)
+            return
+        }
+        if (p.run_id !== runId) return
         if (name === "workflow.node_state") {
             var next = {}
             for (var k in runStates) next[k] = runStates[k]
@@ -538,80 +815,156 @@ Item {
             next[p.node_id] = {
                 state: p.state, message: p.message || "", file_urls: p.file_urls || [], outputs: p.outputs || [],
                 ms: p.ms || 0, progress: p.progress || null, job_id: p.job_id || "",
+                seed: p.seed === undefined ? prev.seed : p.seed,
+                cached: p.cached === undefined ? prev.cached : p.cached,
                 startedMs: prev.startedMs || (p.state === "running" ? Date.now() : 0)
             }
             runStates = next
-        } else if (name === "workflow.run_finished") {
-            running = false
-            if (p.state === "complete") advanceSeeds()
-            if (p.state === "failed") runError = p.error || "The run failed"
-            if (p.state === "canceled") runError = ""
         }
     }
     // "increment" and "random" seed modes act after a run, like ComfyUI's
     // control-after-generate: the next run starts from the new seed.
-    function advanceSeeds() {
+    function advanceSeeds(runView) {
+        if (inspectingRun || !runMatchesEditor || !submittedRuns[runView.id] || seedAdvanced[runView.id]) return
+        seedAdvanced[runView.id] = true
+        var before = snapshot()
         var changed = false
         for (var i = 0; i < graph.nodes.length; i++) {
             var n = graph.nodes[i]
             if (n.type !== "sample" && n.type !== "sample.video") continue
-            var rs = runStates[n.id]
+            var rs = runView.nodes[n.id]
             if (!rs || rs.state !== "done") continue
             var mode = GM.effectiveParam(specs[n.type], n, "seed_mode")
             var seed = Number(GM.effectiveParam(specs[n.type], n, "seed"))
             if (mode === "increment" && seed >= 0) { n.params.seed = seed + 1; changed = true }
             else if (mode === "random" && seed !== -1) { n.params.seed = -1; changed = true }
         }
-        if (changed) { paramsRev++; touch(false) }
+        if (changed) { paramsRev++; touch(false); commitEdit(before, "Advance run seeds") }
     }
 
     Connections {
         target: page.events
         function onEventReceived(name, payload) {
             if (name.indexOf("workflow.") === 0) page.onRunEvent(name, payload)
+            else if (name === "media.server_state") page.loadNodeTypes()
             else if (name === "library.scanned" || name === "library.model_imported" || name === "library.model_updated") page.loadLibrary()
         }
         function onReconnected() {
-            if (page.runId && page.running) {
-                api.get("/api/v1/workflow/runs/" + page.runId, function(st, data) {
-                    if (st !== 200 || !data) return
-                    page.applyRunView(data)
-                })
-            }
+            page.refreshRuns()
+            if (page.runId) page.refreshRun(page.runId)
         }
     }
 
-    function applyRunView(data) {
+    function trackRun(data) {
+        var next = Object.assign({}, activeRuns)
+        if (data.state === "running" || data.state === "queued") next[data.id] = data
+        else delete next[data.id]
+        activeRuns = next
+    }
+    function applyRunView(data, selectRun) {
+        if (!data || !data.id) return
+        trackRun(data)
+        if (!selectRun && data.id !== runId) return
+        page.runId = data.id
+        page.selectedRun = data
         var states = {}
-        for (var id in data.nodes) {
+        for (var id in (data.nodes || {})) {
             var n = data.nodes[id]
             var prev = page.runStates[id] || {}
             states[id] = { state: n.state, message: n.message || "", file_urls: n.file_urls || [],
                 outputs: n.outputs || [], ms: n.ms || 0, progress: n.progress || null, job_id: n.job_id || "",
+                seed: n.seed, cached: n.cached === true,
                 startedMs: prev.startedMs || (n.state === "running" ? Date.now() : 0) }
         }
         page.runStates = states
         page.running = data.state === "running" || data.state === "queued"
-        if (data.state === "failed") page.runError = data.error || "The run failed"
+        page.runError = data.state === "failed" ? data.error || "The run failed" : ""
+        if (data.state === "complete") advanceSeeds(data)
+    }
+    function refreshRun(id) {
+        var serial = (runRequestSerial[id] || 0) + 1
+        runRequestSerial[id] = serial
+        api.get("/api/v1/workflow/runs/" + id, function(st, data) {
+            if (st === 200 && data && page.runRequestSerial[id] === serial) page.applyRunView(data, false)
+        })
+    }
+    function refreshRuns() {
+        var serial = ++runListSerial, revision = runEventRevision
+        api.get("/api/v1/workflow/runs", function(st, data) {
+            if (st !== 200 || !data || serial !== page.runListSerial || revision !== page.runEventRevision) return
+            var next = {}
+            GM.list(data.runs).forEach(function(r) {
+                if (r.state === "queued" || r.state === "running") next[r.id] = r
+                if (r.id === page.runId) page.applyRunView(r, false)
+            })
+            page.activeRuns = next
+        })
+    }
+    function inspectRun(run) {
+        if (!run || !run.graph) { hintText = "This run has no stored graph snapshot"; hintTimer.restart(); return }
+        if (!inspectingRun) editorView = { x: panX, y: panY, zoom: zoom }
+        inspectingRun = true
+        applyRunView(run, true)
+        setSelection([]); nodeSizes = ({}); rebuild(); Qt.callLater(fitView)
+    }
+    function returnToEditor() {
+        if (!inspectingRun) return
+        inspectingRun = false
+        if (editorView) { panX = editorView.x; panY = editorView.y; zoom = editorView.zoom }
+        editorView = null
+        setSelection([]); nodeSizes = ({}); rebuild(); validateSoon.restart()
+    }
+    function restoreRun(run) {
+        if (!workflowId || !run || !run.graph) return
+        returnToEditor()
+        var before = snapshot(), name = graph.name
+        graph = GM.clone(run.graph); graph.name = name
+        setSelection([]); nodeSizes = ({}); paramsRev++
+        touch(true); commitEdit(before, "Restore run snapshot"); Qt.callLater(fitView)
+    }
+    function useImage(fileUrl) {
+        returnToEditor()
+        if (!workflowId || !specs["image.load"]) return
+        var n = nodeById[selectedId]
+        var params = GM.list(specs["image.load"].params)
+        var pathParam = params.filter(function(p) { return p.kind === "path" })[0]
+        if (!pathParam) return
+        if (n && n.type === "image.load") setParamExternal(n.id, pathParam.name, GM.fileUrlToLocalPath(fileUrl))
+        else {
+            var c = viewCenter(), p = {}
+            p[pathParam.name] = GM.fileUrlToLocalPath(fileUrl)
+            addNodeAt(specs["image.load"], c.x - 120, c.y - 80, p)
+        }
+    }
+    function viewImages(sources, index) {
+        imageViewer.sources = sources
+        imageViewer.currentIndex = index || 0
+        imageViewer.open()
+    }
+    function compareImage(fileUrl) {
+        comparisonSource = fileUrl
+        hintText = "Comparison selected; open another image to compare it."
+        hintTimer.restart()
     }
 
     // Reconcile authoritative state even when a terminal event was missed.
     Timer {
         interval: 3000
-        running: page.running && page.runId !== ""
+        running: page.activeRunCount > 0
         repeat: true
         onTriggered: {
-            var id = page.runId
-            page.api.get("/api/v1/workflow/runs/" + id, function(st, data) {
-                if (st === 200 && data && page.runId === id) page.applyRunView(data)
-            })
+            page.refreshRuns()
+            if (page.runId) page.refreshRun(page.runId)
         }
     }
 
-    Component.onCompleted: { loadNodeTypes(); loadLibrary(); loadWorkflows("first") }
+    Component.onCompleted: { loadNodeTypes(); loadLibrary(); loadWorkflows("first"); refreshRuns() }
     onVisibleChanged: if (visible && specs) { loadNodeTypes(); loadLibrary() }
 
     Timer { id: hintTimer; interval: 3500; onTriggered: page.hintText = "" }
+
+    Shortcut { sequences: [StandardKey.Undo]; enabled: page.visible && page.canUndo; onActivated: page.undoEdit() }
+    Shortcut { sequences: [StandardKey.Redo]; enabled: page.visible && page.canRedo; onActivated: page.redoEdit() }
 
     // ------------------------------------------------------------------
     // UI
@@ -660,6 +1013,7 @@ Item {
                         Repeater {
                             model: GM.templateList()
                             delegate: MenuItem {
+                                required property var modelData
                                 text: modelData.title + "  —  " + modelData.hint
                                 onTriggered: page.createFromTemplate(modelData.id)
                             }
@@ -673,6 +1027,7 @@ Item {
                     implicitHeight: 32
                     placeholderText: "Workflow name"
                     text: page.graph.name || ""
+                    enabled: !page.inspectingRun
                     onEditingFinished: page.rename(text)
                 }
                 AppButton {
@@ -691,14 +1046,14 @@ Item {
                 Item { Layout.fillWidth: true }
 
                 Label {
-                    visible: page.workflowId !== "" && page.errorCount() > 0
+                    visible: page.workflowId !== "" && !page.inspectingRun && page.errorCount() > 0
                     text: page.errorCount() + (page.errorCount() === 1 ? " problem" : " problems")
                     color: AppTheme.warning
                     font.pixelSize: AppTheme.fontSmall
                     font.weight: Font.DemiBold
                 }
                 Label {
-                    visible: page.workflowId !== "" && page.errorCount() === 0 && page.planSummary() !== ""
+                    visible: page.workflowId !== "" && !page.inspectingRun && page.errorCount() === 0 && page.planSummary() !== ""
                     text: page.planSummary()
                     color: AppTheme.textDim
                     font.pixelSize: AppTheme.fontSmall
@@ -713,15 +1068,56 @@ Item {
                 }
                 AppButton {
                     text: "Run to here"
-                    enabled: page.workflowId !== "" && page.canRunTo(page.selectedId) && !page.running
+                    enabled: page.workflowId !== "" && page.canRunTo(page.selectedId) && !page.inspectingRun
                     onClicked: page.run(page.selectedId)
                 }
                 AppButton {
-                    text: page.running ? "Running…" : "▶  Run"
+                    text: page.activeRunCount > 0 ? "Queue run (" + page.activeRunCount + ")" : "▶  Run"
                     primary: true
-                    enabled: page.workflowId !== "" && !page.running
+                    enabled: page.workflowId !== "" && !page.inspectingRun
                     onClicked: page.run("")
                 }
+            }
+        }
+
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 40
+            color: AppTheme.bgAlt
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 12; anchors.rightMargin: 12
+                spacing: 6
+                AppButton { text: "Undo"; flat: true; enabled: page.canUndo; onClicked: page.undoEdit() }
+                AppButton { text: "Redo"; flat: true; enabled: page.canRedo; onClicked: page.redoEdit() }
+                AppButton {
+                    text: "Selection ▾"; flat: true; enabled: page.selectedIds.length > 0
+                    onClicked: selectionMenu.popup()
+                }
+                AppButton { text: "Import JSON"; flat: true; onClicked: importDialog.open() }
+                AppButton {
+                    text: "Export JSON"; flat: true; enabled: page.workflowId !== "" && !page.inspectingRun
+                    onClicked: { exportDialog.workflowId = page.workflowId; exportDialog.open() }
+                }
+                CheckBox { text: "Force rerun"; checked: page.forceRun; enabled: !page.inspectingRun; onToggled: page.forceRun = checked }
+                AppButton {
+                    text: "Runtime defaults"; flat: true
+                    enabled: page.selectedRuntimeDefaults !== null
+                    onClicked: page.applyRuntimeDefaults()
+                    ToolTip.visible: hovered
+                    ToolTip.text: "Apply advertised defaults to the selected sampler and its connected size; one undo step"
+                }
+                Label {
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                    text: page.inspectingRun ? "Run " + page.runId.substring(0, 8) + " · " + (page.selectedRun.state || "") + " · snapshot"
+                        : page.selectedIds.length > 1 ? page.selectedIds.length + " selected"
+                        : "Drag to select · Ctrl/Shift adds · Middle drag pans"
+                    color: AppTheme.textFaint; font.pixelSize: AppTheme.fontSmall
+                }
+                AppButton { text: "Back to editor"; visible: page.inspectingRun; onClicked: page.returnToEditor() }
+                AppButton { text: "Map"; flat: true; onClicked: page.minimapOpen = !page.minimapOpen }
+                AppButton { text: "History"; flat: !page.historyOpen; onClicked: page.historyOpen = !page.historyOpen }
             }
         }
 
@@ -754,6 +1150,7 @@ Item {
                             model: GM.CATEGORY_ORDER
                             delegate: Column {
                                 id: catBlock
+                                required property var modelData
                                 readonly property string cat: modelData
                                 readonly property var members: page.nodeTypes.filter(function(s) { return s.category === catBlock.cat })
                                 width: paletteCol.width
@@ -761,7 +1158,7 @@ Item {
                                 spacing: 2
                                 Item { width: 1; height: 8 }
                                 Text {
-                                    text: (GM.CATEGORY_TITLES[cat] || cat).toUpperCase()
+                                    text: (GM.CATEGORY_TITLES[catBlock.cat] || catBlock.cat).toUpperCase()
                                     color: AppTheme.textFaint
                                     font.pixelSize: AppTheme.fontSmall
                                     font.weight: Font.DemiBold
@@ -771,6 +1168,8 @@ Item {
                                 Repeater {
                                     model: catBlock.members
                                     delegate: Rectangle {
+                                        id: paletteNode
+                                        required property var modelData
                                         width: catBlock.width
                                         height: 30
                                         radius: AppTheme.radiusSmall
@@ -781,12 +1180,12 @@ Item {
                                             x: 8
                                             anchors.verticalCenter: parent.verticalCenter
                                             width: 8; height: 8; radius: 2
-                                            color: GM.categoryColor(modelData.category)
+                                            color: GM.categoryColor(paletteNode.modelData.category)
                                         }
                                         Text {
                                             x: 26
                                             anchors.verticalCenter: parent.verticalCenter
-                                            text: modelData.title
+                                            text: paletteNode.modelData.title
                                             color: AppTheme.text
                                             font.pixelSize: AppTheme.fontBody
                                         }
@@ -795,9 +1194,9 @@ Item {
                                         ToolTip.text: modelData.available ? (modelData.description || "") : modelData.reason
                                         MouseArea {
                                             anchors.fill: parent
-                                            enabled: modelData.available && page.workflowId !== ""
+                                            enabled: paletteNode.modelData.available && page.workflowId !== "" && !page.inspectingRun
                                             cursorShape: Qt.PointingHandCursor
-                                            onClicked: page.addFromPalette(modelData)
+                                            onClicked: page.addFromPalette(paletteNode.modelData)
                                         }
                                     }
                                 }
@@ -810,6 +1209,7 @@ Item {
             // ---- canvas ----
             Item {
                 id: viewport
+                objectName: "graphViewport"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
@@ -819,13 +1219,24 @@ Item {
                 Keys.onDeletePressed: page.deleteSelected()
                 Keys.onPressed: function(e) {
                     if (e.key === Qt.Key_Backspace) { page.deleteSelected(); e.accepted = true }
-                    else if (e.key === Qt.Key_Tab && page.workflowId !== "") {
+                    else if (e.key === Qt.Key_Tab && page.workflowId !== "" && !page.inspectingRun) {
                         var c = page.viewCenter()
                         page.openQuickAdd(c.x - 100, c.y - 60)
                         e.accepted = true
                     } else if (e.key === Qt.Key_D && (e.modifiers & Qt.ControlModifier)) { page.duplicateSelected(); e.accepted = true }
+                    else if (e.key === Qt.Key_A && (e.modifiers & Qt.ControlModifier)) { page.setSelection(page.nodeIds); e.accepted = true }
+                    else if (e.key === Qt.Key_C && (e.modifiers & Qt.ControlModifier)) { page.copySelected(); e.accepted = true }
+                    else if (e.key === Qt.Key_V && (e.modifiers & Qt.ControlModifier)) { page.pasteSelected(); e.accepted = true }
+                    else if (e.key === Qt.Key_Z && (e.modifiers & Qt.ControlModifier)) {
+                        if (e.modifiers & Qt.ShiftModifier) page.redoEdit(); else page.undoEdit()
+                        e.accepted = true
+                    }
+                    else if (e.key === Qt.Key_Y && (e.modifiers & Qt.ControlModifier)) { page.redoEdit(); e.accepted = true }
                     else if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter) && (e.modifiers & Qt.ControlModifier)) { page.run(""); e.accepted = true }
-                    else if (e.key === Qt.Key_Escape) { page.selectedId = ""; e.accepted = true }
+                    else if (e.key === Qt.Key_Escape) {
+                        if (page.wireDrag && page.wireBefore) { page.graph = page.wireBefore.graph; page.wireDrag = null; page.wireBefore = null; page.rebuild() }
+                        page.setSelection([]); e.accepted = true
+                    }
                 }
 
                 // dot grid
@@ -858,7 +1269,7 @@ Item {
                     }
                 }
 
-                // pan, deselect, add
+                // Left drag selects a rectangle; middle drag pans the viewport.
                 MouseArea {
                     id: bg
                     anchors.fill: parent
@@ -868,21 +1279,38 @@ Item {
                     property real px: 0
                     property real py: 0
                     property bool moved: false
+                    property bool panning: false
+                    property var baseSelection: []
                     onPressed: function(m) {
                         sx = m.x; sy = m.y; px = page.panX; py = page.panY; moved = false
+                        panning = m.button === Qt.MiddleButton
+                        baseSelection = m.modifiers & (Qt.ControlModifier | Qt.ShiftModifier) ? page.selectedIds.slice() : []
+                        if (!panning) page.marquee = { x: sx, y: sy, w: 0, h: 0 }
                         viewport.forceActiveFocus()
                     }
                     onPositionChanged: function(m) {
                         if (!pressed) return
                         if (Math.abs(m.x - sx) + Math.abs(m.y - sy) > 3) moved = true
-                        page.panX = px + m.x - sx
-                        page.panY = py + m.y - sy
-                        cursorShape = Qt.ClosedHandCursor
+                        if (panning) {
+                            page.panX = px + m.x - sx; page.panY = py + m.y - sy
+                            cursorShape = Qt.ClosedHandCursor
+                        } else {
+                            page.marquee = { x: Math.min(sx, m.x), y: Math.min(sy, m.y), w: Math.abs(m.x - sx), h: Math.abs(m.y - sy) }
+                            var r = page.marquee
+                            var hits = GM.selectionInRect(page.canvasGraph(), page.specs,
+                                { x: (r.x - page.panX) / page.zoom, y: (r.y - page.panY) / page.zoom, w: r.w / page.zoom, h: r.h / page.zoom }, page.nodeSizes)
+                            page.setSelection(baseSelection.concat(hits.filter(function(id) { return baseSelection.indexOf(id) < 0 })))
+                        }
                     }
-                    onReleased: { cursorShape = Qt.ArrowCursor; if (moved) page.saveState = page.saveState === "" ? "" : "dirty" }
-                    onClicked: if (!moved) page.selectedId = ""
+                    onReleased: {
+                        cursorShape = Qt.ArrowCursor
+                        if (panning && moved) page.saveViewport()
+                        else if (!panning && !moved) page.setSelection(baseSelection)
+                        page.marquee = null
+                    }
+                    onCanceled: page.marquee = null
                     onDoubleClicked: function(m) {
-                        if (page.workflowId === "") return
+                        if (page.workflowId === "" || page.inspectingRun) return
                         var p = bg.mapToItem(world, m.x, m.y)
                         page.openQuickAdd(p.x, p.y)
                     }
@@ -907,9 +1335,56 @@ Item {
                     height: 1
 
                     Repeater {
+                        model: { page.graphRev; return GM.list(page.canvasGraph().groups) }
+                        delegate: Rectangle {
+                            id: frame
+                            required property var modelData
+                            required property int index
+                            readonly property int groupIndex: index
+                            readonly property var bounds: page.frameBounds(modelData)
+                            x: bounds ? bounds.x : 0; y: bounds ? bounds.y : 0
+                            width: bounds ? bounds.w : 0; height: bounds ? bounds.h : 0
+                            visible: bounds !== null
+                            z: -1
+                            radius: 8
+                            color: Qt.alpha(modelData.color || "#6aa8e0", 0.06)
+                            border.color: Qt.alpha(modelData.color || "#6aa8e0", 0.5)
+                            border.width: 1
+                            Rectangle {
+                                width: parent.width; height: frame.bounds ? frame.bounds.titleHeight : 32
+                                color: Qt.alpha(frame.modelData.color || "#6aa8e0", 0.14)
+                                Text {
+                                    x: 12; y: 7; width: parent.width - 70
+                                    text: frame.modelData.title; color: AppTheme.text; font.pixelSize: AppTheme.fontBody; elide: Text.ElideRight
+                                }
+                                Text {
+                                    x: 12; y: 30; width: parent.width - 24; height: 38
+                                    visible: !!frame.modelData.note; text: frame.modelData.note || ""
+                                    color: AppTheme.textDim; font.pixelSize: AppTheme.fontSmall; wrapMode: Text.Wrap; elide: Text.ElideRight
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                    onPressed: function(m) {
+                                        if (m.button === Qt.RightButton) { frameMenu.groupIndex = frame.groupIndex; frameMenu.popup(); return }
+                                        page.setSelection(frame.modelData.nodes)
+                                        viewport.forceActiveFocus()
+                                        if (!page.inspectingRun) page.startMove(mapToItem(world, m.x, m.y))
+                                    }
+                                    onPositionChanged: function(m) { if (pressed) page.moveNodes(mapToItem(world, m.x, m.y)) }
+                                    onReleased: page.endMove(false)
+                                    onCanceled: page.endMove(true)
+                                    onDoubleClicked: page.editFrame(frame.groupIndex)
+                                }
+                            }
+                        }
+                    }
+
+                    Repeater {
                         model: page.edgeList
                         delegate: Shape {
                             id: wire
+                            required property var modelData
                             readonly property var pts: page.edgePoints(modelData)
                             visible: pts !== null
                             opacity: page.edgeDim(modelData) ? 0.35 : 0.95
@@ -940,14 +1415,32 @@ Item {
                     }
 
                     Repeater {
-                        model: page.nodeIds
+                        model: page.nodeCards
                         delegate: GraphNode {
-                            node: page.nodeById[modelData]
-                            spec: page.specs[page.nodeById[modelData].type]
+                            required property var modelData
+                            objectName: "graphNode_" + modelData.node.id
+                            // Repeater roles are QVariant copies. Read live
+                            // nodes from the map; the role is a teardown fallback.
+                            node: page.nodeById[modelData.node.id] || modelData.node
+                            spec: page.specs[modelData.node.type] || modelData.spec
                             host: page
-                            selected: page.selectedId === modelData
+                            selected: page.isSelected(modelData.node.id)
                         }
                     }
+                }
+
+                Rectangle {
+                    visible: page.marquee !== null
+                    x: page.marquee ? page.marquee.x : 0; y: page.marquee ? page.marquee.y : 0
+                    width: page.marquee ? page.marquee.w : 0; height: page.marquee ? page.marquee.h : 0
+                    color: Qt.alpha(AppTheme.accent, 0.12); border.color: AppTheme.accentHi; z: 200
+                }
+                GraphMinimap {
+                    visible: page.minimapOpen && page.nodeIds.length > 0
+                    anchors.right: parent.right; anchors.top: parent.top
+                    anchors.margins: 12
+                    host: page
+                    viewportWidth: viewport.width; viewportHeight: viewport.height
                 }
 
                 // ---- empty state ----
@@ -981,6 +1474,8 @@ Item {
                         Repeater {
                             model: GM.templateList()
                             delegate: AppButton {
+                                required property var modelData
+                                required property int index
                                 text: modelData.title
                                 primary: index === 0
                                 onClicked: page.createFromTemplate(modelData.id)
@@ -1017,7 +1512,7 @@ Item {
                     anchors.bottom: parent.bottom
                     anchors.leftMargin: 14
                     anchors.bottomMargin: 54
-                    text: "Scroll to zoom · drag to pan · double-click or Tab to add a node · drag from a socket to connect"
+                    text: "Scroll to zoom · middle drag to pan · double-click or Tab to add · drag a socket to connect"
                     color: AppTheme.textFaint
                     font.pixelSize: AppTheme.fontSmall
                 }
@@ -1045,6 +1540,19 @@ Item {
                     MouseArea { anchors.fill: parent; enabled: page.runError !== ""; onClicked: page.runError = "" }
                 }
             }
+
+            RunHistoryPanel {
+                visible: page.historyOpen
+                Layout.preferredWidth: 300
+                Layout.fillHeight: true
+                api: page.api
+                events: page.events
+                workflowId: page.workflowId
+                onInspectRun: function(run) { page.inspectRun(run) }
+                onRestoreRun: function(run) { page.restoreRun(run) }
+                onUseImage: function(fileUrl) { page.useImage(fileUrl) }
+                onCompareImage: function(fileUrl) { page.compareImage(fileUrl) }
+            }
         }
     }
 
@@ -1055,10 +1563,152 @@ Item {
 
     Menu {
         id: nodeMenu
-        MenuItem { text: "Run to here"; enabled: !page.running && page.canRunTo(page.selectedId); onTriggered: page.run(page.selectedId) }
-        MenuItem { text: "Duplicate"; onTriggered: page.duplicateSelected() }
+        MenuItem { text: "Run to here"; enabled: !page.inspectingRun && page.canRunTo(page.selectedId); onTriggered: page.run(page.selectedId) }
+        MenuItem { text: "Paint mask…"; enabled: !page.inspectingRun && !!page.nodeById[page.selectedId] && page.nodeById[page.selectedId].type === "image.load"; onTriggered: page.paintMask() }
+        MenuItem { text: "Select connected section"; onTriggered: page.selectConnected() }
+        MenuItem { text: "Copy"; onTriggered: page.copySelected() }
+        MenuItem { text: "Paste"; enabled: !page.inspectingRun; onTriggered: page.pasteSelected() }
+        MenuItem { text: "Duplicate"; enabled: !page.inspectingRun; onTriggered: page.duplicateSelected() }
+        MenuItem { text: "Collapse / expand"; enabled: !page.inspectingRun; onTriggered: page.toggleCollapse(page.selectedIds) }
+        MenuItem { text: "Frame selection / add note…"; enabled: !page.inspectingRun; onTriggered: page.editFrame(-1) }
         MenuSeparator {}
-        MenuItem { text: "Delete"; onTriggered: page.deleteSelected() }
+        MenuItem { text: "Delete"; enabled: !page.inspectingRun; onTriggered: page.deleteSelected() }
+    }
+    Menu {
+        id: selectionMenu
+        MenuItem { text: "Select connected section"; onTriggered: page.selectConnected() }
+        MenuItem { text: "Copy (Ctrl+C)"; onTriggered: page.copySelected() }
+        MenuItem { text: "Duplicate (Ctrl+D)"; enabled: !page.inspectingRun; onTriggered: page.duplicateSelected() }
+        MenuItem { text: "Frame selection / add note…"; enabled: !page.inspectingRun; onTriggered: page.editFrame(-1) }
+        MenuItem { text: "Collapse / expand"; enabled: !page.inspectingRun; onTriggered: page.toggleCollapse(page.selectedIds) }
+        MenuSeparator {}
+        Repeater {
+            model: ["left", "top", "right", "bottom"]
+            delegate: MenuItem {
+                required property var modelData
+                text: "Align " + modelData
+                enabled: page.selectedIds.length > 1 && !page.inspectingRun
+                onTriggered: page.alignSelected(modelData)
+            }
+        }
+        MenuItem { text: "Delete selection"; enabled: !page.inspectingRun; onTriggered: page.deleteSelected() }
+    }
+    Menu {
+        id: frameMenu
+        property int groupIndex: -1
+        MenuItem { text: "Edit frame / note…"; enabled: !page.inspectingRun; onTriggered: page.editFrame(frameMenu.groupIndex) }
+        MenuItem { text: "Collapse / expand members"; enabled: !page.inspectingRun; onTriggered: page.toggleCollapse(page.graph.groups[frameMenu.groupIndex].nodes) }
+        MenuItem { text: "Remove frame"; enabled: !page.inspectingRun; onTriggered: page.removeFrame(frameMenu.groupIndex) }
+    }
+    Dialog {
+        id: frameDialog
+        property int groupIndex: -1
+        title: groupIndex < 0 ? "Frame selection" : "Edit frame"
+        modal: true
+        anchors.centerIn: parent
+        width: 380
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        onAccepted: page.saveFrame(groupIndex, frameText.text, frameNote.text)
+        ColumnLayout {
+            width: parent.width
+            AppTextField { id: frameText; Layout.fillWidth: true; placeholderText: "Frame title" }
+            TextArea {
+                id: frameNote
+                Layout.fillWidth: true; Layout.preferredHeight: 110
+                placeholderText: "Notes about this section"
+                wrapMode: TextEdit.Wrap; selectByMouse: true
+                color: AppTheme.text
+            }
+        }
+    }
+
+    TextEdit { id: clipboard; visible: false }
+    ImageViewer {
+        id: imageViewer
+        objectName: "graphImageViewer"
+        comparisonSource: page.comparisonSource
+    }
+    Loader {
+        id: maskLoader
+        objectName: "graphMaskLoader"
+        active: false
+        source: "../components/graph/MaskEditor.qml"
+        property string imageNodeId: ""
+        property string imageSource: ""
+        property string targetWorkflowId: ""
+        onLoaded: {
+            var editor = item as MaskEditor
+            editor.api = page.api
+            editor.source = imageSource
+            editor.maskCreated.connect(function(path) {
+                if (maskLoader.targetWorkflowId === page.workflowId) page.addPaintedMask(maskLoader.imageNodeId, path)
+            })
+            editor.open()
+        }
+    }
+    function paintMask() {
+        var n = nodeById[selectedId], sp = n && specs[n.type]
+        if (!n || n.type !== "image.load" || inspectingRun) return
+        var pathParam = GM.list(sp.params).filter(function(p) { return p.kind === "path" })[0]
+        var path = pathParam ? getParam(n, pathParam) : ""
+        if (!path) { hintText = "Choose an input image before painting a mask"; hintTimer.restart(); return }
+        maskLoader.active = false
+        maskLoader.imageNodeId = n.id; maskLoader.targetWorkflowId = workflowId
+        maskLoader.imageSource = GM.localPathToFileUrl(path)
+        maskLoader.active = true
+    }
+    function addPaintedMask(imageId, path) {
+        if (inspectingRun || !specs["mask.load"] || !nodeById[imageId]) return
+        var before = snapshot(), image = nodeById[imageId], params = {}
+        var ps = GM.list(specs["mask.load"].params).filter(function(p) { return p.kind === "path" })[0]
+        if (!ps) return
+        params[ps.name] = path
+        var mask = GM.addNode(graph, specs["mask.load"], image.pos[0], image.pos[1] + 260, params)
+        var targets = graph.edges.filter(function(e) { return e.from[0] === imageId && e.to[1] === "start" })
+        targets.forEach(function(e) {
+            var target = GM.findNode(graph, e.to[0])
+            var from = { node: mask.id, port: "mask" }, to = { node: e.to[0], port: "mask" }
+            if (target && target.type === "sample" && GM.connectError(graph, specs, from, to) === "") GM.connect(graph, from, to)
+        })
+        setSelection([mask.id]); touch(true); commitEdit(before, "Add painted mask")
+    }
+
+    FileDialog {
+        id: importDialog
+        title: "Import workflow JSON"
+        fileMode: FileDialog.OpenFile
+        nameFilters: ["Workflow JSON (*.json)"]
+        onAccepted: page.importWorkflow(GM.fileUrlToLocalPath(selectedFile.toString()))
+    }
+    FileDialog {
+        id: exportDialog
+        property string workflowId: ""
+        title: "Export workflow JSON"
+        fileMode: FileDialog.SaveFile
+        defaultSuffix: "json"
+        nameFilters: ["Workflow JSON (*.json)"]
+        onAccepted: {
+            if (workflowId !== page.workflowId || page.inspectingRun) return
+            page.exportWorkflow(GM.fileUrlToLocalPath(selectedFile.toString()))
+        }
+    }
+    function importWorkflow(path) {
+        api.post("/api/v1/workflows/import", { path: path }, function(st, data) {
+            if ((st === 200 || st === 201) && data && data.id) {
+                page.loadWorkflows(""); page.openWorkflow(data.id)
+            } else { page.hintText = (data && (data.detail || data.error)) || "Could not import workflow JSON"; hintTimer.restart() }
+        })
+    }
+    function exportWorkflow(path) {
+        var id = workflowId
+        autosave.stop()
+        save(function(ok, data) {
+            if (!ok) { page.hintText = "Save failed; could not export workflow"; hintTimer.restart(); return }
+            page.api.post("/api/v1/workflows/" + id + "/export", { path: path }, function(st, result) {
+                page.hintText = st === 200 ? "Workflow exported" : (result && (result.detail || result.error)) || "Could not export workflow JSON"
+                hintTimer.restart()
+            })
+        })
     }
 
     ConfirmDialog {
@@ -1083,7 +1733,7 @@ Item {
         var n = nodeById[nodeId]
         fileDialog.nodeId = nodeId
         fileDialog.paramName = paramName
-        if (n && n.type === "image.load") {
+        if (n && (n.type === "image.load" || n.type === "mask.load")) {
             fileDialog.title = "Choose an input image"
             fileDialog.nameFilters = ["Images (*.png *.jpg *.jpeg *.gif)", "All files (*)"]
         } else {
