@@ -167,6 +167,32 @@ func TestScanRecordedGGUFModelOfUnknownArchitectureIsADiffusionModel(t *testing.
 	}
 }
 
+// Text-encoder names (qwen3-vl, qwen2.5, mistral) are also the names of
+// ordinary chat models: only a generator repo or name makes them components.
+func TestScanLLMNamedGGUFIsAChatModelOutsideGenerators(t *testing.T) {
+	cases := []struct {
+		repo, file string
+		want       bool
+	}{
+		{"unsloth--Qwen3-VL-8B-Instruct-GGUF", "Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf", true},
+		{"bartowski--Qwen2.5-7B-Instruct-GGUF", "Qwen2.5-7B-Instruct-Q4_K_M.gguf", true},
+		{"bartowski--Mistral-7B-Instruct-v0.3-GGUF", "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf", true},
+		{"abenzerps--Qwen-Image-2.1-GGUF", "Qwen2.5-VL-7B-Instruct-Q8_0.gguf", false},
+		{"acme--encoders", "qwen3vl_32b_minimax_h3-Q4_K_M.gguf", false},
+	}
+	for _, c := range cases {
+		lib := testLibrary(t)
+		dir := filepath.Join(lib.managed, c.repo, "g")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		file := writeTestGGUF(t, dir, c.file, "Model")
+		if got := registered(t, lib, file) != nil; got != c.want {
+			t.Errorf("%s/%s: in library = %v, want %v", c.repo, c.file, got, c.want)
+		}
+	}
+}
+
 func TestSchemaVersionForcesRescanOfExistingDownloads(t *testing.T) {
 	lib := testLibrary(t)
 	file := filepath.Join(lib.managed, "Comfy-Org--MiniMax-H3", "g", "model_bf16.safetensors")

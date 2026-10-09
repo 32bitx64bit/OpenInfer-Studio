@@ -390,7 +390,16 @@ func isDiffusionRepoComponent(path string) bool {
 		}
 	}
 	base := strings.ToLower(filepath.Base(path))
-	return sdmodel.ComponentRole(base, nil) != "" && sdmodel.ComponentRole(base, nil) != sdmodel.RoleLoRA
+	switch sdmodel.ComponentRole(base, nil) {
+	case "", sdmodel.RoleLoRA:
+		return false
+	case sdmodel.RoleLLM:
+		// An LLM-named GGUF (Qwen2.5 / Qwen3-VL, Mistral, …) is a chat model
+		// in its own right; it is a text encoder only when the name or repo
+		// folder says the download is a generator.
+		return isUnambiguousDiffusionName(path)
+	}
+	return true
 }
 
 // isPipelineComponentFile reports whether an on-disk weight currently
